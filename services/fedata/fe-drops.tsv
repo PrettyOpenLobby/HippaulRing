@@ -1,0 +1,82 @@
+# fe-drops.tsv -- MONSTER DROPS (OURS, 2026-09-12). SE never shipped a drop table
+# (fet_npc_type has no drop column; the image and dat.pak name none), so every row
+# here is sourced from the 2006 fewiki `Monster` page (RoD, 2006-04/05) or its Quest /
+# Consumables pages, mapped to item ids (fe-fet-items.tsv) and fet monster names.
+#
+# family  = an fnmatch pattern on the monster's fet name (m["name"]): Goblin_Novice,
+#           *Orc*, Harpy* ... the wiki's levels do not match fet's, so key by family.
+# lv_min / lv_max = the monster's fet level band (0..999 = any).
+# sex     = M / F / - : armour rows exist once per sex (model_m or model_f only);
+#           the roll only offers the killer's own. Checked against the item table at
+#           load -- a row naming an item the client does not have is REFUSED (a null
+#           item record is the known client crash).
+# rate_ppm = an independent roll per row, parts per million. The rates are CHOSEN --
+#           no 2006 rate survives. Operator 2026-09-12: "Agree with your drop rate
+#           suggestions": common 250000 (25%), uncommon 100000 (10%), rare 5000 (0.5%).
+#           The wiki's bold ("rare") items are the rare rows. One item per kill: the
+#           RAREST row that hit wins.
+family	lv_min	lv_max	item_no	sex	rate_ppm	source
+Venomous	0	999	10	-	250000	fewiki Monster 2006: Venomus (apple)
+Venomous	0	999	9	-	250000	fewiki Monster 2006: Venomus (meat)
+Venomous	0	999	18	-	250000	fewiki Monster 2006: Venomus (light regenerate)
+Venomous	0	6	532	-	100000	fewiki Monster 2006: Venomus Lv4 (wand)
+Venomous	0	6	432	-	100000	fewiki Monster 2006: Venomus Lv4 (shift dagger)
+Venomous	0	6	857	F	100000	fewiki Monster 2006: Venomus Lv4 (thief's gauntlet, F)
+Venomous	0	6	1386	M	100000	fewiki Monster 2006: Venomus Lv4 (thief's gauntlet, M)
+Great_Venomous	0	999	9	-	250000	fewiki Monster 2006: Great Venomus (meat)
+Great_Venomous	0	999	10	-	250000	fewiki Monster 2006: Great Venomus (apple)
+Gobs_Venomous	0	999	9	-	250000	fewiki Monster 2006: Gobs Venomus (meat)
+Gobs_Venomous	0	999	10	-	250000	fewiki Monster 2006: Gobs Venomus (apple)
+Gobs_Venomous	0	999	18	-	250000	fewiki Monster 2006: Gobs Venomus (light regenerate)
+Gobs_Venomous	0	999	667	F	100000	fewiki Monster 2006: Gobs Venomus Lv6 (chain mail, F)
+Gobs_Venomous	0	999	1178	M	100000	fewiki Monster 2006: Gobs Venomus Lv6 (chain mail, M)
+Gobs_Venomous	0	999	1541	M	100000	fewiki Monster 2006: Gobs Venomus Lv7 (caster shoes, M)
+Goblin_Novice	0	999	9	-	250000	fewiki Monster 2006: Goblin Novice (meat)
+Goblin_Novice	0	999	18	-	250000	fewiki Monster 2006: Goblin Novice (light regenerate)
+Goblin_Novice	0	999	10	-	250000	fewiki Monster 2006: Goblin Novice (apple)
+Goblin_Novice	0	999	1836	-	100000	fewiki Monster 2006: Goblin Novice (Goblin Book -- the quest item)
+Goblin_Novice	0	999	532	-	100000	fewiki Monster 2006: Goblin Novice Lv11 (wand)
+Goblin_Novice	0	999	432	-	100000	fewiki Monster 2006: Goblin Novice Lv11 (shift dagger)
+Goblin_Thief	0	999	1836	-	100000	fewiki Monster 2006: Goblin Thief (Goblin Book)
+Goblin_Thief	0	999	4	-	250000	fewiki Monster 2006: Goblin Thief (bread)
+Goblin_Thief	0	999	18	-	250000	fewiki Monster 2006: Goblin Thief (light regenerate)
+Goblin_Guard	0	999	1836	-	100000	fewiki Monster 2006: Goblin Guard (Goblin Book)
+Goblin_Guard	0	999	4	-	250000	fewiki Monster 2006: Goblin Guard (bread)
+Goblin_Guard	0	999	18	-	250000	fewiki Monster 2006: Goblin Guard (light regenerate)
+Goblin_Guard	0	999	432	-	100000	fewiki Monster 2006: Goblin Guard (shift dagger)
+Goblin_Guard	0	999	309	-	100000	fewiki Monster 2006: Goblin Guard Lv13 (decorated axe)
+Goblin_Mage	0	999	1836	-	100000	fewiki Monster 2006: Goblin Mage (Goblin Book)
+Goblin_Mage	0	999	18	-	250000	fewiki Monster 2006: Goblin Mage (light regenerate)
+Goblin_Captain	0	999	1836	-	100000	fewiki Monster 2006: Goblin Captain (Goblin Book)
+Goblin_Captain	0	999	17	-	250000	fewiki Monster 2006: Goblin Captain (regenerate)
+Goblin_Captain	0	999	309	-	100000	fewiki Monster 2006: Goblin Captain Lv13 (decorated axe)
+Goblin_Tamer	0	999	1836	-	100000	fewiki Monster 2006: Goblin Tamer (Goblin Book)
+Goblin_Tamer	0	999	10	-	250000	fewiki Monster 2006: Goblin Tamer (apple)
+Goblin_Tamer	0	999	532	-	100000	fewiki Monster 2006: Goblin Tamer (wand)
+Gobs_Jackal	0	999	21	-	250000	fewiki Monster 2006: Gobs Jackal (light power pot)
+Dryad	0	999	21	-	250000	fewiki Monster 2006: Dryad (light power pot)
+Dryad	0	999	10	-	250000	fewiki Monster 2006: Dryad (apple)
+Oread	0	999	10	-	250000	fewiki Monster 2006: Oread (apple)
+Oread	0	999	21	-	250000	fewiki Monster 2006: Oread (light power pot)
+Oread	0	999	18	-	250000	fewiki Monster 2006: Oread (light regenerate)
+Oread	0	999	386	-	5000	fewiki Monster 2006: Oread RARE (bardiche)
+Harpy*	0	999	20	-	250000	fewiki Monster 2006: Harpy (power pot)
+Harpy*	0	999	6	-	250000	fewiki Monster 2006: Harpy (bacon)
+Harpy*	0	999	7	-	100000	fewiki Quest 2006: cheese from "harpy-like things and Orcs"
+*Orc*	0	999	7	-	250000	fewiki Consumables 2006: cheese -- "Orcs drop it often"
+*Orc*	0	999	6	-	250000	fewiki Monster 2006 / ffsky: Orc (bacon)
+Count_Orc	0	999	32	-	250000	fewiki Monster 2006: Count Orc (meat pie)
+Marquis_Orc	0	999	32	-	250000	fewiki Monster 2006: Marquis Orc (meat pie)
+Marquis_Orc	0	999	18	-	250000	fewiki Monster 2006: Marquis Orc (light regenerate)
+Marquis_Orc	0	999	1175	F	5000	fewiki Monster 2006: Marquis Orc RARE (maiden skirt, F)
+Baron_Orc	0	999	1349	M	5000	fewiki Monster 2006: Baron Orc RARE (heroic tasset, M)
+Baron_Orc	0	999	849	F	5000	fewiki Monster 2006: Baron Orc RARE (heroic tasset, F)
+Baron_Orc	0	999	1343	M	5000	fewiki Monster 2006: Baron Orc RARE (heroic boots, M)
+Baron_Orc	0	999	843	F	5000	fewiki Monster 2006: Baron Orc RARE (heroic boots, F)
+Bone_Soldier	0	999	6	-	250000	fewiki Monster 2006: Bone Soldier (bacon)
+Griffon	0	999	6	-	250000	fewiki Monster 2006: Griffon (bacon)
+Griffon	0	999	32	-	250000	fewiki Monster 2006: Griffon (meat pie)
+Griffon	0	999	576	-	5000	fewiki Monster 2006: Griffon RARE (magical broom)
+King_Griffon	0	999	6	-	250000	fewiki Monster 2006: King Griffon (bacon)
+King_Griffon	0	999	32	-	250000	fewiki Monster 2006: King Griffon (meat pie)
+King_Griffon	0	999	576	-	5000	fewiki Monster 2006: King Griffon RARE (magical broom)

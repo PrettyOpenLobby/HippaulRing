@@ -1,0 +1,121 @@
+#	FE continent names, English.
+#
+#	WARNING: THESE ARE OUR TRANSLATIONS, NOT SE's. dat.pak ships all 95 area names in
+#	Japanese (fet_area, the `name_jp` column of fe-fet-area.tsv) and ships no
+#	English anywhere -- the dat.pak string harvest finds only 7 of the 95 and
+#	pairs them with the wrong English, so there is nothing to recover. Each row
+#	below romanises the proper noun and translates the geographic suffix.
+#
+#	What this replaces: five invented names hardcoded in docker-compose
+#	("Ruined Plain", "Old Bridge", "North Pass", "River Ford", "Broken Gate")
+#	covering fields 1..5, and nothing at all for the other 90.
+#
+#	The suffixes, so a correction stays consistent with the rest:
+#	  渓流 Ravine   渓谷 Valley    山麓 Foothills   山脈 Mountains
+#	  高地 Highlands 高原 Uplands  台地 Plateau     盆地 Basin
+#	  平原 Plains   草原 Grasslands 緑地 Greenwood  荒地 Wastes
+#	  雪原 Snowfield 湿原 Marsh    島 Isle          半島 Peninsula
+#	  海峡 Strait   河口 Estuary   水源 Springs     水域 Waters
+#	  上流域 Upper Reaches         隕石跡 Meteor Crater
+#	  遺跡 Ruins    古戦場跡 Battlefield            街道 Road
+#	  丘陵 Hills    大地 Land      の地 Land of
+#
+#	Areas 91..95 are the second halves of the five capitals and carry the same
+#	name as 21/39/57/62/78, which is what dat.pak does too.
+#
+area_id	name_en
+1	Ardlat Ravine
+2	Hannahanna Isle
+3	Rogrove Plateau
+4	Corant Plains
+5	Land of Beginnings
+6	Schelln Greenwood
+7	Nicona Road
+8	Elgil Highlands
+9	Peschan Upper Reaches
+10	Selbern Highlands
+11	Noim Grasslands
+12	Capella Meteor Crater
+13	Rockshank Foothills
+14	Nephtal Snowfield
+15	Dagger Isle
+16	Ravenhoard Isle
+17	Fevue Snowfield
+18	St. Elde Foothills
+19	Ademgan Peninsula
+20	Berta Plains
+21	Beinwatt
+22	Philadea Basin
+23	Serpent Valley
+24	Tilket Grasslands
+25	Hawkwind Highlands
+26	Telcanon Ruins
+27	Kinkash Battlefield
+28	Wardnoll Plains
+29	Knola Snowfield
+30	Scylla Strait
+31	Warlock Battlefield
+32	Moluan Isle
+33	Irvine Road
+34	Jacol Hills
+35	Lakepath Wastes
+36	St. Walk Highlands
+37	Cudray Foothills
+38	Ribble Valley
+39	Azurwood
+40	Claudia Springs
+41	Anor Highlands
+42	Siena Hills
+43	Nobsock Plateau
+44	Soldad Ruins
+45	Brizard Marsh
+46	Rood Snowfield
+47	Erica Isle
+48	Granfork Estuary
+49	Drangola Wastes
+50	Broden Battlefield
+51	Ivory Road
+52	Melma Basin
+53	Senobia Wastes
+54	Abel Valley
+55	Galuon Springs
+56	Winesh Valley
+57	Liberberg
+58	Goblin Fork
+59	Rudan Snowfield
+60	Amberstep Plains
+61	Shepes Highlands
+62	Nutsberry
+63	Logmar Battlefield
+64	Land of Wagnos
+65	Sidit Waters
+66	Asiloma Foothills
+67	Spica Meteor Crater
+68	Thorn Plains
+69	Gavacent Isle
+70	Klaus Mountains
+71	Meltnoa Ruins
+72	Shua Isle Battlefield
+73	Haidern Uplands
+74	Wednesday Battlefield
+75	St. Luidea Foothills
+76	Fuga Isle
+77	Okoral Ruins
+78	Runewall
+79	Shivarg Ruins
+80	Rosario Highlands
+81	Arcturus Meteor Crater
+82	Nashblitz Valley
+83	Kudan Hills
+84	Rhinelay Valley
+85	Despair Foothills
+86	Heimdal Wastes
+87	Obsidian Wastes
+88	Frostia Mountains
+89	Rossi Snowfield
+90	Tamaraia Springs
+91	Beinwatt
+92	Azurwood
+93	Liberberg
+94	Nutsberry
+95	Runewall

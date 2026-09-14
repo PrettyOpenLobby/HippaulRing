@@ -1,0 +1,76 @@
+# Fantasy Earth game services. Requires the core lobby stack (openlobby)
+# running on the same Docker host: this compose joins its data volume for the
+# shared account/session database.
+#
+#   1. python tools/gen_blowfish_tables.py     (once)
+#   2. python tools/fedata_build.py --client <your FE install>   (once)
+#   3. docker compose up -d --build
+#
+# FE_ADVERTISE must be the address game clients reach this host on
+# (empty = 127.0.0.1, same-machine testing only).
+
+# fellb owns the image build; the other services consume it with
+# pull_policy: never so parallel builds cannot race on the tag.
+x-app: &app
+  image: crystalring:latest
+  pull_policy: never
+  restart: unless-stopped
+  environment:
+    POL_ADVERTISE: "${FE_ADVERTISE:-}"
+  volumes:
+    - pol-data:/data
+
+volumes:
+  pol-data:
+    external: true
+    name: openlobby_pol-data
+
+services:
+  # The lobby balancer: one request, one reply naming the lobby's address.
+  fellb:
+    <<: *app
+    build: ./services
+    pull_policy: build
+    environment:
+      POL_ADVERTISE: "${FE_ADVERTISE:-}"
+      POL_FELLB_IP: "${FE_ADVERTISE:-127.0.0.1}"
+      POL_FELLB_PORT: "54848"
+      POL_FELLB_LOBBY_PORT: "54849"
+    entrypoint: ["python", "fellb.py"]
+    ports:
+      - "54848:54848"
+    healthcheck: &pyhc
+      test: ["CMD", "python", "-c", "import socket;socket.socket().close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  felobby:
+    <<: *app
+    # serving mode: no capture limit, no lifetime, three character slots
+    entrypoint: ["python", "felobby.py", "--port", "54849", "--captures", "0",
+                 "--life", "0", "--read-window", "300", "--char-slots", "3",
+                 "--world-ip", "${FE_ADVERTISE:-127.0.0.1}", "--world-port", "54850"]
+    ports:
+      - "54849:54849"
+    healthcheck: *pyhc
+
+  feworld:
+    <<: *app
+    # The game rules and the world data are the parser's defaults (see
+    # RELEASE_DEFAULTS in feworld.py); override any of them by giving the
+    # option here. Spawn positions: fedata/fe_spawn.json seeds /data on the
+    # first start; in-game !spawn edits persist in /data afterwards.
+    entrypoint: ["python", "feworld.py"]
+    ports:
+      - "54850:54850"
+    healthcheck: *pyhc
+
+  # Optional: live dominion-map web view (and Discord webhook if configured).
+  femap:
+    <<: *app
+    profiles: ["map"]
+    entrypoint: ["python", "femap.py"]
+    ports:
+      - "127.0.0.1:8797:8797"
+    healthcheck: *pyhc

@@ -31,6 +31,15 @@ cp .env.example .env      # set FE_ADVERTISE to your server's LAN/VPN IP
 docker compose up -d --build
 ```
 
+Without building: the image is published to
+`ghcr.io/prettyopenlobby/crystalring` on every push (it carries the cipher
+tables, so step 1 is not needed); step 2 still runs on the host, and the
+override mounts your `services/fedata/` into the containers:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
 Step 2 writes `services/fedata/` (spawn tables, item and skill parameters,
 map geometry, minimap art). Only two files in that directory ship with the
 repository, because they are original work: `fe-drops.tsv` (a drop table

@@ -143,6 +143,14 @@ import sys
 import threading
 import time
 
+try:
+    # Per-client address (LAN / tailnet / internet-via-edge). See srvcore's
+    # "The address a client is told to dial next" and deploy/edge/README.md.
+    from srvcore import advertise_for
+except ImportError:                     # standalone use outside services/
+    def advertise_for(default, peer_ip=None, dialed_ip=None):
+        return default
+
 PORT = int(os.environ.get("POL_FELLB_PORT", "54848"))
 LOBBY_IP = os.environ.get("POL_FELLB_IP") or os.environ.get("POL_STUB_IP", "127.0.0.1")
 LOBBY_PORT = int(os.environ.get("POL_FELLB_LOBBY_PORT", "54849"))
@@ -216,6 +224,10 @@ def recv_frame(sock):
 def handle(conn, addr):
     log("CONNECT from %s:%d" % addr)
     try:
+        dialed = conn.getsockname()[0]
+    except OSError:
+        dialed = None
+    try:
         conn.settimeout(300)
         while True:
             fr = recv_frame(conn)
@@ -226,13 +238,16 @@ def handle(conn, addr):
                                                payload.hex() or "(none)"))
 
             if mid == MSG_LLB_LOGIN_REQ:
-                pkt = build_login_ok(LOBBY_IP, LOBBY_PORT)
+                # LOBBY_IP is the box-wide default; THIS client may only be able
+                # to reach another of our addresses (LAN console, edge player).
+                lobby_ip = advertise_for(LOBBY_IP, addr[0], dialed)
+                pkt = build_login_ok(lobby_ip, LOBBY_PORT)
                 conn.sendall(pkt)
                 log("  -> MSG_LLB_LOGIN_OK id=0x%04X lobby=%s:%d  %s"
-                    % (MSG_LLB_LOGIN_OK, LOBBY_IP, LOBBY_PORT, pkt.hex()))
+                    % (MSG_LLB_LOGIN_OK, lobby_ip, LOBBY_PORT, pkt.hex()))
                 log("     expect FE to log: > MSG_LLB_LOGIN_OK : Lobby= "
                     "ip(%s) port(%d)   -- any other address means the octet "
-                    "order regressed" % (LOBBY_IP, LOBBY_PORT))
+                    "order regressed" % (lobby_ip, LOBBY_PORT))
                 continue
 
             if mid == MSG_KEEPALIVE:

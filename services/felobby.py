@@ -125,6 +125,14 @@ from fenet import (bf_decrypt, bf_encrypt, fold_checksum,  # noqa: E402
                    traffic_wrap, unwrap, wrap, wrap2)
 
 try:
+    # Per-client address (LAN / tailnet / internet-via-edge). See srvcore's
+    # "The address a client is told to dial next" and deploy/edge/README.md.
+    from srvcore import advertise_for  # noqa: E402
+except ImportError:                     # standalone use outside services/
+    def advertise_for(default, peer_ip=None, dialed_ip=None):
+        return default
+
+try:
     # KEY: THE PLAYER DATABASE -- see festore.py for what moved into it and why
     # it is its own file rather than a table in accounts.db. Guarded because a
     # store that will not import must degrade to the JSON file it replaces,
@@ -1393,18 +1401,25 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
             # FE sits on the lobby socket polling 0x0002 for ever.
             print("[felobby]    JOIN_GAME request, selection=%s"
                   % inner[2:].hex(), flush=True)
-            octets = socket.inet_aton(args.world_ip)
+            # --world-ip is the box-wide default; THIS client may only be able
+            # to reach another of our addresses (LAN console, edge player).
+            try:
+                world_ip = advertise_for(args.world_ip, conn.getpeername()[0],
+                                         conn.getsockname()[0])
+            except OSError:
+                world_ip = args.world_ip
+            octets = socket.inet_aton(world_ip)
             body = inner_msg(0x7821, octets[::-1]
                              + struct.pack(">H", args.world_port)
                              + struct.pack(">I", args.world_code))
             send_frame(conn, 0x30,
                        bf_encrypt(outbound, traffic_wrap(body, next_seq()), mode, be))
             print("[felobby] -> 0x30 inner 0x7821 MSG_LOBBY_JOIN_GAME_OK "
-                  "world=%s:%d code=%d" % (args.world_ip, args.world_port,
+                  "world=%s:%d code=%d" % (world_ip, args.world_port,
                                            args.world_code), flush=True)
             print("[felobby]    expect FE to log 'IP(%s):Port(%d)' -- any other "
                   "address means the octet order regressed"
-                  % (args.world_ip, args.world_port), flush=True)
+                  % (world_ip, args.world_port), flush=True)
         elif real_id == 0xC001:
             # THE CHARACTER LIST REQUEST, and the gate the world picker actually
             # waits behind. Sent from the character-select screen at 0x050f8214

@@ -1800,6 +1800,9 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    # A copy of the console in /logs/felobby.log, as feworld keeps one.
+    import filelog
+    filelog.tee("felobby")
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=54849)
     ap.add_argument("--capture", action="store_true",

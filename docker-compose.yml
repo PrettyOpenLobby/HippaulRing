@@ -19,11 +19,15 @@ x-app: &app
     POL_ADVERTISE: "${FE_ADVERTISE:-}"
   volumes:
     - pol-data:/data
+    # fellb.log, felobby.log and feworld.log: kept across container recreates,
+    # which the containers' own docker logs are not.
+    - fe-logs:/logs
 
 volumes:
   pol-data:
     external: true
     name: openlobby_pol-data
+  fe-logs:
 
 services:
   # The lobby balancer: one request, one reply naming the lobby's address.

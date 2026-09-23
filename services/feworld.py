@@ -19109,6 +19109,10 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    # A copy of the console in /logs/feworld.log, which outlives the container
+    # (docker-compose.yml mounts the fe-logs volume there). See filelog.py.
+    import filelog
+    filelog.tee("feworld")
 
     load_extensions()
     ap = argparse.ArgumentParser(description=__doc__,

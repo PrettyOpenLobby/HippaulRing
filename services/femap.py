@@ -155,6 +155,12 @@ def add_args(ap):
                          "(0 = keep them). A restart also deletes whatever the "
                          "last run left. A webhook can only delete ITS OWN "
                          "messages, by id -- it cannot list or clear a channel")
+    ap.add_argument("--map-board-file", default=os.environ.get("FE_MAP_BOARD_FILE", ""),
+                    metavar="PATH",
+                    help="publish the small board snapshot here for the BOARDS "
+                         "container (polboards boardfe), which runs elsewhere and "
+                         "cannot read this process's live world state. Empty = off "
+                         "(env FE_MAP_BOARD_FILE)")
     ap.add_argument("--map-discord-state", default=None, metavar="PATH",
                     help="where the id of the map message is kept, so a "
                          "restart edits the same message instead of posting "
@@ -870,6 +876,50 @@ def _brief(data):
 # ---------------------------------------------------------------------------
 # the watcher thread and the page server
 # ---------------------------------------------------------------------------
+def board_snapshot(snap):
+    """The small part of the map that the BOARDS container needs.
+
+    The dominion map lives here, inside feworld, because it reads live world
+    state (`fw.ext_sessions()`) that only this process has. polboards runs in
+    its own container with /data mounted read-only and cannot call into it, so
+    the map is published as a file instead: this is everything boardfe draws,
+    and nothing else. Deliberately small -- the full snapshot carries 95 fields
+    with per-player names and the whole palette, and none of that belongs in a
+    file rewritten every few seconds.
+    """
+    wars = []
+    for f in snap["fields"]:
+        w = f.get("war")
+        if not w:
+            continue
+        wars.append({"field": f["name"], "attacker": w["attacker"],
+                     "owner": f["owner"], "phase": w.get("phase_name"),
+                     "left_s": w.get("left_s"), "atk": w.get("atk"),
+                     "def": w.get("def")})
+    return {"title": snap["title"], "updated": snap["updated"],
+            "in_world": snap["in_world"],
+            "nations": [{"id": n["id"], "name": n["name"], "fields": n["fields"],
+                         "online": n["online"]} for n in snap["nations"]],
+            "wars": wars}
+
+
+def publish_board(args, snap):
+    """Write board_snapshot atomically. Best-effort: a board that cannot be
+    published must never disturb the world server hosting it."""
+    path = (getattr(args, "map_board_file", "") or "").strip()
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(board_snapshot(snap), fh)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
 def _watch(args, discord, period=5.0):
     last_err = 0.0
     while True:
@@ -877,6 +927,7 @@ def _watch(args, discord, period=5.0):
             snap = snapshot(args)
             with _SNAP_LOCK:
                 _SNAP.update(t=time.time(), snap=snap)
+            publish_board(args, snap)
             new = observe(snap)
             for ev in new:
                 print("[femap] %s" % event_text(args, ev).replace("**", ""),
@@ -969,7 +1020,10 @@ def start(args):
     """feworld's register_start hook: the page, the watcher, the webhook."""
     port = int(getattr(args, "map_port", 0) or 0)
     hook = (getattr(args, "map_discord_webhook", "") or "").strip()
-    if not port and not hook:
+    board = (getattr(args, "map_board_file", "") or "").strip()
+    # the watcher is also what PUBLISHES the board file, so wanting only that
+    # is reason enough to run it
+    if not port and not hook and not board:
         return
     if port:
         serve(args, port, getattr(args, "map_bind", "127.0.0.1"))
@@ -986,6 +1040,8 @@ def start(args):
             print("[femap] Discord webhook set: the map message is %s"
                   % ("message %s, edited in place" % discord.msg_id
                      if discord.msg_id else "posted on the first tick"), flush=True)
+    if board:
+        print("[femap] publishing the board snapshot to %s" % board, flush=True)
     threading.Thread(target=_watch, args=(args, discord), name="fe-map-watch",
                      daemon=True).start()
 

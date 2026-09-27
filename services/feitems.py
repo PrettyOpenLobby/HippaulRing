@@ -91,7 +91,7 @@ nothing, the server PUSHES the state.
         0x0503c2d0: one 0x5045e60 read, OBJ_FIND(id, class 4) -> 0x05019110:
         notice "E24_GetItem" / "E25_GetCrystal" ([tbl+0x1c8]==0x19) through
         0x05019150; a miss logs "GetItem : Object not found" (0x52d47a4).
-  in  0x1024 MSG_ITEM_GATHER_NG  [u32 code]  arm 0x0503a14d (feworld names it;
+  in  0x1024 MSG_ITEM_GATHER_NG  [u16 code]  arm 0x0503a14d (feworld names it;
         codes in the NG table: 2 = no right, 3 = too far, 4 = someone else
         took it).
   MODEL: feworld has NO ground-drop model (nothing spawns class-4 objects the
@@ -284,7 +284,7 @@ PUSH_NAMES = {
     0x112D: "MSG_REPAIR_ITEM_NG [u32 code] (screen 0x050f109e)",
     0x115B: "MSG_GET_REPAIR_ITEM_COST_OK (body UNMEASURED past [u32 uid]; screen 0x050f0f8c)",
     0x1023: "MSG_ITEM_GATHER_OK [u32 objectId] (c0 0x0503c2d0)",
-    0x1024: "MSG_ITEM_GATHER_NG [u32 code]",
+    0x1024: "MSG_ITEM_GATHER_NG [u16 code]",
     0x1150:"MSG_ITEM_EXCHANGE_OK (header-only, logs)",
     0x1151: "MSG_ITEM_EXCHANGE_NG [u32 code]",
     0x1171: "PLAYER ITEM SLOTS window [u32 n] + n x {[u32 uid] ([u16 no][u8 worn][u32 x] if uid)}",

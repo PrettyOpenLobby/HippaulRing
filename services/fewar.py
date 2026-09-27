@@ -599,7 +599,7 @@ def on_build(ctx, inner):
                      btype, model, gx, gz,
                      why="(0x2007 real build; cost %d crystal%s)"
                          % (crystal_cost, ", %d HP (--build-hp)" % hp[0]
-                            if hp[1] else ""), hp=hp or None, age_ms=0)
+                            if hp[1] else ""), hp=hp if hp[1] else None, age_ms=0)
     # this session has it on screen already -- do not let the reconciler send
     # a second 0x1006 for the same object
     if obj is not None:

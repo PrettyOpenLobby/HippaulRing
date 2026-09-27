@@ -2997,6 +2997,16 @@ def _advance(ctx, args, area, now):
                  r["signups"].get("def", 0)), flush=True)
         drive_client(ctx, args, area, WAR, state_of(area)["until"])
     elif r["phase"] == WAR:
+        if getattr(args, "war_decide", "signups") == "manual":
+            # --war-decide manual promises that nothing resolves the war
+            # until `!campaign win`. Time-up and a fallen keep both land
+            # here, so hold the war open and look again in a minute.
+            with _LOCK:
+                _STATE[area]["until"] = now + 60.0
+            print("[fecampaign] area %d: war time is up but --war-decide is "
+                  "manual -- holding it open until `!campaign win`" % area,
+                  flush=True)
+            return
         winner, old, new = decide(args, area)
         settle(args, area, winner, old)
         with _LOCK:

@@ -1,6 +1,6 @@
 """fepvp.py -- Fantasy Earth PLAYER VERSUS PLAYER (2026-09-11).
 
-PARTIAL: BUILT 2026-09-11, NOT LIVE-TESTED, and OFF BY DEFAULT. Harness:
+PARTIAL: BUILT 2026-09-11, NOT LIVE-TESTED. ON by default since 2026-09-11 (--pvp). Harness:
 tools/fe_pvp_test.py.
 
 FE is a nation-vs-nation war game and until now nobody could hit anybody. The
@@ -159,7 +159,7 @@ def _once(key, msg):
 def _on(args):
     if _FORCE[0] is not None:
         return _FORCE[0]
-    return getattr(args, "pvp", "off") == "on"
+    return getattr(args, "pvp", "on") == "on"
 
 
 def _active(args):
@@ -261,7 +261,7 @@ def on_cast(ctx, inner):
         args = ctx.args
         if not _active(args):
             return 0
-        rng = float(getattr(args, "pvp_range", 6.0) or 0.0)
+        rng = float(getattr(args, "pvp_range", 10.0) or 0.0)
         if rng <= 0:
             return 0
         f = inner[2:]

@@ -843,7 +843,7 @@ def summon_building(ctx, bld):
         return None
     k = (s.get("keeps") or {}).get(bld)
     if k is not None:
-        types = fw._pair(getattr(args, "keep_types", None), (4, 16))
+        types = fw._pair(getattr(args, "keep_types", None), (20, 16))
         btype = types[0] if k["side"] == "def" else types[1]
         try:
             grid = (fw.keep_grids(k["area"]) or {}).get(k["side"])

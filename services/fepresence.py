@@ -364,9 +364,9 @@ def add_args(ap):
                          "--distribution-rows (the hand-probe knob) and "
                          "--distribution off both win over this.")
     ap.add_argument("--presence-map-self", default="on", choices=("on", "off"),
-                    help="include the player's OWN row in that answer. Off by "
-                         "default (the client should already know where it "
-                         "is); on is the cheap oracle for whether the two "
+                    help="include the player's OWN row in that answer. On by "
+                         "default; `off` leaves it out (the client already "
+                         "knows where it is). On is the cheap oracle for whether the two "
                          "position bytes are the grid this thinks they are -- "
                          "a dot on top of you means yes.")
     ap.add_argument("--presence-hp", default="on", choices=("on", "off"),
@@ -374,9 +374,8 @@ def add_args(ap):
                          "(mask1 bit 1, bits 1/2 = +0x49A max / +0x49E "
                          "current -- the same applier the self record's "
                          "--add-stats uses). What a PvP damage number "
-                         "subtracts from. OFF until presence itself is "
-                         "proved on a screen; `!presence hp on` flips it live "
-                         "and re-states every peer.")
+                         "subtracts from. On by default; `!presence hp off` "
+                         "flips it live and re-states every peer.")
     ap.add_argument("--presence-gear", default="on", choices=("on", "off"),
                     help="serve a peer's stored WORN gear in the 0x1006 mask3 "
                          "-- otherwise every player is drawn in the default "
@@ -720,10 +719,10 @@ def build_card(args, key):
         _once(("submask", want), "--presence-submask 0x%X has bits with no "
               "packer (0x%X) -- serving 0x%X" % (want, want & ~sub, sub))
     m3, worn = 0, b""
-    if getattr(args, "presence_gear", "off") == "on":
+    if getattr(args, "presence_gear", "on") == "on":
         m3, worn, _desc = fw.worn_gear_block(fw.stored_equip_rows(args))
     hp = None
-    if getattr(args, "presence_hp", "off") == "on":
+    if getattr(args, "presence_hp", "on") == "on":
         hpmax = int(fw.player_hp_max(args))
         hp = (max(0, int(fw._SESSION.get("player_hp", hpmax))), hpmax)
     try:
@@ -1088,7 +1087,7 @@ def visible_peers(s, key, now, args):
     me = threading.get_ident()
     my_cid = int(s.get("charid") or 0)
     limit = int(getattr(args, "monster_base", 400) or 400)
-    stale = float(getattr(args, "presence_stale", 10.0))
+    stale = float(getattr(args, "presence_stale", 45.0))
     best = {}
     for ent in fw.ext_sessions():
         if ent["key"] == me:
@@ -1177,10 +1176,10 @@ def pump(ctx, now=None):
         card, mv, n, _t = want[cid]
         pos = _pos(mv)
         st = seen.get(cid)
-        paced = getattr(args, "presence_interp", "on") == "on"
+        paced = getattr(args, "presence_interp", "off") == "on"
         off = (clock_offset(st, mv, mine)
                if st is not None
-               and getattr(args, "presence_clock", "map") in ("map", "arrival")
+               and getattr(args, "presence_clock", "arrival") in ("map", "arrival")
                else None)
         # WARNING: A PACED TICK MUST RUN WITH NO NEW REPORT -- that is the whole
         # point of it: the peer's last two reports are played out over the
@@ -1311,7 +1310,7 @@ def pump(ctx, now=None):
         # ("mostly running in place", live 2026-09-11). Coalesce until the peer
         # is --presence-move-min away, then send ONE target that clears it.
         moved = _dist(pos, st.get("sent_pos", pos))
-        far = moved >= float(getattr(args, "presence_move_min", 1.5) or 0)
+        far = moved >= float(getattr(args, "presence_move_min", 0.0) or 0)
         settled = (st.get("held") and pos == st.get("pos")
                    and (now - st.get("sent_t", 0)) * 1000.0
                    >= float(getattr(args, "presence_settle_ms", 700.0) or 0))

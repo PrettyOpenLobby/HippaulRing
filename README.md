@@ -70,16 +70,79 @@ These files share the core's `schema_migrations` table, which records a
 migration by its number alone, so CrystalRing numbers its files from 1001 and
 the core keeps 0001 to 0999. Every CrystalRing table starts with `fe_`.
 
-A server set up before PostgreSQL has its characters in `/data/fe.db` and its
-mail in `/data/fe_mail.db`. They are not read any more and have to be imported
-into the database once. The old `fe_characters.json` is not imported
-automatically while an `fe.db` sits beside it, because that JSON file stopped
-being written when `fe.db` took over and would bring back characters as they
-were then. Setting `FE_DB=` (empty) keeps the characters in
-`fe_characters.json` instead of the database.
+The world state the game rewrites while it runs is in the same database
+(`services/festate.py`). Each store is one row of `fe_world_state`, holding
+the document its file used to hold:
 
-The world, campaign, spawn and town files in `/data` (`fe_territory.json`,
-`fe_campaign.json`, `fe_spawn.json`, `fe_town.json`) are unchanged.
+| Row | Was | What it holds |
+| --- | --- | --- |
+| `campaign` | `fe_campaign.json` | the war cycle per area and each nation's record |
+| `territory` | `fe_territory.json` | which nation holds each area |
+| `spawn` | `fe_spawn.json` | arrival points per area (`!spawn`), seeded from `fedata/fe_spawn.json` on the first start |
+| `town` | `fe_town.json` | placed NPCs, buildings and doors (`!npc`, `!build`, `!door`) |
+| `door_arrive` | `fe_door_arrive.json` | where a door puts a player down |
+| `minimap_cal` | `fe_minimap_cal.json` | the minimap calibration anchors |
+| `force` | `fe_force.json` | force rows and the judge policy (`!force`) |
+| `map_discord` | `fe_map_discord.json` | the Discord map message being edited |
+
+`python festate.py list` and `python festate.py show NAME` print them. The
+record of the 0xC007 credential blobs that `tools/fe_blob_verdict.py` reads
+is the `fe_blob_observation` table (it was `fe_blobid.jsonl`).
+
+Each of `--campaign-file`, `--territory-file`, `--spawn-file`, `--town-file`,
+`--force-file` and `--map-discord-state` still takes a path, and then that
+store is kept in the file instead, which is meant for tests and one-off runs.
+An empty value (or `os.devnull`) keeps the store in memory only, and
+`--town-file ""` still turns the town off.
+
+Two things stay outside the database. `--gmcmd-file` (`/data/fe_gmcmd.txt`)
+is the operator's command inbox and stays a file. The small map snapshot for
+the board bot (polboards `boardfe`) is live state: with `--map-board on`
+(env `FE_MAP_BOARD=on`) the world publishes it in Valkey under the key
+`fe:map:board`, behind `POL_KV_PREFIX` (so `pol:fe:map:board` by default),
+every few seconds, and the key expires `FE_MAP_BOARD_TTL` seconds (default 60)
+after the last write. `FE_MAP_BOARD_FILE` still writes the old file as well,
+for a bot that has not moved to the key yet.
+
+## Moving an existing /data
+
+A server set up before PostgreSQL has its characters in `/data/fe.db`, its
+mail in `/data/fe_mail.db` and its world state in JSON files beside them.
+None of them is read any more. Import them once, after the core's own import
+(`tools/db_import.py` in OpenLobby) and before the Fantasy Earth services
+start for the first time. Run them in a container that sees the old volume,
+for example:
+
+```
+docker compose --project-directory ../openlobby -f ../openlobby/docker-compose.yml     -f docker-compose.yml run --rm --no-deps --entrypoint python feworld fedb.py import fe_db /data/fe.db --dry-run
+```
+
+Try each one with `--dry-run` first, which reads everything, writes nothing
+and prints what the real run would do. The order:
+
+1. `python fedb.py import fe_db /data/fe.db` for the characters. A server
+   that never had an `fe.db` imports `fe_characters.json` instead, with
+   `python festore.py --import /data/fe_characters.json`. Do not import that
+   JSON file when an `fe.db` exists: it stopped being written when `fe.db`
+   took over and would bring back characters as they were then, which is
+   why felobby skips its automatic import of it while an `fe.db` sits
+   beside it.
+2. `python fedb.py import fe_mail_db /data/fe_mail.db` for the mail.
+3. `python fedb.py import world /data` for the world state files listed
+   above and `fe_blobid.jsonl`. Run it before feworld first starts, or the
+   spawn row is already seeded from the shipped file and the import needs
+   `--merge`.
+
+Every import opens its source read-only and never writes to it. It runs in
+one transaction, prints what it counted, and lists each row it could not
+carry over and why. It refuses (exit 2) to write into a table that already
+holds rows unless `--merge` is given, and `--merge` adds only the keys that
+are not there yet, keeping the database's version of the rest and listing
+them. A second run finds nothing missing and changes nothing. Mail keeps its
+ids, and new mail is numbered above every id the old server handed out.
+
+Setting `FE_DB=` (empty) keeps the characters in `fe_characters.json` instead
+of the database.
 
 ## The title plugin (the Viewer's profile)
 

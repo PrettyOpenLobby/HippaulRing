@@ -66,7 +66,12 @@ def check(label, cond, detail=""):
 def old_tree(tmp):
     """services/ as it was at PRE_MIGRATION, unpacked under `tmp`."""
     z = os.path.join(tmp, "old.zip")
-    r = subprocess.run(["git", "-C", ROOT, "archive", "--format=zip", "-o", z,
+    # git archive reads its paths relative to the working directory, so it runs
+    # at the top of the work tree: a checkout that holds this repository as a
+    # subfolder (a git subtree) has no services/ of its own at PRE_MIGRATION's root.
+    top = subprocess.run(["git", "-C", ROOT, "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True).stdout.strip() or ROOT
+    r = subprocess.run(["git", "-C", top, "archive", "--format=zip", "-o", z,
                         PRE_MIGRATION, "services"], capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit("git archive %s failed (a shallow clone? run git fetch "

@@ -23,7 +23,6 @@ services/
   fedevtool.py      the world-building web panel (--devtool-port)
   fetitle.py        the title plugin that runs inside the OpenLobby core
 tools/              self-tests (fe_*_test.py), data builders, operator tools
-tools/split/        the generator and map that produced services/world/
 ```
 
 ### The world package
@@ -109,25 +108,22 @@ Inside the package a module reaches another one as `<module>.<name>`
 (`sess._SESSION`, `wire.send(...)`), never with `from .x import name`, so a
 rebinding through the facade is seen everywhere.
 
-### Regenerating the package
+### Changing the package
 
-The package is generated from the flat file. `tools/split/split_feworld.py`
-reads a flat `feworld.py` and `tools/split/split_feworld_map.txt`, which names
-the module for every top-level name, and writes `services/world/` and the
-facade. The same input gives the same output, so a change made to a flat copy
-(for example one ported from another tree) can be split again:
+The package was generated once from the single-file `feworld.py`, in commit
+c94ced3. It is the source now and is edited directly; nothing regenerates
+it. A change written against the single file elsewhere is carried over by
+hand into the module that owns that code today.
 
-```
-git show <commit before the split>:services/feworld.py > /tmp/feworld_flat.py
-# apply the change to /tmp/feworld_flat.py, add any new top-level name to the map
-python tools/split/split_feworld.py --src /tmp/feworld_flat.py \
-    --map tools/split/split_feworld_map.txt \
-    --out services/world --facade services/feworld.py --main-module launch
-```
-
-Run it with `--check` first. The tool refuses to write while a name is
-unmapped, a map entry names nothing, or a module would use another one that
-may be half imported at that moment.
+`feworld.py` stays as the entry point and as the facade described above. It
+forwards only the names in its `_OWNERS` table, which maps every name to the
+module that owns it, so a new top-level name is not reachable as
+`feworld.NAME` (or `fw.NAME` in an extension) until it has a line there.
+Code inside the package does not need one, since it uses `<module>.<name>`.
+An extension, a tool or a test that reads or rebinds the name through the
+facade does, and `tools/facade_rebind_check.py` fails on a rebinding of a
+name the table does not list. A new module is imported at the top of the
+facade and added to `_MODULES`.
 
 ## Running the checks
 

@@ -45,6 +45,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+import festate  # noqa: E402  -- the world state in PostgreSQL
+
 try:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 except ImportError:                                   # pragma: no cover
@@ -155,17 +157,24 @@ def add_args(ap):
                          "(0 = keep them). A restart also deletes whatever the "
                          "last run left. A webhook can only delete ITS OWN "
                          "messages, by id -- it cannot list or clear a channel")
+    ap.add_argument("--map-board", default=os.environ.get("FE_MAP_BOARD", "off"),
+                    choices=("on", "off"),
+                    help="publish the small board snapshot in Valkey (key "
+                         "fe:map:board behind POL_KV_PREFIX, expiring "
+                         "FE_MAP_BOARD_TTL seconds after the last write) for "
+                         "the board bot (polboards boardfe), which runs in "
+                         "another process and cannot read this one's live "
+                         "world state (env FE_MAP_BOARD)")
     ap.add_argument("--map-board-file", default=os.environ.get("FE_MAP_BOARD_FILE", ""),
                     metavar="PATH",
-                    help="publish the small board snapshot here for the BOARDS "
-                         "container (polboards boardfe), which runs elsewhere and "
-                         "cannot read this process's live world state. Empty = off "
-                         "(env FE_MAP_BOARD_FILE)")
+                    help="also write the board snapshot to this file, for a "
+                         "board bot that still reads it from a shared volume. "
+                         "Empty = off (env FE_MAP_BOARD_FILE)")
     ap.add_argument("--map-discord-state", default=None, metavar="PATH",
-                    help="where the id of the map message is kept, so a "
+                    help="a JSON file for the id of the map message, so a "
                          "restart edits the same message instead of posting "
-                         "a new one (default data/fe_map_discord.json, beside "
-                         "the territory store)")
+                         "a new one (default: the map_discord row of "
+                         "fe_world_state, beside the territory store)")
 
 
 # ---------------------------------------------------------------------------
@@ -681,15 +690,11 @@ def message_payload(args, snap, png):
 
 
 def state_path(args):
-    """--map-discord-state, else data/fe_map_discord.json resolved exactly as
-    feworld.territory_path resolves its store (services/../data -- /data on
-    prod, where /app is the read-only live mount)."""
-    p = getattr(args, "map_discord_state", None)
-    if p:
-        return p
-    here = os.path.dirname(os.path.abspath(__file__))
-    d = os.path.normpath(os.path.join(here, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else here, "fe_map_discord.json")
+    """The `map_discord` row of fe_world_state, beside the territory store;
+    --map-discord-state keeps it in that JSON file instead
+    (festate.location)."""
+    return festate.location("map_discord",
+                            getattr(args, "map_discord_state", None) or None)
 
 
 class Discord:
@@ -712,30 +717,24 @@ class Discord:
 
     def _load(self):
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                d = json.load(fh) or {}
+            d = festate.read(self.path, tag="femap") or {}
             # the id belongs to ONE webhook; a new webhook starts fresh
             if d.get("hook") == hashlib.sha1(self.url.encode()).hexdigest():
                 self.events = [{"id": str(e["id"]), "t": float(e.get("t") or 0)}
                                for e in (d.get("events") or []) if e.get("id")]
                 return str(d.get("message_id") or "") or None
-        except (OSError, ValueError, AttributeError):
+        except (TypeError, ValueError, KeyError, AttributeError):
             pass
         return None
 
     def _save(self):
-        if not self.path or self.path == os.devnull:
+        if not festate.persists(self.path):
             return
-        try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            tmp = "%s.tmp.%d" % (self.path, os.getpid())
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"hook": hashlib.sha1(self.url.encode()).hexdigest(),
-                           "message_id": self.msg_id,
-                           "events": self.events}, fh)
-            os.replace(tmp, self.path)
-        except OSError as e:
-            print("[femap] discord: could not save the message id (%s)" % e, flush=True)
+        if not festate.write(self.path,
+                             {"hook": hashlib.sha1(self.url.encode()).hexdigest(),
+                              "message_id": self.msg_id,
+                              "events": self.events}, tag="femap"):
+            print("[femap] discord: could not save the message id", flush=True)
 
     def _call(self, method, url, body=None, ctype=None):
         req = urllib.request.Request(url, data=body, method=method)
@@ -881,11 +880,11 @@ def board_snapshot(snap):
 
     The dominion map lives here, inside feworld, because it reads live world
     state (`fw.ext_sessions()`) that only this process has. polboards runs in
-    its own container with /data mounted read-only and cannot call into it, so
-    the map is published as a file instead: this is everything boardfe draws,
-    and nothing else. Deliberately small -- the full snapshot carries 95 fields
-    with per-player names and the whole palette, and none of that belongs in a
-    file rewritten every few seconds.
+    its own container and cannot call into it, so the map is published in
+    Valkey instead (publish_board, BOARD_KEY): this is everything boardfe
+    draws, and nothing else. Deliberately small -- the full snapshot carries
+    95 fields with per-player names and the whole palette, and none of that
+    belongs in a key rewritten every few seconds.
     """
     wars = []
     for f in snap["fields"]:
@@ -903,21 +902,56 @@ def board_snapshot(snap):
             "wars": wars}
 
 
+#: Where the board snapshot is published: a Valkey key (polcore.kv, so
+#: POL_KV_PREFIX goes in front: pol:fe:map:board by default). It is live
+#: state, rewritten every few seconds, so it expires: a board bot that finds
+#: no key knows the world is not running rather than drawing an old board.
+BOARD_KEY = "fe:map:board"
+BOARD_TTL = float(os.environ.get("FE_MAP_BOARD_TTL", "60") or 60)
+
+
+def _kv():
+    """polcore.kv: Valkey at POL_VALKEY_URL, or the in-process store."""
+    import fedb  # noqa: F401  -- puts OpenLobby's services/ on sys.path
+    from polcore import kv
+    return kv
+
+
+def read_board():
+    """The board snapshot as published, or None (a board bot's side, and the
+    tests')."""
+    return _kv().get_json(BOARD_KEY)
+
+
 def publish_board(args, snap):
-    """Write board_snapshot atomically. Best-effort: a board that cannot be
-    published must never disturb the world server hosting it."""
+    """Publish board_snapshot: to the kv key with --map-board on, and to
+    --map-board-file (written atomically) when one is named. Best-effort: a
+    board that cannot be published must never disturb the world server
+    hosting it. True when it reached every place asked for."""
+    to_kv = getattr(args, "map_board", "off") == "on"
     path = (getattr(args, "map_board_file", "") or "").strip()
-    if not path:
+    if not to_kv and not path:
         return False
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        tmp = "%s.tmp.%d" % (path, os.getpid())
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(board_snapshot(snap), fh)
-        os.replace(tmp, path)
-        return True
-    except (OSError, ValueError, TypeError, KeyError):
+        board = board_snapshot(snap)
+    except (ValueError, TypeError, KeyError):
         return False
+    ok = True
+    if to_kv:
+        try:
+            _kv().set_json(BOARD_KEY, board, ttl=BOARD_TTL)
+        except Exception:                              # noqa: BLE001
+            ok = False
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = "%s.tmp.%d" % (path, os.getpid())
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(board, fh)
+            os.replace(tmp, path)
+        except (OSError, ValueError, TypeError):
+            ok = False
+    return ok
 
 
 def _watch(args, discord, period=5.0):
@@ -1021,9 +1055,10 @@ def start(args):
     port = int(getattr(args, "map_port", 0) or 0)
     hook = (getattr(args, "map_discord_webhook", "") or "").strip()
     board = (getattr(args, "map_board_file", "") or "").strip()
-    # the watcher is also what PUBLISHES the board file, so wanting only that
-    # is reason enough to run it
-    if not port and not hook and not board:
+    board_kv = getattr(args, "map_board", "off") == "on"
+    # the watcher is also what PUBLISHES the board, so wanting only that is
+    # reason enough to run it
+    if not port and not hook and not board and not board_kv:
         return
     if port:
         serve(args, port, getattr(args, "map_bind", "127.0.0.1"))
@@ -1040,6 +1075,9 @@ def start(args):
             print("[femap] Discord webhook set: the map message is %s"
                   % ("message %s, edited in place" % discord.msg_id
                      if discord.msg_id else "posted on the first tick"), flush=True)
+    if board_kv:
+        print("[femap] publishing the board snapshot in kv %s (expires %ds "
+              "after the last write)" % (BOARD_KEY, BOARD_TTL), flush=True)
     if board:
         print("[femap] publishing the board snapshot to %s" % board, flush=True)
     threading.Thread(target=_watch, args=(args, discord), name="fe-map-watch",

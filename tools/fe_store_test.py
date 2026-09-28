@@ -17,7 +17,7 @@ So this test never has fewer than two players in it. It covers:
     creating a character under one leaves the other's roster alone;
   * an address with no POL session row gets its OWN key, not a shared bucket;
   * the felobby -> feworld carry agrees, by all three routes (the 0x400F account
-    echo, felobby's handoff file, and a direct member lookup) -- because the
+    echo, felobby's kv handoff, and a direct member lookup) -- because the
     world door writing the chosen nation onto the wrong player's character is
     the same bug one hop later;
   * charids stay unique ACROSS the store, since feworld sends charid as the
@@ -28,12 +28,12 @@ So this test never has fewer than two players in it. It covers:
 
 It drives felobby's and feworld's real functions -- resolve_identity,
 load_roster/save_roster/next_charid, resolve_account -- not copies of them.
+The POL accounts are made in a throwaway PostgreSQL database with OpenLobby's
+own accounts functions (tools/fepg.py), whichever store the characters use.
 """
 import argparse
-import datetime
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 
@@ -41,6 +41,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _SERVICES = os.path.normpath(os.path.join(_HERE, os.pardir, "services"))
 if _SERVICES not in sys.path:
     sys.path.insert(0, _SERVICES)
+sys.path.insert(0, _HERE)
+import fepg         # noqa: E402
 
 import feident      # noqa: E402
 import felobby      # noqa: E402
@@ -55,44 +57,33 @@ def check(label, cond):
     STATE["ok"] = STATE["ok"] and bool(cond)
 
 
-def make_db(path):
-    """A POL accounts.db with two members signed in from two addresses."""
-    db = sqlite3.connect(path)
-    db.executescript(
-        "CREATE TABLE member (id INTEGER PRIMARY KEY, login_name TEXT,"
-        " polid TEXT, member_no INTEGER);"
-        "CREATE TABLE session (token TEXT PRIMARY KEY, member_id INTEGER,"
-        " nick TEXT, peer_ip TEXT, created_at TEXT, expires_at TEXT);"
-        "CREATE TABLE handle (id INTEGER PRIMARY KEY, member_id INTEGER,"
-        " is_primary INTEGER);"
-        "CREATE TABLE handle_content (handle_id INTEGER, content_code INTEGER,"
-        " content_id TEXT, status TEXT, linked_at TEXT);")
-    now = datetime.datetime.now(datetime.timezone.utc
-                                ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.executemany("INSERT INTO member VALUES (?,?,?,0)",
-                   [(16, "JDPL7746", "JDPL7746"), (21, "SWQR3596", "SWQR3596")])
-    db.executemany("INSERT INTO session VALUES (?,?,?,?,?,?)",
-                   [("t16", 16, "JDPL7746", "192.0.2.5", now, now),
-                    ("t21", 21, "SWQR3596", "192.0.2.6", now, now)])
-    db.executemany("INSERT INTO handle VALUES (?,?,1)", [(1, 16), (2, 21)])
-    db.executemany("INSERT INTO handle_content VALUES (?,?,?,'active',?)",
-                   [(1, feident.FE_CONTENT_CODE, "30000074", now),
-                    (2, feident.FE_CONTENT_CODE, "30000075", now)])
-    db.commit()
-    db.close()
+def make_members():
+    """Two POL members signed in from two addresses, each holding a Fantasy
+    Earth Content ID. Returns their member ids."""
+    conn = feident._accounts().connect()
+    try:
+        ids = []
+        for name, ip, cid in (("JDPL7746", "192.0.2.5", "30000074"),
+                              ("SWQR3596", "192.0.2.6", "30000075")):
+            mid = fepg.pol_member(conn, name, fe_content_id=cid)[0]
+            fepg.pol_session(conn, mid, name, ip)
+            ids.append(mid)
+        return ids
+    finally:
+        conn.close()
 
 
-def lobby_args(store, db, sessions, mode="member"):
+def lobby_args(store, mode="member"):
     """The subset of felobby's argparse namespace these functions read."""
-    return argparse.Namespace(char_store=store, accounts_db=db,
-                              member_window=None, session_store=sessions,
+    return argparse.Namespace(char_store=store, member_lookup=None,
+                              member_window=None,
                               account_mode=mode, account="TestPlayer",
                               char_probe=False, char_reset=False)
 
 
-def world_args(db, sessions, mode="resolve"):
-    return argparse.Namespace(accounts_db=db, member_window=None,
-                              session_store=sessions, account_mode=mode)
+def world_args(mode="resolve"):
+    return argparse.Namespace(member_lookup=None, member_window=None,
+                              account_mode=mode)
 
 
 def add_character(store, key, name):
@@ -111,16 +102,16 @@ def add_character(store, key, name):
 def main():
     tmp = tempfile.mkdtemp(prefix="fe-store-test-")
     store = os.path.join(tmp, "fe_characters.json")
-    sessions = os.path.join(tmp, "fe_sessions.json")
-    db = os.path.join(tmp, "accounts.db")
-    make_db(db)
-    args = lobby_args(store, db, sessions)
+    kv = feident._kv()
+    kv.reset(kv.MemoryKV())
+    m16, m21 = make_members()
+    args = lobby_args(store)
 
     print("\n-- two players, two rosters " + "-" * 40)
     a = felobby.resolve_identity("192.0.2.5", args)
     b = felobby.resolve_identity("192.0.2.6", args)
     check("two POL members get two different store keys", a["key"] != b["key"])
-    check("member 16 keyed as member:16", a["key"] == "member:16")
+    check("a member is keyed as member:<id>", a["key"] == "member:%d" % m16)
     check("the FE Content ID is resolved alongside",
           (a["content_id"], b["content_id"]) == ("30000074", "30000075"))
 
@@ -140,19 +131,23 @@ def main():
           felobby.load_roster(store, c["key"]) is None)
 
     print("\n-- felobby -> feworld carry " + "-" * 40)
-    feident.remember("192.0.2.5", a, a["wire"], path=sessions)
-    feident.remember("192.0.2.6", b, b["wire"], path=sessions)
-    w = world_args(db, sessions)
+    feident.remember("192.0.2.5", a, a["wire"])
+    feident.remember("192.0.2.6", b, b["wire"])
+    w = world_args()
     check("the 0x400F account ECHO resolves to the same key",
           feworld.resolve_account(a["wire"], "192.0.2.5", w) == a["key"])
     check("...for the second player too",
           feworld.resolve_account(b["wire"], "192.0.2.6", w) == b["key"])
-    check("a MANGLED echo falls through to the handoff file, not to a guess",
+    check("a MANGLED echo falls through to the handoff record, not to a guess",
           feworld.resolve_account("garbled", "192.0.2.6", w) == b["key"])
-    no_handoff = world_args(db, os.path.join(tmp, "absent.json"))
-    check("with no handoff at all, a direct POL lookup still keys it right",
-          feworld.resolve_account("garbled", "192.0.2.5", no_handoff)
-          == a["key"])
+    # no handoff at all: an empty kv, as after a Valkey restart
+    handoffs = kv.default()
+    kv.reset(kv.MemoryKV())
+    try:
+        check("with no handoff at all, a direct POL lookup still keys it right",
+              feworld.resolve_account("garbled", "192.0.2.5", w) == a["key"])
+    finally:
+        kv.reset(handoffs)
     check("two world sessions never collapse to one key",
           feworld.resolve_account(a["wire"], "192.0.2.5", w)
           != feworld.resolve_account(b["wire"], "192.0.2.6", w))
@@ -288,12 +283,12 @@ def main():
         feworld._SESSION.pop("exp", None)
 
     print("\n-- the old behaviour stays reproducible, and only on request " + "-" * 6)
-    fixed = lobby_args(store, db, sessions, mode="fixed")
+    fixed = lobby_args(store, mode="fixed")
     fa = felobby.resolve_identity("192.0.2.5", fixed)
     fb = felobby.resolve_identity("192.0.2.6", fixed)
     check("--account-mode fixed puts both players back on ONE key",
           fa["key"] == fb["key"] == "TestPlayer")
-    echo = world_args(db, sessions, mode="echo")
+    echo = world_args(mode="echo")
     check("feworld --account-mode echo keys by the raw echoed name",
           feworld.resolve_account("TestPlayer", "192.0.2.5", echo)
           == "TestPlayer")
@@ -324,11 +319,8 @@ def main():
 
 
 if __name__ == "__main__":
-    # FE_DB= (empty) is fe_run_all.py's store_json run: the JSON store, no
-    # database. Otherwise the characters go to a throwaway database.
-    if os.environ.get("FE_DB", None) != "":
-        sys.path.insert(0, _HERE)
-        import fepg     # noqa: E402
-        if fepg.fresh_database() is None:
-            sys.exit(fepg.skip_or_fail("fe_store_test"))
+    # The POL accounts always live in a throwaway database. FE_DB= (empty) is
+    # fe_run_all.py's store_json run: the characters stay on the JSON store.
+    if fepg.fresh_database() is None:
+        sys.exit(fepg.skip_or_fail("fe_store_test"))
     sys.exit(main())

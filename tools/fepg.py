@@ -73,6 +73,39 @@ def _drop(url):
         pass
 
 
+def pol_member(conn, name, fe_content_id=None):
+    """A POL member with one (primary) handle called `name`, made through
+    OpenLobby's own accounts functions. With `fe_content_id`, the handle also
+    holds that Fantasy Earth Content ID (content code 11). Returns
+    (member_id, handle_id)."""
+    import accounts
+    # a sealing key in the environment, so add_member never writes a key file
+    os.environ.setdefault("POL_LOGIN_PW_KEY", "fe-selftest")
+    accounts.create_polid(conn, name, "Passw0rdTest")
+    mid = accounts.add_member(conn, name, name, "Passw0rdTest")
+    hid = accounts.set_handle(conn, mid, name)
+    if fe_content_id is not None:
+        accounts.grant_content(conn, mid, 11)
+        accounts.link_content_to_handle(conn, hid, 11, str(fe_content_id))
+    return mid, hid
+
+
+def pol_session(conn, member_id, nick, ip, age_s=0):
+    """A POL sign-in from `ip` (accounts.open_session), backdated `age_s`
+    seconds. Returns the session token."""
+    import accounts
+    import datetime
+    token = accounts.open_session(conn, member_id, nick=nick, peer_ip=ip)
+    if age_s:
+        at = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # backdating is a test-only move; open_session always stamps "now"
+        with conn:
+            conn.execute("UPDATE session SET created_at = %s WHERE token = %s",
+                         (at, token))
+    return token
+
+
 def skip_or_fail(suite):
     """What a suite returns when there is no database: 0 (SKIP), or 1 when
     POL_TEST_REQUIRE_DB=1."""

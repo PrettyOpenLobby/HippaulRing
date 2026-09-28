@@ -18,7 +18,11 @@ services/
   fenet.py          the transport shared by lobby and world: framing and cipher
   feblowfish.py     FE's Blowfish with its own tables (generated, see README)
   feident.py        which PlayOnline member is on the other end of a socket
-  festore.py        the player database (fe.db, or JSON when FE_DB is empty)
+  festore.py        the player database (the fe_character table in PostgreSQL,
+                    or JSON when FE_DB is empty)
+  festate.py        the world stores, one row each of fe_world_state
+  fedb.py           reaches the core's polcore; migrate, status and import
+  fe_migrations/    CrystalRing's migrations, numbered from 1001
   fegamedata.py     the client's shipped tables, read from services/fedata/
   fedevtool.py      the world-building web panel (--devtool-port)
   fetitle.py        the title plugin that runs inside the OpenLobby core
@@ -49,10 +53,10 @@ campaignview.py   what the campaign extension says about a field; the per-field 
 entities.py       drawing units: the player's avatar, other players, NPCs, monsters (0x1006)
 movement.py       who owns a position, unit speed, the move rows, jump physics
 buildings.py      buildings and keeps: the type-1 record, build timers, keep HP and hits
-spawns.py         where a player arrives: data/fe_spawn.json and derived spawn points
+spawns.py         where a player arrives: the spawn store and derived spawn points
 mapcal.py         minimap calibration per capital half: anchors and the fitted projection
 doors.py          where a door puts you down, and the shipped portal table
-town.py           the town file (data/fe_town.json): placed NPCs, door links, the town push
+town.py           the town store (fe_world_state): placed NPCs, door links, the town push
 populate.py       filling a field with monster groups: spawn points, scatter, population
 monsters.py       shared monsters: one copy per field, relayed between sessions, their AI
 combat.py         registering a target, hit and kill pushes, the battle tally
@@ -138,8 +142,52 @@ generated `services/fedata/` skip themselves until `tools/fedata_build.py`
 has been run. `fe_run_all.py` finds `tools/fe_*_test.py` by name; a suite
 with another name is added to its list by hand.
 
-Some suites write `services/fe_campaign.json` and `services/fe_spawn.json`
-as they run. Do not commit those changes.
+The suites that touch the database need the OpenLobby core checked out
+beside this repository (or `OPENLOBBY_DIR` pointing at it), the drivers
+(`pip install "psycopg[binary]" psycopg-pool valkey`), and Docker or
+`POL_TEST_DATABASE_URL`. `fe_run_all.py` gives each suite a throwaway
+database of its own; without a server those suites report SKIP, and
+`POL_TEST_REQUIRE_DB=1` makes that a failure. `tools/fe_import_test.py`
+rebuilds the old files from git at a pinned commit, so a shallow clone needs
+`git fetch --unshallow` first.
+
+No suite writes into the working tree: `git status` is clean after
+`python tools/fe_run_all.py`, and `tools/fe_worldstate_test.py` fails if a
+store writes a file under `services/`.
+
+## Where state lives
+
+Anything that must survive a restart is a table in the core's PostgreSQL:
+the characters (`fe_character`), the mail (`fe_mail`), the world stores
+(`fe_world_state`, through `festate.py`) and the blob record
+(`fe_blob_observation`). State another container needs while players are
+online goes in Valkey through the core's `polcore.kv`, always with an
+expiry: the lobby-to-world handoff (`fe:handoff:*`), the member remembered
+for an address (`fe:ipmember:*`) and the board snapshot (`fe:map:board`).
+Nothing durable goes in Valkey. A file is only for what the operator edits,
+such as the `--gmcmd-file` inbox. The member lookup behind the handoff reads
+the core's account tables and is turned off with `--member-lookup off` or
+`FE_MEMBER_LOOKUP=0`.
+
+A schema change is a new file in `services/fe_migrations/` with the next
+number. A shipped migration is never edited. The core's `schema_migrations`
+table is keyed by the number alone and shared with the core and the other
+titles, so CrystalRing keeps to 1001-1999 and a table name that starts with
+`fe_`; a reused number is silently skipped.
+
+Moving a file into the database comes with an importer in `fedb.py`
+(`python fedb.py import fe_db|fe_mail_db|world ...`). It only reads its
+source, runs in one transaction, refuses a table that already holds rows
+unless given `--merge`, writes nothing with `--dry-run`, and changes nothing
+on a second run. Its command is added to `TITLES` in OpenLobby's
+`tools/db_import.py` and to its `docs/database.md`.
+
+`live_sessions.py` is the core's. The lobby and the world publish their
+counts with `live_sessions.start_heartbeat`; a copy of the module must not
+be added here. `services/.dockerignore` keeps one out of the image and the
+build refuses an image whose `live_sessions` is not the core's. A deploy
+script asks a running container, for example
+`docker compose exec -T feworld python live_sessions.py count feworld`.
 
 ## What a pull request needs
 

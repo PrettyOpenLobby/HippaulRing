@@ -725,8 +725,8 @@ def use_db(path):
                     _say("[felobby] WARNING: PLAYER DATABASE: %s is the SQLite "
                          "store from before PostgreSQL and holds the current "
                          "characters, so %s (older) is NOT imported. Import "
-                         "%s into %s first." % (legacy, path, legacy,
-                                                festore.where()))
+                         "%s into %s first: python fedb.py import fe_db %s"
+                         % (legacy, path, legacy, festore.where(), legacy))
             else:
                 n_a, n_c = festore.import_json(path)
             _db_state[path] = True      # BEFORE the log line, not after it

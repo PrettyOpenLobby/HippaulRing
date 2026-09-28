@@ -68,6 +68,16 @@ import fenet     # noqa: E402
 import feworld   # noqa: E402
 
 
+def _world_source():
+    """feworld's source text for the pins below that read it: the facade and
+    every module of the world package it forwards to (main() and its knobs
+    live in world/launch.py)."""
+    paths = [os.path.join(_SERVICES, "feworld.py")]
+    pkg = os.path.join(_SERVICES, "world")
+    paths += [os.path.join(pkg, n) for n in sorted(os.listdir(pkg)) if n.endswith(".py")]
+    return "".join(io.open(p, encoding="utf-8").read() for p in paths)
+
+
 class Reader:
     """FE's stream primitives, by the byte count each one advances."""
 
@@ -2312,9 +2322,7 @@ def part14():
         # has not been read yet, so nothing has earned the default back.
         # the switch's DEFAULT, read out of the source rather than the parser
         # (main() builds it inline), so the pin cannot pass by accident
-        _src = io.open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "services", "feworld.py"),
-            encoding="utf-8").read()
+        _src = _world_source()
         # VERIFIED: The crash this used to guard is SOLVED and the fix is
         # verified live: 0x107A's header slot is a u32, and shipping it as a u16
         # put every byte after it TWO OUT, so the client read a garbage uid and
@@ -2775,9 +2783,7 @@ def part16():
                                     feworld.palette_rows(_args()), "t") == 0, \
             "never before the HUD exists"
         feworld._SESSION["in_field"] = True
-        _src = io.open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "services", "feworld.py"),
-            encoding="utf-8").read()
+        _src = _world_source()
         assert '"--skill-palette", default="request"' in _src, \
             "the entry replay has never been verified live"
         # ---- and off restores the silence
@@ -3095,11 +3101,11 @@ def part18():
     # a room whose only way out is talking to somebody. Pinned from the source
     # because enter_area wants the whole argument surface; what matters is that
     # the drop sits WITH the room assignment and cannot drift away from it.
-    _src = io.open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "services", "feworld.py"),
-        encoding="utf-8").read()
-    _blk = _src[_src.index('    _SESSION["room"] = room'):]
-    _blk = _blk[:_blk.index(chr(10) + "def ")]
+    # enter_area's own source, from the room assignment to its end (the flat
+    # file's `_SESSION` reads `sess._SESSION` in world/arrival.py)
+    import inspect
+    _src = inspect.getsource(feworld.enter_area)
+    _blk = _src[_src.index('_SESSION["room"] = room'):]
     assert '_SESSION.pop("cpos", None)' in _blk, \
         "entering an area must drop the stale reported position"
 

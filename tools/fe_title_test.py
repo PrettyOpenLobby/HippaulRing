@@ -4,25 +4,25 @@
     python tools/fe_title_test.py
 
 Needs the OpenLobby core checked out beside this repository (or OPENLOBBY_DIR
-pointing at it) for `titles.py`. Offline; uses a database in a temp directory.
+pointing at it) for `titles.py` and `polcore`. Offline; uses a throwaway
+PostgreSQL database (tools/fepg.py).
 
 Each check is a regression that has already happened once: a store read as
-JSON after the data moved into sqlite (the read kept working and kept
+JSON after the data moved into a database (the read kept working and kept
 returning migration-day values), a swapped key read by name (`nation` is the
 gender byte), an index passed between two ladders with different strides.
 """
 import os
 import sys
-import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OPENLOBBY = os.environ.get("OPENLOBBY_DIR", os.path.join(ROOT, os.pardir, "openlobby"))
 sys.path.insert(0, os.path.join(OPENLOBBY, "services"))
 sys.path.insert(0, os.path.join(ROOT, "services"))
-
-TMP = tempfile.mkdtemp(prefix="fe-title-")
-os.environ["FE_DB"] = os.path.join(TMP, "fe.db")
+sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ.pop("POL_FE_WORLD", None)
+
+import fepg            # noqa: E402
 
 import titles          # noqa: E402
 import festore         # noqa: E402
@@ -81,4 +81,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if fepg.fresh_database() is None:
+        sys.exit(fepg.skip_or_fail("fe_title_test"))
     sys.exit(main())

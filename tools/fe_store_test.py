@@ -44,6 +44,7 @@ if _SERVICES not in sys.path:
 
 import feident      # noqa: E402
 import felobby      # noqa: E402
+import festore      # noqa: E402
 import feworld      # noqa: E402
 
 STATE = {"ok": True}
@@ -300,22 +301,34 @@ def main():
     print("\n-- the store on disk " + "-" * 47)
     # THROUGH THE API, NOT THE FILE. Until 2026-09-08 this opened
     # fe_characters.json and read `["accounts"]` straight out of it; since
-    # festore.py the store is `fe.db` beside it and the JSON file may not exist
-    # at all, so a direct read fails with FileNotFoundError -- a test that broke
+    # festore.py the store is a database and the JSON file may not exist at
+    # all, so a direct read fails with FileNotFoundError -- a test that broke
     # on a backend change, not a store that lost anything.
     keys = sorted(felobby.store_accounts(store))
+    on_db = bool(felobby.use_db(store))
     print("   backend: %s"
-          % ("fe.db (festore)" if felobby.use_db(store)
-             else "fe_characters.json"))
+          % (festore.where() + " (festore)" if on_db else "fe_characters.json"))
     print("   keys: %s" % ", ".join(keys))
     check("no roster is filed under the old shared default",
           feident.LEGACY_ACCOUNT not in keys)
-    check("the store this run configured is really on disk",
-          os.path.exists(felobby.use_db(store) or store))
+    if on_db:
+        check("the store this run configured really holds the characters",
+              festore.count() == sum(felobby.store_accounts(store).values())
+              >= 2 and not os.path.exists(store))
+    else:
+        check("the store this run configured is really on disk",
+              os.path.exists(store))
 
     print("\n%s\n" % ("all checks passed" if STATE["ok"] else "SOMETHING FAILED"))
     return 0 if STATE["ok"] else 1
 
 
 if __name__ == "__main__":
+    # FE_DB= (empty) is fe_run_all.py's store_json run: the JSON store, no
+    # database. Otherwise the characters go to a throwaway database.
+    if os.environ.get("FE_DB", None) != "":
+        sys.path.insert(0, _HERE)
+        import fepg     # noqa: E402
+        if fepg.fresh_database() is None:
+            sys.exit(fepg.skip_or_fail("fe_store_test"))
     sys.exit(main())

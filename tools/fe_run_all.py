@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the offline selftest suite: every tools/fe_*_test.py, plus the
-service-embedded selftests. No Docker or client needed; suites that require
+service-embedded selftests and the feworld facade check. No Docker or client needed; suites that require
 generated fedata skip themselves.
 
   python tools/fe_run_all.py            # everything
@@ -20,6 +20,12 @@ TIMEOUT = 300
 
 def suites():
     out = [("festore", [sys.executable, "festore.py", "--selftest"], {})]
+    # services/feworld.py is a facade over services/world/: every name a test
+    # or an extension rebinds must reach the module that runs it, and the
+    # check must be able to fail (--selftest switches the forwarding off)
+    check = os.path.join(HERE, "facade_rebind_check.py")
+    out.append(("facade", [sys.executable, check], {}))
+    out.append(("facade_selftest", [sys.executable, check, "--selftest"], {}))
     for p in sorted(glob.glob(os.path.join(HERE, "fe_*_test.py"))):
         name = os.path.basename(p)[3:-8]  # fe_<name>_test.py -> <name>
         out.append((name, [sys.executable, p], {}))

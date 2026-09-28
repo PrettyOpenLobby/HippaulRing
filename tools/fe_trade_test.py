@@ -382,6 +382,10 @@ class _Worker(threading.Thread):
         self.tasks, self.results = queue.Queue(), queue.Queue()
 
     def run(self):
+        # OUT is keyed by thread ident, and a finished thread's ident is
+        # handed to the next thread started (Linux does this at once). Without
+        # this, part 3's worker inherits part 2's leftover sends as its own.
+        OUT.pop(threading.get_ident(), None)
         while True:
             fn = self.tasks.get()
             if fn is None:

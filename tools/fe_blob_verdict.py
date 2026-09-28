@@ -29,7 +29,8 @@ the case that actually hurts.
 
 WHAT THIS DOES
 --------------
-Reads `data/fe_blobid.jsonl` (felobby appends one record per certification) and,
+Reads the fe_blob_observation table (felobby adds one record per
+certification; `--log FILE` reads an old data/fe_blobid.jsonl instead) and,
 rather than trusting the byte window anybody guessed, recomputes from scratch:
 
   * which byte offsets are INVARIANT within each member's own sessions
@@ -42,7 +43,6 @@ what is missing instead. A verdict from one member is the failure mode here.
 """
 import argparse
 import collections
-import json
 import os
 import sys
 
@@ -54,20 +54,10 @@ if _SERVICES not in sys.path:
 import feident  # noqa: E402
 
 
-def load(path):
-    rows = []
-    if not os.path.exists(path):
-        return rows
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-    return [r for r in rows if r.get("full")]
+def load(path=None):
+    """The observations: the fe_blob_observation table, or the JSON-lines
+    file `path` when one is named (feident.blob_records)."""
+    return [r for r in feident.blob_records(path) if r.get("full")]
 
 
 def invariant_offsets(blobs):
@@ -98,13 +88,16 @@ def fmt_ranges(offsets):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--log", default=feident.BLOB_LOG,
-                    help="observations file (default data/fe_blobid.jsonl)")
+                    help="a JSON-lines observations file to read instead of "
+                         "the fe_blob_observation table (default: the table, "
+                         "or FE_BLOB_LOG when it is set)")
     args = ap.parse_args()
 
     rows = load(args.log)
-    print("%s -- %d observation(s)\n" % (args.log, len(rows)))
+    print("%s -- %d observation(s)\n"
+          % (args.log or "fe_blob_observation", len(rows)))
     if not rows:
-        print("Nothing recorded yet. felobby appends one line per 0xC007, so\n"
+        print("Nothing recorded yet. felobby records one per 0xC007, so\n"
               "launch FE once and this fills in.")
         return 0
 

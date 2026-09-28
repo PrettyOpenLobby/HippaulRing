@@ -576,8 +576,10 @@ def wire_account(ident, mode="member", fixed=None):
 # version of the bug this whole module exists to fix, and one that would look
 # correct on every single-account test.
 
-BLOB_LOG = os.environ.get("FE_BLOB_LOG") or os.path.join(
-    os.path.normpath(os.path.join(_HERE, os.pardir, "data")), "fe_blobid.jsonl")
+#: The observations go to the fe_blob_observation table (migration 1004).
+#: FE_BLOB_LOG names a JSON-lines file to use instead, which is what this
+#: record was until 2026-09-28 (data/fe_blobid.jsonl).
+BLOB_LOG = os.environ.get("FE_BLOB_LOG") or None
 
 #: Kept small on purpose -- this is a decisive experiment, not telemetry. Once
 #: the verdict is in, the recording should come out again.
@@ -611,12 +613,15 @@ def record_blob(ident, blob, tag="felobby", path=None):
             % (f["fixed"], f["lead"], ident.get("key"),
                ident.get("nick"), ident.get("ip")))
     p = BLOB_LOG if path is None else path
-    if not p:
-        return line
     rec = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "key": ident.get("key"), "member_id": ident.get("member_id"),
            "nick": ident.get("nick"), "ip": ident.get("ip"),
            "content_id": ident.get("content_id"), **f}
+    if p is None:
+        _record_blob_db(rec, tag)
+        return line
+    if not p:
+        return line
     try:
         with _lock:
             existing = []
@@ -633,6 +638,56 @@ def record_blob(ident, blob, tag="felobby", path=None):
         _log(tag, "WARN blob observation not recorded (%r) -- the log line "
                   "above still has it" % (e,))
     return line
+
+
+def _record_blob_db(rec, tag):
+    """One observation into fe_blob_observation, and the oldest past
+    BLOB_LOG_MAX out, in one transaction. Never raises."""
+    import festate
+    fedb = festate.database()
+    if fedb is None:
+        return
+    db = fedb.db
+    try:
+        fedb.ensure_schema()
+        with db.transaction() as conn:
+            db.execute("INSERT INTO fe_blob_observation (at, member_key, rec)"
+                       " VALUES (%s, %s, %s::json)",
+                       (rec.get("at"), rec.get("key"),
+                        json.dumps(rec, sort_keys=True)), conn=conn)
+            db.execute("DELETE FROM fe_blob_observation WHERE id <= ("
+                       "SELECT id FROM fe_blob_observation ORDER BY id DESC"
+                       " OFFSET %s LIMIT 1)", (max(1, BLOB_LOG_MAX),), conn=conn)
+    except fedb.errors() + (TypeError, ValueError) as e:
+        _log(tag, "WARN blob observation not recorded (%r) -- the log line "
+                  "above still has it" % (e,))
+
+
+def blob_records(path=None):
+    """Every recorded observation, oldest first: from the table, or from the
+    JSON-lines file `path` (FE_BLOB_LOG) when one is named."""
+    p = BLOB_LOG if path is None else path
+    if p:
+        rows = []
+        if not os.path.exists(p):
+            return rows
+        with io.open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        return rows
+    import festate
+    fedb = festate.database()
+    if fedb is None:
+        return []
+    fedb.ensure_schema()
+    return [r["rec"] for r in fedb.db.query(
+        "SELECT rec FROM fe_blob_observation ORDER BY id")]
 
 
 # ---------------------------------------------------------------------------

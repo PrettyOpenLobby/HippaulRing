@@ -23,6 +23,13 @@ ran second. Every table CrystalRing creates starts with `fe_`.
 
     python fedb.py migrate     apply what is pending (uses POL_DATABASE_URL)
     python fedb.py status      list CrystalRing's migrations and their state
+
+    python fedb.py import fe_db FILE        an old fe.db into fe_character
+    python fedb.py import fe_mail_db FILE   an old fe_mail.db into fe_mail
+    python fedb.py import world DIR         an old /data's world state files
+                                            into fe_world_state
+
+The imports take --dry-run and --merge; feimport.py describes them.
 """
 import os
 import sys
@@ -119,6 +126,9 @@ def where():
 
 
 def _main(argv):
+    if argv and argv[0] == "import":
+        import feimport
+        return feimport.main(argv[1:])
     if not argv or argv[0] not in ("migrate", "status"):
         print(__doc__)
         return 2

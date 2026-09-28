@@ -125,11 +125,12 @@ the task manager 0x2074 registers with) delivers them; that object is NULL in
 the dump and could not be read. A live client decides this; the server side
 is complete either way. Every send below logs the gate.
 
-PERSISTENCE: its own sqlite file, `data/fe_mail.db` (resolved the way
-festore.default_db does: pol-server/data on the host = /data in the
-container), env FE_MAIL_DB or --mail-db to move it. NEVER data/fe.db. One
-table, `mail`, keyed by owner = "<account>/<charid>" so two characters on one
-account have two boxes and a renamed character keeps hers.
+PERSISTENCE: the `fe_mail` table in the stack's PostgreSQL database
+(POL_DATABASE_URL, through fedb.py; migration fe_migrations/1002_fe_mail.sql).
+Until 2026-09-27 it was its own SQLite file, data/fe_mail.db. It is never the
+character table: mail and characters are separate tables, so a mail bug cannot
+write into a roster. Rows are keyed by owner = "<account>/<charid>" so two
+characters on one account have two boxes and a renamed character keeps hers.
 
 NOT DONE / NOT POSSIBLE:
   * MSG_MAIL_HEADER_NEW_QUERY / MAIL_DATA_UPDATE_REQ / MAIL_CHECKMARK_REQ exist
@@ -141,16 +142,13 @@ NOT DONE / NOT POSSIBLE:
     other id 0x05058815 posts and it is not a mail id). The recipient's live
     session gets a server LOG line via the relay, nothing on screen.
 """
-import os
-import sqlite3
 import struct
-import threading
 import time
 
-fw = None            # the feworld module, handed in by register()
+import fedb
+from fedb import db
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_LOCK = threading.Lock()
+fw = None            # the feworld module, handed in by register()
 
 # ---- the client's own names (log strings at 0x52e1748..) ------------------
 NAMES = {
@@ -228,9 +226,6 @@ def add_args(ap):
                          "window is waiting for these replies, so answering "
                          "is the fix; off = log the request and hang the "
                          "window as before)")
-    ap.add_argument("--mail-db", default=None,
-                    help="sqlite file for the mailboxes (default data/fe_mail.db"
-                         " next to fe.db; env FE_MAIL_DB). Never fe.db itself.")
     ap.add_argument("--mail-folders", default="sent,inbox",
                     help="label of client folder 0, then folder 1. The row "
                          "renderer 0x050c3506 says folder 0 shows the TO name, "
@@ -255,90 +250,57 @@ def add_args(ap):
 # --------------------------------------------------------------------------- #
 # the store
 # --------------------------------------------------------------------------- #
-def default_db():
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "fe_mail.db")
+#: The mailboxes. Every CrystalRing table starts with fe_ (fedb.py).
+TABLE = "fe_mail"
 
 
-def db_path(args):
-    return (getattr(args, "mail_db", None) or os.environ.get("FE_MAIL_DB")
-            or default_db())
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS mail (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,   -- the wire mail id
-    owner     TEXT    NOT NULL,                    -- "<account>/<charid>"
-    folder    INTEGER NOT NULL,                    -- the CLIENT's folder index
-    ref       INTEGER NOT NULL DEFAULT 4294967295, -- rec+0x0c, echoed
-    sent_at   INTEGER NOT NULL,                    -- unix seconds
-    read      INTEGER NOT NULL DEFAULT 0,          -- rec+0x18
-    from_name TEXT    NOT NULL,
-    to_name   TEXT    NOT NULL,
-    date      TEXT    NOT NULL,                    -- rec+0x5b, "YY/MM/DD hh:mm"
-    subject   TEXT    NOT NULL,                    -- rec+0x7b
-    text      TEXT    NOT NULL,                    -- rec+0xa0
-    attach    TEXT    NOT NULL DEFAULT ''          -- rec+0x2a1, "Attach:N,..."
-);
-CREATE INDEX IF NOT EXISTS mail_box ON mail(owner, folder, id);
-"""
-
-
-def connect(args):
-    path = db_path(args)
-    conn = sqlite3.connect(path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=%s"
-                     % os.environ.get("POL_SQLITE_JOURNAL", "TRUNCATE"))
-    except sqlite3.Error:
-        pass
-    conn.executescript(_SCHEMA)
-    return conn
+def _ready():
+    """Apply CrystalRing's migrations once per process (fedb.ensure_schema)."""
+    fedb.ensure_schema()
 
 
 def _owner(account, charid):
     return "%s/%d" % (account, int(charid))
 
 
+# `args` stays in every signature: the handlers and the GM verbs pass it, and
+# box_page reads --mail-order from it.
 def box_count(args, owner, folder, unread_only=False):
-    with _LOCK, connect(args) as c:
-        q = "SELECT COUNT(*) FROM mail WHERE owner=? AND folder=?"
-        if unread_only:
-            q += " AND read=0"
-        return c.execute(q, (owner, folder)).fetchone()[0]
+    _ready()
+    q = "SELECT COUNT(*) AS n FROM fe_mail WHERE owner = %s AND folder = %s"
+    if unread_only:
+        q += ' AND "read" = 0'
+    return db.query_one(q, (owner, folder))["n"]
 
 
 def box_page(args, owner, folder, index, count):
     order = "DESC" if getattr(args, "mail_order", "new") == "new" else "ASC"
-    with _LOCK, connect(args) as c:
-        rows = c.execute("SELECT * FROM mail WHERE owner=? AND folder=? "
-                         "ORDER BY id %s LIMIT ? OFFSET ?" % order,
-                         (owner, folder, max(0, count), max(0, index))).fetchall()
-    return [dict(r) for r in rows]
+    _ready()
+    return db.query("SELECT * FROM fe_mail WHERE owner = %%s AND folder = %%s "
+                    "ORDER BY id %s LIMIT %%s OFFSET %%s" % order,
+                    (owner, folder, max(0, count), max(0, index)))
 
 
 def box_get(args, owner, folder, mid):
-    with _LOCK, connect(args) as c:
-        r = c.execute("SELECT * FROM mail WHERE owner=? AND folder=? AND id=?",
-                      (owner, folder, mid)).fetchone()
-    return dict(r) if r else None
+    _ready()
+    return db.query_one("SELECT * FROM fe_mail WHERE owner = %s AND folder = %s"
+                        " AND id = %s", (owner, folder, mid))
 
 
 def box_mark_read(args, mid):
-    with _LOCK, connect(args) as c:
-        c.execute("UPDATE mail SET read=1 WHERE id=?", (mid,))
+    _ready()
+    db.execute('UPDATE fe_mail SET "read" = 1 WHERE id = %s', (mid,))
 
 
 def box_set_attach(args, mid, attach):
-    with _LOCK, connect(args) as c:
-        c.execute("UPDATE mail SET attach=? WHERE id=?", (attach, mid))
+    _ready()
+    db.execute("UPDATE fe_mail SET attach = %s WHERE id = %s", (attach, mid))
 
 
 def box_delete(args, owner, folder, mid):
-    with _LOCK, connect(args) as c:
-        n = c.execute("DELETE FROM mail WHERE owner=? AND folder=? AND id=?",
-                      (owner, folder, mid)).rowcount
+    _ready()
+    n = db.execute("DELETE FROM fe_mail WHERE owner = %s AND folder = %s"
+                   " AND id = %s", (owner, folder, mid))
     return n > 0
 
 
@@ -346,13 +308,14 @@ def box_put(args, owner, folder, from_name, to_name, subject, text,
             attach="", ref=0xFFFFFFFF, read=0, when=None):
     when = int(when if when is not None else time.time())
     date = time.strftime("%y/%m/%d %H:%M", time.localtime(when))
-    with _LOCK, connect(args) as c:
-        cur = c.execute(
-            "INSERT INTO mail(owner,folder,ref,sent_at,read,from_name,to_name,"
-            "date,subject,text,attach) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (owner, folder, int(ref) & 0xFFFFFFFF, when, int(read), from_name,
-             to_name, date, subject, text, attach or ""))
-        return cur.lastrowid
+    _ready()
+    row = db.query_one(
+        'INSERT INTO fe_mail (owner, folder, ref, sent_at, "read", from_name,'
+        ' to_name, "date", subject, "text", attach)'
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (owner, folder, int(ref) & 0xFFFFFFFF, when, int(read), from_name,
+         to_name, date, subject, text, attach or ""))
+    return row["id"]
 
 
 # --------------------------------------------------------------------------- #

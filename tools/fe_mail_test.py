@@ -16,7 +16,8 @@ client, it desynchronises everything after it.
     0xA067                u32 n, n x {u32,u32,u32,u32,u8, 32,32,32,32 raw}
     0xA06A                u32, 512 raw, 128 raw
 
-The store is a temp sqlite file (--mail-db); the roster lookups are stubbed
+The store is a throwaway PostgreSQL database (tools/fepg.py, or the one
+fe_run_all.py made for this suite); the roster lookups are stubbed
 (femail._all_chars / feworld._self_char) so no data/ file is touched.
 """
 import io
@@ -32,9 +33,12 @@ _SERVICES = os.path.join(os.path.dirname(_HERE), "services")
 if _SERVICES not in sys.path:
     sys.path.insert(0, _SERVICES)
 
+import fepg      # noqa: E402
 import fenet     # noqa: E402
 import feworld   # noqa: E402
 import femail    # noqa: E402
+import fedb      # noqa: E402
+import festore   # noqa: E402
 
 feworld.load_extensions(["femail"])   # registers femail only
 
@@ -125,7 +129,7 @@ def _args(**kw):
              chat_relay="off", chat_echo="off", chat_line=None,
              validate_finish=0, war_start="off", war_clock="off",
              war_deadline_ms=0, gold=None,
-             mail="on", mail_db=None, mail_folders="sent,inbox",
+             mail="on", mail_folders="sent,inbox",
              mail_box_size=30, mail_attach="display", mail_from="GM",
              mail_order="new")
     a.update(kw)
@@ -223,10 +227,9 @@ SENT, INBOX = 0, 1
 # --------------------------------------------------------------------------- #
 def main():
     tmp = tempfile.mkdtemp(prefix="femail-")
-    db = os.path.join(tmp, "fe_mail.db")
     _stub_store()
-    a = _args(mail_db=db)
-    say("[fe_mail_test] store %s" % db)
+    a = _args()
+    say("[fe_mail_test] store %s table %s" % (fedb.where(), femail.TABLE))
 
     say("registration")
     check("the six mail requests + 0x2074 are claimed by femail",
@@ -234,9 +237,8 @@ def main():
               (0xA050, 0xA060, 0xA063, 0xA066, 0xA069, 0xA080, 0x2074)))
     check("KNOWN names the whole family", 0xA067 in feworld.KNOWN
           and "MSG_MAIL_HEADER_RESULT" in feworld.KNOWN[0xA067])
-    check("the store path is never data/fe.db",
-          not femail.default_db().endswith("fe.db")
-          and femail.default_db().endswith("fe_mail.db"))
+    check("the mailboxes are their own table, never the character table",
+          femail.TABLE == "fe_mail" and femail.TABLE != festore.TABLE)
 
     say("encoders")
     check("enc_fixed clips on a cp932 character boundary and NUL-pads",
@@ -381,7 +383,7 @@ def main():
           femail.box_count(a, "acct:A/7", SENT) == 2)
 
     say("box limits")
-    small = _args(mail_db=db, mail_box_size=1)
+    small = _args(mail_box_size=1)
     feworld._SESSION["account"], feworld._SESSION["charid"] = "acct:A", 7
     feworld._self_char = lambda a_: {"name": "ALICE", "charid": 7}
     mid, body, _ = _one(small, req_send("Bob", "x", "y"))
@@ -423,7 +425,7 @@ def main():
     r.done()
 
     say("attachments, --mail-attach take (UNTESTED LIVE; the pushes are stubbed here)")
-    take = _args(mail_db=db, mail_attach="take")
+    take = _args(mail_attach="take")
     STORE.clear()
     STORE["gold"] = 100
     STORE["items"] = [[9001, 55, 1, 1]]
@@ -466,7 +468,7 @@ def main():
           and ("wallet", 6) in PUSHES and any(p[0] == "bag" for p in PUSHES))
 
     say("--mail off")
-    off = _args(mail_db=db, mail="off")
+    off = _args(mail="off")
     out, log = _drive(off, [req_folder(0xA060, INBOX)])
     check("--mail off answers nothing and says so", out == [] and "NOT answered" in log)
 
@@ -501,7 +503,7 @@ def main():
     gmf = os.path.join(tmp, "gm.txt")
     with open(gmf, "w", encoding="utf-8") as fh:
         fh.write("!mail send Bob|From the file|via gm_pump\n")
-    seam = _args(mail_db=db, gmcmd_file=gmf)
+    seam = _args(gmcmd_file=gmf)
     before = femail.box_count(a, "acct:B/9", INBOX)
     out, log = _drive(seam, [req_folder(0xA060, SENT)])
     check("a `!mail send` line in --gmcmd-file is delivered by gm_pump -> EXT_GM",
@@ -557,8 +559,13 @@ def main():
 
 
 if __name__ == "__main__":
+    if fepg.fresh_database() is None:
+        sys.exit(fepg.skip_or_fail("fe_mail_test"))
     try:
         main()
+        chars = fedb.db.query_one("SELECT COUNT(*) AS n FROM fe_character")["n"]
+        check("no mail operation wrote a character row", chars == 0,
+              "%d rows" % chars)
     except AssertionError as e:
         say("[fe_mail_test] FAIL: %s" % e)
         sys.exit(1)

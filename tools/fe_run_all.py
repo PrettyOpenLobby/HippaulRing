@@ -30,6 +30,9 @@ import fepg  # noqa: E402
 
 def suites():
     out = [("festore", [sys.executable, "festore.py", "--selftest"], {})]
+    # who is on the socket: POL session rows, the roster tie-break, the kv
+    # handoff and address memory
+    out.append(("feident", [sys.executable, "feident.py"], {}))
     # services/feworld.py is a facade over services/world/: every name a test
     # or an extension rebinds must reach the module that runs it, and the
     # check must be able to fail (--selftest switches the forwarding off)

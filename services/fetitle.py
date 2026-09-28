@@ -7,8 +7,8 @@ process: the content profile the Viewer shows for a Fantasy Earth Content ID
 feworld write.
 
 Loaded with POL_TITLES=fetitle in the core's login and authsess services; see
-docker-compose.title.yml. FE_DB names the database (the compose override
-points it at the shared data volume).
+docker-compose.title.yml. The player database is the stack's PostgreSQL
+database (POL_DATABASE_URL), which the core's services already have.
 """
 import os
 
@@ -66,7 +66,7 @@ class FantasyEarth(titles.Title):
     content_code = CONTENT_CODE
 
     def describe(self):
-        return f"Fantasy Earth player database {festore.DB_PATH}"
+        return f"Fantasy Earth player database {festore.where()}"
 
     def profile_fields(self, cid, member_id):
         if member_id is None:

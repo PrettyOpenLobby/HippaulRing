@@ -16,12 +16,14 @@ blacklist / comment) over a shared `/data` bind mount, serialised by an advisory
 lock on a sidecar `.lock` file. That worked, but the atomicity is hand-built and
 the whole file is rewritten on every skill purchase.
 
-DELIBERATELY ITS OWN FILE, NOT A TABLE IN accounts.db, for the same reason
-fmostore.py is: accounts.db is opened by every other service here and has
-already been truncated once by a container restart landing on a schema write
-(memory: accounts-db-wal-hazard). The connection disciplines below are copied
-from `accounts.connect()` via `fmostore.connect()` -- they were each paid for by
-a live failure -- but the FILE is separate, and separate from FMO's too.
+WHERE IT LIVES. The `fe_character` table in the stack's PostgreSQL database,
+through OpenLobby's `polcore.db` (POL_DATABASE_URL; see fedb.py for how the
+package is found and how CrystalRing's migrations are numbered). Until
+2026-09-27 it was its own SQLite file, `data/fe.db`, kept apart from
+accounts.db because a container restart had truncated that file once
+(memory: accounts-db-wal-hazard). A server database has no such file to
+share, so the table sits beside OpenLobby's; the `fe_` prefix keeps the names
+apart.
 
 DROP-IN SHAPE. `load_roster` / `save_roster` / `store_accounts` / `next_charid`
 / `update_roster` take and return exactly what felobby's JSON versions did: a
@@ -32,146 +34,21 @@ which matters more here than in FMO, because a character record carries ~48
 positional wire fields (`w70`, `fac`, `dc4`...) that exist only to be echoed
 back and must not be dropped by a store that does not recognise them.
 
-WARNING: THE ARGUMENT ORDER IS (account, path), MATCHING fmostore -- felobby's public
-functions keep their own (path, account) order. The two stores get read side by
-side often enough that making them disagree internally is worse than the one
-adapter line in felobby.
-
-Run standalone:
-    python festore.py --selftest              # no files touched but a temp one
-    python festore.py --show [<db>]           # what is on file
-    python festore.py --import <json> [<db>]  # one-shot migration
+Run standalone (POL_DATABASE_URL names the database):
+    python festore.py --selftest              # a throwaway database (tools/fepg.py)
+    python festore.py --show                  # what is on file
+    python festore.py --import <json>         # one-shot migration off the JSON store
 """
-import contextlib
 import json
 import os
-import sqlite3
 import sys
-import threading
 import time
 
-# --------------------------------------------------------------------------- #
-# where it lives
-# --------------------------------------------------------------------------- #
-#: Same resolution trick as felobby's `_default_store()`: services/ is bind
-#: mounted at /app in the container, so `_HERE/../data` is pol-server/data on
-#: the host and /data in prod. Probing an absolute `/data` first is wrong on
-#: Windows, where it means `<current drive>/data` -- the host wrote to `E:/data`
-#: once and looked like it had worked.
-_HERE = os.path.dirname(os.path.abspath(__file__))
+import fedb
+from fedb import db
 
-
-def default_db():
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "fe.db")
-
-
-#: Empty disables the database completely -- felobby then keeps using the JSON
-#: store, which is the state every measurement before 2026-09-08 ran against.
-DB_PATH = os.environ.get("FE_DB", default_db())
-
-#: Shared with accounts.py and fmostore.py on purpose: one server, one journal
-#: mode. TRUNCATE (not WAL) because /data is a Windows bind mount on the dev box
-#: and WAL needs a shared-memory mapping those do not provide -- see
-#: accounts-db-wal-hazard.
-JOURNAL_MODE = os.environ.get("POL_SQLITE_JOURNAL", "TRUNCATE")
-
-#: 1 = the original swap off fe_characters.json (2026-09-08).
-#: 2 = PROGRESSION: exp, class_levels, bag_size (2026-09-08, same day).
-SCHEMA_VERSION = 2
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-
--- One Fantasy Earth character. `account` is feident's resolved store key
--- ("member:3", or "addr:<ip>" when no POL session names the box); `charid` is
--- the slot key the client echoes back in every 0xC003/0xC004 and the value
--- feworld sends as the unit login id, so it is unique across the WHOLE store,
--- not just one roster (see next_charid).
-CREATE TABLE IF NOT EXISTS character (
-    account       TEXT    NOT NULL,
-    charid        INTEGER NOT NULL,
-    slot_ord      INTEGER NOT NULL DEFAULT 0,   -- roster order, oldest first
-
-    -- IDENTITY, as the 0xD002 character record carries it (felobby.CHAR_FIELDS)
-    name          TEXT,
-    unit          INTEGER,      -- game unit id; 0xFF = none
-    sex           INTEGER,      -- picks the Male/m_ model table row vs the other
-    look1         INTEGER,
-    look2         INTEGER,
-    look3         INTEGER,
-    look4         INTEGER,
-    f24           INTEGER,
-    f28           INTEGER,
-    f2d           INTEGER,
-    s38           TEXT,
-
-    -- THE NATION. 0 IS NOT "unset" -- nations are 1..5 and 0x7FFFFFFF is the
-    -- client's sentinel for none. Written by feworld when 0x4012
-    -- MSG_JOIN_FORCE_REQUEST arrives.
-    force         INTEGER,
-
-    -- THE SUSPENSION BLOCK the client prints verbatim (packed decimal YYMMDDHH)
-    period_from   INTEGER,
-    period_to     INTEGER,
-    comment       TEXT,
-
-    -- THE ECONOMY. Seeded from --gold / --ring / --crystal / --total-score the
-    -- first time a character has no stored value, and served from here after.
-    -- A STORED 0 IS NOT A MISSING KEY: `_wallet_value` treats absent as "seed
-    -- from the flag" and 0 as "this player is broke". NULL means absent.
-    gold          INTEGER,
-    ring          INTEGER,
-    crystal       INTEGER,
-    total_score   INTEGER,
-
-    -- PROGRESS
-    tutorial      INTEGER,      -- 1 once the client has been through it
-    profile_comment TEXT,       -- what /comment sets; read back on next login
-
-    -- KEY: PROGRESSION (schema 2). These three were GLOBAL KNOBS, which is the
-    -- thing this file exists to end: one EXP total, one class-level table and
-    -- one bag size for every player on the server.
-    --
-    -- `exp` is the u32 the client keeps at [unit+0x135c], served by 0x1075
-    -- mask bit 2. Its setter does not ADD -- the value on the wire is a TOTAL
-    -- -- so combat_exp_push kept a running sum per SESSION and said outright
-    -- that it "is not persisted to the character store yet". Now it is, which
-    -- means a kill still counts after a relog.
-    exp           INTEGER,
-    -- {class index: level}, JSON. [unit+0x9F0 + [unit+0x3AB]] is what the
-    -- equip validator compares against a skill's required level (0x05076195);
-    -- at 0 every skill is refused and double-click does nothing, which is why
-    -- --class-levels existed at all. Per character now, so one player's
-    -- progress is not every player's.
-    class_levels  TEXT,
-    bag_size      INTEGER,      -- rows the bag holds; was --bag-size for all
-
-    -- THE LISTS, as JSON. Held as text rather than child tables on purpose:
-    -- every one of them is read and written WHOLE by feworld (bag_organize
-    -- rewrites `items` entirely, the palette round-trips all 8 slots), so rows
-    -- would buy nothing and cost the atomicity one column gives free.
-    equip         TEXT,         -- [[uid, no], ...]
-    items         TEXT,         -- [[uid, no, flag, count?], ...]
-    skills        TEXT,         -- [skill_id, ...]
-    palette       TEXT,         -- the 8 skill-palette slots (0x2029)
-    blacklist     TEXT,         -- [{"id": u32, "name": str}, ...]
-
-    -- ~48 positional wire fields (w70..wa8, fac..fc0, dc4, dc8, fcc..fd8) and
-    -- anything a later decode adds. Kept verbatim so a store that does not
-    -- recognise a field cannot silently drop it.
-    extra         TEXT,
-
-    created_at    TEXT,
-    updated_at    TEXT,
-    PRIMARY KEY (account, charid)
-);
-
-CREATE INDEX IF NOT EXISTS character_account ON character (account, slot_ord);
-"""
+#: The table. Every CrystalRing table starts with fe_ (fedb.py).
+TABLE = "fe_character"
 
 #: Scalar keys that get their own column. Everything else rides in `extra`.
 COLUMNS = (
@@ -180,16 +57,21 @@ COLUMNS = (
     "period_from", "period_to", "comment",
     "gold", "ring", "crystal", "total_score",
     "tutorial", "profile_comment",
-    "exp", "bag_size",                                      # schema 2
+    "exp", "bag_size",
 )
+
+#: The scalar columns that hold text; every other one in COLUMNS is BIGINT.
+TEXT_COLUMNS = ("name", "s38", "comment", "profile_comment")
 
 #: Columns held as JSON text. Decoded on the way out, so a caller sees the same
 #: lists the JSON store handed it.
 JSON_COLUMNS = ("equip", "items", "skills", "palette", "blacklist",
-                "class_levels")                             # class_levels: s2
+                "class_levels")
 
 #: Columns the loader must NOT hand back as record keys.
 _INTERNAL = ("account", "slot_ord", "extra", "created_at", "updated_at")
+
+_INT64 = (-(1 << 63), (1 << 63) - 1)
 
 
 class StoreUnavailable(Exception):
@@ -207,8 +89,8 @@ class StoreUnavailable(Exception):
     take the same branch, the player is shown an empty list, and the moment
     they create a character the save REPLACES their real roster with the one
     row. The JSON store has the same shape (an unreadable file returns None),
-    and adding sqlite as a second way to fail without fixing it would have made
-    a latent hazard a likely one.
+    and adding a database as a second way to fail without fixing it would have
+    made a latent hazard a likely one.
 
     Raising is safe here and is the honest failure: `_serve_one` catches
     everything per connection and closes the socket, so FE fails fast and shows
@@ -223,142 +105,62 @@ def _now():
 
 
 # --------------------------------------------------------------------------- #
-# the connection
+# the database
 # --------------------------------------------------------------------------- #
-_SCHEMA_LOCK = threading.Lock()
-_SCHEMA_READY = set()
-_JOURNAL_WARNED = set()
+def configured():
+    """True when this process has a database to use (POL_DATABASE_URL)."""
+    try:
+        db.database_url()
+        return True
+    except db.DatabaseNotConfigured:
+        return False
 
 
-def connect(path=None):
-    """Open (creating if needed) the FE database with the schema applied.
+def where():
+    """The database, for a log line (no password)."""
+    return fedb.where()
 
-    The three disciplines here are lifted from `accounts.connect()` and each
-    one is a live failure someone already paid for:
 
-    * THE SCHEMA IS APPLIED ONCE PER PROCESS. `CREATE TABLE IF NOT EXISTS`
-      takes a write lock even when every statement is a no-op, so applying it
-      per connection makes every reader contend with every other reader.
-    * THE JOURNAL MODE IS SET PER CONNECTION. For the rollback modes it is a
-      property of the CONNECTION, not the file, and sqlite opens every new one
-      in DELETE -- mixing DELETE and TRUNCATE on one file raises `disk I/O
-      error` on a Windows bind mount.
-    * THE OPEN IS RETRIED. On that same bind mount an ordinary open comes back
-      `unable to open database file` every so often.
+def forget_schema():
+    """Drop the once-per-process migration memo -- for tests that switch
+    databases."""
+    fedb.forget_schema()
 
-    No pool: FE opens a connection per store call -- a handful per login and
-    one per skill purchase, not the 7-9 per serve that made pooling worth it
-    for the POL lobby.
+
+def _errors():
+    return fedb.errors()
+
+
+def _lock(account):
+    """The advisory lock that serialises writes to one account's roster.
+
+    SQLite serialised every writer in the file (BEGIN IMMEDIATE), which is what
+    made update_roster's read-modify-write safe across the felobby and feworld
+    containers. PostgreSQL does not, so every write names this lock: two
+    writers of the same account wait for each other, two accounts do not.
     """
-    path = path or DB_PATH
-    key = os.path.abspath(path)
-    parent = os.path.dirname(key)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    conn = None
-    for attempt in range(3):
-        try:
-            conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
-            break
-        except sqlite3.OperationalError:
-            if attempt == 2:
-                raise
-            time.sleep(0.1 * (attempt + 1))
-    conn.row_factory = sqlite3.Row
-    got = conn.execute("PRAGMA journal_mode = %s" % JOURNAL_MODE).fetchone()
-    got = (got[0] if got else "?").lower()
-    if got != JOURNAL_MODE.lower() and key not in _JOURNAL_WARNED:
-        _JOURNAL_WARNED.add(key)
-        print("[festore] journal_mode is %r, not the requested %r -- another "
-              "connection holds %s" % (got, JOURNAL_MODE.lower(), path),
-              flush=True)
-    with _SCHEMA_LOCK:
-        if key not in _SCHEMA_READY:
-            conn.executescript(SCHEMA)
-            _migrate(conn, path)
-            conn.execute(
-                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', ?)",
-                (str(SCHEMA_VERSION),))
-            conn.commit()
-            _SCHEMA_READY.add(key)      # only after it is genuinely ready
-    return conn
-
-
-def _migrate(conn, path):
-    """Bring an EXISTING database up to SCHEMA_VERSION. Additive only.
-
-    WARNING: `CREATE TABLE IF NOT EXISTS` DOES NOTHING TO A TABLE THAT ALREADY EXISTS,
-    columns included -- so shipping a new column in SCHEMA above reaches a fresh
-    database and no other. Prod's fe.db was created at schema 1 with three real
-    characters in it within the hour; without this, every read of a schema-2
-    column would have raised `no such column` and -- because load_roster turns a
-    sqlite fault into StoreUnavailable -- refused every FE login.
-
-    Additive ONLY, deliberately: `ADD COLUMN` is O(1) in sqlite, needs no table
-    rewrite, and cannot lose a row. A change that needs a column DROPPED or
-    RETYPED is a different and much more dangerous operation; it does not belong
-    in a function that runs unattended on every process start.
-    """
-    # A FRESH database already has every column -- executescript ran just above,
-    # so this finds nothing to do and the stamp at the end is the only write.
-    # The work here is entirely for a database that predates a column.
-    have = {r[1] for r in conn.execute("PRAGMA table_info(character)")}
-    wanted = [("exp", "INTEGER"), ("class_levels", "TEXT"),
-              ("bag_size", "INTEGER")]
-    added, failed = [], []
-    for col, kind in wanted:
-        if col in have:
-            continue
-        try:
-            conn.execute('ALTER TABLE character ADD COLUMN "%s" %s'
-                         % (col, kind))
-            added.append(col)
-        except sqlite3.Error as e:      # pragma: no cover
-            failed.append(col)
-            print("[festore] WARNING: could not add column %s to %s: %r"
-                  % (col, path or DB_PATH, e), flush=True)
-    if added:
-        was = conn.execute(
-            "SELECT value FROM meta WHERE key = 'schema'").fetchone()
-        n = conn.execute("SELECT COUNT(*) FROM character").fetchone()[0]
-        print("[festore] schema %s -> %d on %s: added %s. %d character(s) kept "
-              "-- ADD COLUMN rewrites no rows, and every new column reads NULL "
-              "(= 'no stored value', so the knob still seeds it)."
-              % (was[0] if was else "?", SCHEMA_VERSION, path or DB_PATH,
-                 ", ".join(added), n), flush=True)
-    if failed:
-        # WARNING: DO NOT STAMP A VERSION THE FILE DOES NOT HAVE. A meta row claiming
-        # schema 2 over a table missing a schema-2 column is worse than no row:
-        # the next process reads the stamp, skips the migration it still needs,
-        # and every read of that column raises -- which load_roster turns into
-        # StoreUnavailable, i.e. a refused login.
-        print("[festore] WARNING: leaving the schema stamp where it was -- %s still "
-              "missing, so the next start retries the migration"
-              % ", ".join(failed), flush=True)
-        return
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES "
-                 "('schema', ?)", (str(SCHEMA_VERSION),))
-
-
-def forget_schema(path=None):
-    """Drop the once-per-process memo -- for tests that delete the file."""
-    with _SCHEMA_LOCK:
-        _SCHEMA_READY.discard(os.path.abspath(path or DB_PATH))
+    return "fe_character:%s" % account
 
 
 # --------------------------------------------------------------------------- #
 # record <-> row
 # --------------------------------------------------------------------------- #
-def _storable(v):
-    """True when sqlite can hold `v` in a column without changing it.
+def _storable(col, v):
+    """True when column `col` can hold `v` and hand back the same value.
 
-    Booleans are excluded ON PURPOSE: sqlite stores True as 1 and hands it back
-    as 1, so a `True` written here would come back as an int and a caller
-    testing `is True` would break. They ride in `extra`, which is JSON and
-    round-trips them exactly.
+    Booleans are excluded ON PURPOSE: a boolean written to an integer column
+    comes back as an int, and a caller testing `is True` would break. They ride
+    in `extra`, which is JSON and round-trips them exactly. The same goes for a
+    value of the wrong type for its column (SQLite stored whatever it was
+    given; PostgreSQL refuses), an integer outside 64 bits, and text with a
+    NUL in it, which PostgreSQL's text type cannot hold.
     """
-    return v is None or (isinstance(v, (int, float, str))
-                         and not isinstance(v, bool))
+    if v is None:
+        return True
+    if col in TEXT_COLUMNS:
+        return isinstance(v, str) and "\x00" not in v
+    return (isinstance(v, int) and not isinstance(v, bool)
+            and _INT64[0] <= v <= _INT64[1])
 
 
 def record_to_row(rec, account, slot_ord):
@@ -370,7 +172,7 @@ def record_to_row(rec, account, slot_ord):
             # is exactly what the JSON store did -- so the round trip through
             # here is unchanged for every existing call site.
             cols[k] = None if v is None else json.dumps(v, ensure_ascii=False)
-        elif k in COLUMNS and _storable(v):
+        elif k in COLUMNS and _storable(k, v):
             cols[k] = v
         else:
             extra[k] = v
@@ -381,7 +183,7 @@ def record_to_row(rec, account, slot_ord):
 
 
 def row_to_record(row):
-    """One sqlite row back to the plain dict the rest of FE expects.
+    """One database row back to the plain dict the rest of FE expects.
 
     A NULL column is a key the record did not have -- NOT a zero. That
     distinction is load-bearing: `_wallet_value` treats a MISSING `gold` as
@@ -389,11 +191,8 @@ def row_to_record(row):
     unset flag must not look like a player with nothing.
     """
     rec = {}
-    for k in row.keys():
-        if k in _INTERNAL:
-            continue
-        v = row[k]
-        if v is None:
+    for k, v in row.items():
+        if k in _INTERNAL or v is None:
             continue
         if k in JSON_COLUMNS:
             try:
@@ -402,7 +201,7 @@ def row_to_record(row):
                 continue        # a hand-edited row is not worth losing a login
         else:
             rec[k] = v
-    blob = row["extra"]
+    blob = row.get("extra")
     if blob:
         try:
             rec.update(json.loads(blob))
@@ -414,7 +213,11 @@ def row_to_record(row):
 # --------------------------------------------------------------------------- #
 # the API felobby.py calls
 # --------------------------------------------------------------------------- #
-def load_roster(account, path=None):
+_SELECT_ROSTER = ("SELECT * FROM fe_character WHERE account = %s"
+                  " ORDER BY slot_ord, charid")
+
+
+def load_roster(account):
     """This account's characters, roster order. None when the account has none.
 
     WARNING: None, NOT []. felobby.load_roster returns None for "no store / no roster"
@@ -429,31 +232,40 @@ def load_roster(account, path=None):
     roster with a freshly seeded one.
     """
     try:
-        conn = connect(path)
-    except sqlite3.Error as e:
-        raise StoreUnavailable(
-            "cannot open the character database %s: %r -- REFUSING to report "
-            "an empty roster for %r, because creating a character against one "
-            "would replace whatever is really in there"
-            % (path or DB_PATH, e, account))
-    try:
-        rows = conn.execute(
-            "SELECT * FROM character WHERE account = ?"
-            " ORDER BY slot_ord, charid", (account,)).fetchall()
-    except sqlite3.Error as e:
+        fedb.ensure_schema()
+        rows = db.query(_SELECT_ROSTER, (account,))
+    except _errors() as e:
         raise StoreUnavailable(
             "cannot read %r out of the character database %s: %r -- REFUSING "
             "to report an empty roster, because creating a character against "
             "one would replace whatever is really in there"
-            % (account, path or DB_PATH, e))
-    finally:
-        conn.close()
+            % (account, where(), e))
     if not rows:
         return None                     # genuinely no characters: a NEW player
     return [row_to_record(r) for r in rows]
 
 
-def save_roster(account, roster, path=None, conn=None):
+def _write_roster(conn, account, roster):
+    """DELETE + INSERT of one account's list on `conn`, inside the caller's
+    transaction. Raises on a database error."""
+    now = _now()
+    born = {r["charid"]: r["created_at"] for r in db.query(
+        "SELECT charid, created_at FROM fe_character WHERE account = %s",
+        (account,), conn=conn)}
+    db.execute("DELETE FROM fe_character WHERE account = %s", (account,),
+               conn=conn)
+    for n, rec in enumerate(roster or []):
+        cols, _ = record_to_row(rec, account, n)
+        cols["created_at"] = born.get(cols.get("charid")) or now
+        cols["updated_at"] = now
+        names = list(cols)
+        db.execute("INSERT INTO fe_character (%s) VALUES (%s)"
+                   % (",".join('"%s"' % c for c in names),
+                      ",".join("%s" for _ in names)),
+                   [cols[c] for c in names], conn=conn)
+
+
+def save_roster(account, roster, conn=None):
     """Replace this account's list. True when it was written.
 
     Whole-list replace, like the JSON store it stands in for -- the callers
@@ -466,121 +278,78 @@ def save_roster(account, roster, path=None, conn=None):
     file were all hand-building.
 
     `conn` is for update_roster, which needs the read and the write inside the
-    SAME transaction; everybody else leaves it None and gets its own.
+    SAME transaction; there a database error propagates to it, so the whole
+    read-modify-write rolls back together. Everybody else leaves it None and
+    gets a transaction of its own.
     """
-    own = conn is None
-    if own:
-        try:
-            conn = connect(path)
-        except sqlite3.Error as e:
-            print("[festore] save_roster(%r) failed to open the database: %r"
-                  % (account, e), flush=True)
-            return False
-    try:
-        now = _now()
-        born = {r["charid"]: r["created_at"] for r in conn.execute(
-            "SELECT charid, created_at FROM character WHERE account = ?",
-            (account,))}
-        # `with conn:` commits on the way out -- but only when this call owns
-        # the connection. Inside update_roster's BEGIN IMMEDIATE it must NOT
-        # commit: the caller does that after mutate() has been seen to return.
-        ctx = conn if own else contextlib.nullcontext()
-        with ctx:
-            conn.execute("DELETE FROM character WHERE account = ?", (account,))
-            for n, rec in enumerate(roster or []):
-                cols, _ = record_to_row(rec, account, n)
-                cols["created_at"] = born.get(cols.get("charid")) or now
-                cols["updated_at"] = now
-                names = list(cols)
-                conn.execute(
-                    "INSERT INTO character (%s) VALUES (%s)"
-                    % (",".join('"%s"' % c for c in names),
-                       ",".join("?" for _ in names)),
-                    [cols[c] for c in names])
+    if conn is not None:
+        _write_roster(conn, account, roster)
         return True
-    except sqlite3.Error as e:
+    try:
+        fedb.ensure_schema()
+        with db.transaction(lock=_lock(account)) as own:
+            _write_roster(own, account, roster)
+        return True
+    except _errors() as e:
         print("[festore] save_roster(%r) failed: %r -- %d character(s) NOT "
               "written" % (account, e, len(roster or [])), flush=True)
         return False
-    finally:
-        if own:
-            conn.close()
 
 
-def update_roster(account, mutate, path=None):
+def update_roster(account, mutate):
     """Read `account`'s roster, apply `mutate(roster)`, write it back.
 
-    KEY: THE WHOLE READ-MODIFY-WRITE IS ONE `BEGIN IMMEDIATE` TRANSACTION, which
-    is why this replaces the advisory lock on `<store>.lock` rather than
-    keeping it. felobby and feworld run in SEPARATE CONTAINERS over one /data;
-    the lock file was there because two whole-file rewrites could interleave
-    and lose one player's skill purchase. sqlite's own writer lock does that job
-    across processes, without a sidecar file that `os.replace()` can strand and
-    without the "lock not taken -- this write is protected against other threads
-    only" degraded mode.
+    KEY: THE WHOLE READ-MODIFY-WRITE IS ONE TRANSACTION UNDER THE ACCOUNT'S
+    ADVISORY LOCK (see _lock), which is why this replaces the advisory lock on
+    `<store>.lock` rather than keeping it. felobby and feworld run in SEPARATE
+    CONTAINERS; the lock file was there because two whole-file rewrites could
+    interleave and lose one player's skill purchase. The database lock does
+    that job across processes, without a sidecar file that `os.replace()` can
+    strand and without the "lock not taken -- this write is protected against
+    other threads only" degraded mode.
+
+    WARNING: THE LOCK IS TAKEN BEFORE THE SELECT, not at the first write. Two
+    callers that both read first and then wait for each other's write is the
+    exact read-modify-write race this exists to close; with the lock up front
+    the second caller WAITS and then reads what the first one wrote.
 
     Returns what `mutate` returned, or None when the account has no roster --
-    and writes NOTHING then, exactly as the JSON version did.
+    and writes NOTHING then, exactly as the JSON version did. An exception in
+    `mutate` propagates and rolls the transaction back.
     """
     try:
-        conn = connect(path)
-    except sqlite3.Error as e:
-        print("[festore] update_roster(%r) failed to open the database: %r"
-              % (account, e), flush=True)
-        return None
-    try:
-        # WARNING: IMMEDIATE, not the implicit DEFERRED. A deferred transaction takes
-        # only a READ lock at the SELECT and upgrades at the first write, and
-        # two of those upgrading at once is `database is locked` with the other
-        # side's work already done -- the exact read-modify-write race this
-        # exists to close. IMMEDIATE takes the writer lock up front, so the
-        # second caller WAITS (timeout=10 in connect) instead of failing.
-        conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(
-            "SELECT * FROM character WHERE account = ?"
-            " ORDER BY slot_ord, charid", (account,)).fetchall()
-        if not rows:
-            conn.rollback()
-            return None
-        roster = [row_to_record(r) for r in rows]
-        result = mutate(roster)
-        save_roster(account, roster, path, conn=conn)
-        conn.commit()
-        return result
-    except sqlite3.Error as e:
+        fedb.ensure_schema()
+        with db.transaction(lock=_lock(account)) as conn:
+            rows = db.query(_SELECT_ROSTER, (account,), conn=conn)
+            if not rows:
+                return None
+            roster = [row_to_record(r) for r in rows]
+            result = mutate(roster)
+            save_roster(account, roster, conn=conn)
+            return result
+    except _errors() as e:
         print("[festore] update_roster(%r) failed: %r -- nothing written"
               % (account, e), flush=True)
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            pass
         return None
-    finally:
-        conn.close()
 
 
-def store_accounts(path=None):
+def store_accounts():
     """{account: character count} for every account with at least one.
 
     A DICT, not a list, because felobby.store_accounts returns one -- it is what
     reports a roster still sitting under the pre-2026-08-24 shared "TestPlayer"
-    key.
+    key. Ordered by the account's bytes (COLLATE "C"), as SQLite ordered it.
     """
     try:
-        conn = connect(path)
-    except sqlite3.Error:
+        fedb.ensure_schema()
+        return {r["account"]: r["n"] for r in db.query(
+            'SELECT account, COUNT(*) AS n FROM fe_character'
+            ' GROUP BY account ORDER BY account COLLATE "C"')}
+    except _errors():
         return {}
-    try:
-        return {r[0]: r[1] for r in conn.execute(
-            "SELECT account, COUNT(*) FROM character"
-            " GROUP BY account ORDER BY account")}
-    except sqlite3.Error:
-        return {}
-    finally:
-        conn.close()
 
 
-def next_charid(roster, path=None):
+def next_charid(roster):
     """A charid free across the WHOLE store, not just this roster.
 
     charid is NOT a private number -- feworld sends it as the unit login value
@@ -590,49 +359,39 @@ def next_charid(roster, path=None):
     """
     top = max([int(c.get("charid") or 0) for c in (roster or [])] + [0])
     try:
-        conn = connect(path)
-    except sqlite3.Error:
-        return top + 1
-    try:
-        row = conn.execute("SELECT MAX(charid) FROM character").fetchone()
-        if row and row[0] is not None:
-            top = max(top, int(row[0]))
-    except sqlite3.Error:
+        fedb.ensure_schema()
+        row = db.query_one("SELECT MAX(charid) AS top FROM fe_character")
+        if row and row["top"] is not None:
+            top = max(top, int(row["top"]))
+    except _errors():
         pass
-    finally:
-        conn.close()
     return top + 1
 
 
-def count(path=None):
+def count():
     """How many characters are on file, across all accounts."""
     try:
-        conn = connect(path)
-    except sqlite3.Error:
+        fedb.ensure_schema()
+        return db.query_one("SELECT COUNT(*) AS n FROM fe_character")["n"]
+    except _errors():
         return 0
-    try:
-        return conn.execute("SELECT COUNT(*) FROM character").fetchone()[0]
-    except sqlite3.Error:
-        return 0
-    finally:
-        conn.close()
 
 
 # --------------------------------------------------------------------------- #
 # the one-shot migration off the JSON store
 # --------------------------------------------------------------------------- #
-def import_json(json_path, path=None, force=False):
+def import_json(json_path, force=False):
     """Copy `fe_characters.json` in. Returns (accounts, characters).
 
     REFUSES a database that already holds characters unless `force` -- the
     import runs automatically on first use, and an import that overwrote live
     rows with a stale file would be indistinguishable from data loss. The JSON
-    file is never modified or deleted: it stays as the backup, and clearing
-    FE_DB falls back to it.
+    file is never modified or deleted: it stays as the backup, and FE_DB=
+    (empty) falls back to it.
     """
     if not json_path or not os.path.exists(json_path):
         return 0, 0
-    if not force and count(path):
+    if not force and count():
         return 0, 0
     try:
         with open(json_path, encoding="utf-8") as fh:
@@ -649,7 +408,7 @@ def import_json(json_path, path=None, force=False):
     for account, roster in sorted(everyone.items()):
         if not roster:
             continue
-        if save_roster(account, roster, path):
+        if save_roster(account, roster):
             accounts += 1
             chars += len(roster)
     return accounts, chars
@@ -658,14 +417,11 @@ def import_json(json_path, path=None, force=False):
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
-def _show(path):
-    print("database: %s" % os.path.abspath(path))
-    if not os.path.exists(path):
-        print("  (does not exist yet)")
-        return
-    for account, n in store_accounts(path).items():
+def _show():
+    print("database: %s" % where())
+    for account, n in store_accounts().items():
         print("  %s  (%d character(s))" % (account, n))
-        for c in load_roster(account, path) or []:
+        for c in load_roster(account) or []:
             print("    charid %-4s %-18s nation=%-4s gold=%-8s ring=%-6s "
                   "crystal=%-6s score=%-8s items=%-3d equip=%-3d skills=%d"
                   % (c.get("charid"), c.get("name", ""),
@@ -678,15 +434,39 @@ def _show(path):
 
 def _selftest():
     import tempfile
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    os.pardir, "tools"))
+    import fepg
+    if fepg.fresh_database() is None:
+        return fepg.skip_or_fail("festore")
+    db.configure()                      # the URL fepg just put in the environment
+    forget_schema()
     ok = True
-    db = os.path.join(tempfile.mkdtemp(prefix="festore"), "fe.db")
 
     def check(label, cond):
         nonlocal ok
         print("  %s: %s" % (label, "OK" if cond else "FAIL"))
         ok &= bool(cond)
 
-    print("festore selftest")
+    print("festore selftest (%s)" % where())
+
+    # KEY: THE MIGRATION NUMBERING. CrystalRing's files share OpenLobby's
+    # schema_migrations table, which is keyed by version number alone, so a
+    # number both sets used would be skipped by whichever set ran second.
+    # Apply OpenLobby's set FIRST, as a stack does, then ours.
+    ol = db.migrate(log=lambda m: None)
+    fedb.ensure_schema(log=lambda m: None)
+    have = db.applied_migrations()
+    check("OpenLobby's migrations applied first (%s)" % ", ".join(ol), bool(ol))
+    check("...and CrystalRing's still applied after them (1001, 1002)",
+          {1001, 1002} <= set(have))
+    check("fe_character and fe_mail exist",
+          db.query_one("SELECT to_regclass('fe_character') IS NOT NULL AS a,"
+                       " to_regclass('fe_mail') IS NOT NULL AS b")
+          == {"a": True, "b": True})
+    check("a second run applies nothing (idempotent)",
+          db.migrate(directory=fedb.MIGRATIONS_DIR, log=lambda m: None) == [])
+
     rec = {"charid": 1, "name": "Fox", "unit": 0xFF, "sex": 1,
            "look1": 2, "look2": 3, "look3": 4, "look4": 5,
            "f24": 0, "f28": 0, "f2d": 0, "s38": "",
@@ -697,55 +477,64 @@ def _selftest():
            # keys with no column, and a bool: these must survive via `extra`
            "w70": -1, "fac": 1.5, "dc4": 7, "u8_b": 0, "tutorial_seen": True}
     check("an unknown account reads None, not []",
-          load_roster("member:3", db) is None)
-    check("save", save_roster("member:3", [rec], db))
-    got = load_roster("member:3", db)
+          load_roster("member:3") is None)
+    check("save", save_roster("member:3", [rec]))
+    got = load_roster("member:3")
     check("round trip is key-for-key identical", got == [rec])
-    check("no cross-account bleed", load_roster("member:9", db) is None)
-    check("store_accounts", store_accounts(db) == {"member:3": 1})
+    check("no cross-account bleed", load_roster("member:9") is None)
+    check("store_accounts", store_accounts() == {"member:3": 1})
+
+    # a value of the wrong type for its column must survive too (SQLite kept
+    # whatever it was given; PostgreSQL would refuse the row)
+    odd = dict(rec, gold=12.5, name=7, exp=1 << 70, comment="a\x00b",
+               tutorial=True)
+    check("off-type values save", save_roster("member:3", [odd]))
+    check("...and come back exactly, through `extra`",
+          load_roster("member:3") == [odd])
 
     # a stored ZERO must not read back as absent -- _wallet_value depends on it
-    save_roster("member:3", [dict(rec, gold=0)], db)
-    check("a stored 0 survives as 0", load_roster("member:3", db)[0]["gold"] == 0)
-    save_roster("member:3", [dict(rec)], db)
+    save_roster("member:3", [dict(rec, gold=0)])
+    check("a stored 0 survives as 0", load_roster("member:3")[0]["gold"] == 0)
+    save_roster("member:3", [dict(rec)])
     check("an ABSENT key stays absent",
-          "gold" not in load_roster("member:3", db)[0])
+          "gold" not in load_roster("member:3")[0])
 
     # an EMPTY list is not a missing one either -- an emptied bag must persist
-    save_roster("member:3", [dict(rec, items=[])], db)
+    save_roster("member:3", [dict(rec, items=[])])
     check("an emptied bag stays empty (not absent)",
-          load_roster("member:3", db)[0]["items"] == [])
+          load_roster("member:3")[0]["items"] == [])
 
     # tuples go in, lists come back -- exactly what the JSON store did
-    save_roster("member:3", [dict(rec, equip=[(1, 0x1234)])], db)
+    save_roster("member:3", [dict(rec, equip=[(1, 0x1234)])])
     check("tuples round-trip as lists, as JSON did",
-          load_roster("member:3", db)[0]["equip"] == [[1, 0x1234]])
+          load_roster("member:3")[0]["equip"] == [[1, 0x1234]])
 
     # order is the roster order, not the charid order
-    save_roster("member:3", [dict(rec, charid=7), dict(rec, charid=2)], db)
+    save_roster("member:3", [dict(rec, charid=7), dict(rec, charid=2)])
     check("roster order is preserved",
-          [c["charid"] for c in load_roster("member:3", db)] == [7, 2])
-    check("next_charid clears the whole store", next_charid([], db) == 8)
+          [c["charid"] for c in load_roster("member:3")] == [7, 2])
+    check("next_charid clears the whole store", next_charid([]) == 8)
     check("and an uncommitted roster too",
-          next_charid([{"charid": 40}], db) == 41)
+          next_charid([{"charid": 40}]) == 41)
 
-    save_roster("member:3", [], db)
-    check("empty save clears the account", load_roster("member:3", db) is None)
-    check("and takes it out of store_accounts", store_accounts(db) == {})
+    check("a duplicate charid is refused, not half-written",
+          save_roster("member:3", [dict(rec, charid=5), dict(rec, charid=5)])
+          is False)
+    check("...and the previous roster is intact",
+          [c["charid"] for c in load_roster("member:3")] == [7, 2])
+
+    save_roster("member:3", [])
+    check("empty save clears the account", load_roster("member:3") is None)
+    check("and takes it out of store_accounts", store_accounts() == {})
 
     # created_at survives a rewrite; updated_at moves
-    save_roster("member:3", [rec], db)
-    conn = connect(db)
-    born = conn.execute("SELECT created_at FROM character").fetchone()[0]
-    conn.close()
+    save_roster("member:3", [rec])
+    born = db.query_one("SELECT created_at FROM fe_character")["created_at"]
     time.sleep(1.01)                    # _now() has one-second resolution
-    save_roster("member:3", [dict(rec, name="Renamed")], db)
-    conn = connect(db)
-    row = conn.execute(
-        "SELECT created_at, updated_at FROM character").fetchone()
-    conn.close()
-    check("created_at survives a rewrite", row[0] == born)
-    check("updated_at moves", row[1] != born)
+    save_roster("member:3", [dict(rec, name="Renamed")])
+    row = db.query_one("SELECT created_at, updated_at FROM fe_character")
+    check("created_at survives a rewrite", row["created_at"] == born)
+    check("updated_at moves", row["updated_at"] != born)
 
     # update_roster: the read-modify-write feworld uses for every mutation
     def bump(roster):
@@ -753,116 +542,87 @@ def _selftest():
         return "done"
 
     check("update_roster returns what mutate did",
-          update_roster("member:3", bump, db) == "done")
-    check("and committed it", load_roster("member:3", db)[0]["gold"] == 12345)
+          update_roster("member:3", bump) == "done")
+    check("and committed it", load_roster("member:3")[0]["gold"] == 12345)
     check("update_roster on an unknown account writes nothing",
-          update_roster("member:404", bump, db) is None)
-    check("and did not create it", load_roster("member:404", db) is None)
+          update_roster("member:404", bump) is None)
+    check("and did not create it", load_roster("member:404") is None)
 
     def boom(roster):
         roster[0]["gold"] = 999
         raise ValueError("mutate blew up")
 
     try:
-        update_roster("member:3", boom, db)
+        update_roster("member:3", boom)
         check("an exception in mutate propagates", False)
     except ValueError:
         check("an exception in mutate propagates", True)
     check("and rolls the whole transaction back",
-          load_roster("member:3", db)[0]["gold"] == 12345)
+          load_roster("member:3")[0]["gold"] == 12345)
+
+    # two writers of one account, from two threads: the lock makes the second
+    # read what the first wrote, so neither increment is lost
+    import threading
+    barrier = threading.Barrier(2)
+
+    def slow_add(roster):
+        roster[0]["gold"] += 1
+        time.sleep(0.3)
+        return True
+
+    def worker():
+        barrier.wait()
+        update_roster("member:3", slow_add)
+
+    ts = [threading.Thread(target=worker) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    check("two concurrent update_rosters lose neither write",
+          load_roster("member:3")[0]["gold"] == 12347)
 
     # WARNING: A FAULT MUST NOT LOOK LIKE AN EMPTY ROSTER -- see StoreUnavailable
-    broken = os.path.join(os.path.dirname(db), "not-a-database.db")
-    with open(broken, "wb") as fh:
-        fh.write(b"this is definitely not a sqlite file" * 8)
-    forget_schema(broken)
+    db.execute("ALTER TABLE fe_character RENAME TO fe_character_away")
     try:
-        load_roster("member:3", broken)
-        check("a corrupt database raises rather than reading empty", False)
+        load_roster("member:3")
+        check("an unreadable table raises rather than reading empty", False)
     except StoreUnavailable:
-        check("a corrupt database raises rather than reading empty", True)
-    except sqlite3.Error:
-        check("a corrupt database raises StoreUnavailable, not a raw "
-              "sqlite3.Error", False)
+        check("an unreadable table raises rather than reading empty", True)
+    finally:
+        db.execute("ALTER TABLE fe_character_away RENAME TO fe_character")
 
-    unopenable = os.path.dirname(db)            # a DIRECTORY, not a file
-    forget_schema(unopenable)
+    saved_url = os.environ.pop("POL_DATABASE_URL")
+    db.configure()
     try:
-        load_roster("member:3", unopenable)
-        check("an unopenable database raises too", False)
+        load_roster("member:3")
+        check("no database configured raises too", False)
     except StoreUnavailable:
-        check("an unopenable database raises too", True)
+        check("no database configured raises too", True)
+    finally:
+        os.environ["POL_DATABASE_URL"] = saved_url
+        db.configure()
+    check("configured() says whether there is a database", configured())
 
     check("...while a genuinely unknown account still reads None",
-          load_roster("member:404", db) is None)
-
-    # KEY: THE SCHEMA-1 -> 2 MIGRATION, against a database built the way the real
-    # one was: prod's fe.db was created at schema 1 with three live characters
-    # in it, so "the new column only reaches a fresh database" is data loss with
-    # extra steps.
-    v1 = os.path.join(os.path.dirname(db), "v1.db")
-    forget_schema(v1)
-    c = sqlite3.connect(v1)
-    c.executescript("""
-        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
-        CREATE TABLE character (
-            account TEXT NOT NULL, charid INTEGER NOT NULL,
-            slot_ord INTEGER NOT NULL DEFAULT 0,
-            name TEXT, "force" INTEGER, gold INTEGER, items TEXT, extra TEXT,
-            created_at TEXT, updated_at TEXT,
-            PRIMARY KEY (account, charid));
-        INSERT INTO meta VALUES ('schema', '1');
-        INSERT INTO character (account, charid, name, "force", gold, items)
-            VALUES ('member:3', 1, 'Fox', 3, 777, '[[1,4660,0]]');
-        INSERT INTO character (account, charid, name, "force", gold, items)
-            VALUES ('member:6', 2, 'Maria', 1, 0, '[]');
-    """)
-    c.commit()
-    c.close()
-    pre = {"cols": None}
-    conn = connect(v1)                  # <- the migration runs here
-    pre["cols"] = {r[1] for r in conn.execute("PRAGMA table_info(character)")}
-    ver = conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema'").fetchone()[0]
-    conn.close()
-    check("the migration adds the schema-2 columns",
-          {"exp", "class_levels", "bag_size"} <= pre["cols"])
-    check("and stamps the new version", ver == str(SCHEMA_VERSION))
-    got = load_roster("member:3", v1)
-    check("every schema-1 character survives",
-          [c2["name"] for c2 in (load_roster("member:3", v1) or [])
-           + (load_roster("member:6", v1) or [])] == ["Fox", "Maria"])
-    check("...with its old values intact",
-          got[0]["gold"] == 777 and got[0]["force"] == 3
-          and got[0]["items"] == [[1, 4660, 0]])
-    check("a new column reads ABSENT, not 0 -- so the knob still seeds it",
-          "exp" not in got[0] and "bag_size" not in got[0])
-    # and the new columns are writable on the migrated file
-    update_roster("member:3", lambda r: r[0].update(
-        {"exp": 4242, "bag_size": 40, "class_levels": {"2": 30}}), v1)
-    got = load_roster("member:3", v1)
-    check("the migrated database stores progression",
-          got[0]["exp"] == 4242 and got[0]["bag_size"] == 40
-          and got[0]["class_levels"] == {"2": 30})
-    forget_schema(v1)
-    check("re-running the migration is a no-op (idempotent)",
-          connect(v1) is not None and load_roster("member:3", v1)[0]["exp"] == 4242)
+          load_roster("member:404") is None)
 
     # the JSON import
-    jp = os.path.join(os.path.dirname(db), "chars.json")
+    jp = os.path.join(tempfile.mkdtemp(prefix="festore"), "chars.json")
     with open(jp, "w", encoding="utf-8") as fh:
         json.dump({"accounts": {
             "member:5": [{"charid": 1, "name": "Old", "force": 2}],
             "member:6": []}}, fh)
-    save_roster("member:3", [], db)
-    n_a, n_c = import_json(jp, db)
+    save_roster("member:3", [])
+    n_a, n_c = import_json(jp)
     check("import brings the JSON store in", (n_a, n_c) == (1, 1))
     check("and skips accounts with no characters",
-          list(store_accounts(db)) == ["member:5"])
+          list(store_accounts()) == ["member:5"])
     check("a second import is refused (rows exist)",
-          import_json(jp, db) == (0, 0))
+          import_json(jp) == (0, 0))
     check("the JSON file is left alone", os.path.exists(jp))
 
+    db.close()
     print("ALL OK" if ok else "FAILURES ABOVE")
     return 0 if ok else 1
 
@@ -874,14 +634,13 @@ if __name__ == "__main__":
     elif argv[0] == "--selftest":
         raise SystemExit(_selftest())
     elif argv[0] == "--show":
-        _show(argv[1] if len(argv) > 1 else DB_PATH)
+        _show()
     elif argv[0] == "--import":
         if len(argv) < 2:
             raise SystemExit("--import wants the fe_characters.json path")
-        _db = argv[2] if len(argv) > 2 and not argv[2].startswith("-") \
-            else DB_PATH
-        a, c = import_json(argv[1], _db, force="--force" in argv)
-        print("imported %d character(s) for %d account(s) into %s" % (c, a, _db)
+        a, c = import_json(argv[1], force="--force" in argv)
+        print("imported %d character(s) for %d account(s) into %s"
+              % (c, a, where())
               if c else "nothing imported (the database already holds "
                         "characters, or the file is empty) -- --force overrides")
     else:

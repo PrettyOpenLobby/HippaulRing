@@ -242,13 +242,14 @@ def update_roster(path, account, mutate):
     `roster_lock` degrades to a thread-only lock whenever `<store>.lock` cannot
     be opened -- and says so, but only in a log line nobody is reading during a
     live session. festore.update_roster runs the read and the write inside one
-    BEGIN IMMEDIATE, so the cross-container exclusion is sqlite's writer lock
+    transaction under the account's advisory lock, so the cross-container
+    exclusion is the database's
     and has no degraded mode to miss.
     """
     db = use_db(path)
     if db:
         return festore.update_roster(
-            account, lambda roster: mutate(_normalise(roster)), db)
+            account, lambda roster: mutate(_normalise(roster)))
     with roster_lock(path):
         roster = load_roster(path, account)
         if roster is None:
@@ -659,13 +660,16 @@ def _default_store():
 # through to the original JSON body when it is not, so the switch is one
 # environment variable and NOT ONE CALL SITE MOVED.
 # --------------------------------------------------------------------------- #
-#: WARNING: DERIVED FROM THE STORE PATH, not a path of its own. prod points the JSON
-#: store at /data, the dev stack at pol-server/data and every test at a temp
-#: directory; a database that did not follow would have quietly made a test
-#: write to the real one. `FE_DB=` (empty) keeps the JSON store -- the state
-#: every measurement before today ran against, and a real rollback rather than
-#: a hope, because the JSON file is never touched again once the database is in
-#: use.
+#: WARNING: THE DATABASE IS POL_DATABASE_URL'S, not one per store path. Until
+#: 2026-09-27 the SQLite file sat beside the JSON store (prod /data, the dev
+#: stack pol-server/data, every test a temp directory), so a test could not
+#: write to the real one. With PostgreSQL the same guarantee comes from the
+#: environment: tools/fe_run_all.py gives every suite a throwaway database, and
+#: a process with no POL_DATABASE_URL stays on the JSON store. `FE_DB=` (empty)
+#: keeps the JSON store even with a database configured -- the state every
+#: measurement before 2026-09-08 ran against, and a real rollback rather than a
+#: hope, because the JSON file is never touched again once the database is in
+#: use. Any other FE_DB value is ignored.
 _db_state = {}
 _db_lock = threading.Lock()
 
@@ -692,7 +696,8 @@ def _say(msg):
 
 
 def use_db(path):
-    """The database path to use for JSON store `path`, or None to stay on JSON.
+    """True to keep JSON store `path` in the database (festore), None to stay
+    on the JSON file.
 
     Does the one-shot JSON import on the first call that finds an empty
     database. Never raises: a database fault must degrade to the JSON store,
@@ -704,32 +709,62 @@ def use_db(path):
     env = os.environ.get("FE_DB")
     if env is not None and not env.strip():
         return None                     # FE_DB= explicitly disables it
-    db = env.strip() if env else os.path.join(
-        os.path.dirname(os.path.abspath(path)), "fe.db")
     with _db_lock:
-        if db in _db_state:
-            return _db_state[db]
-        _db_state[db] = None            # once, whatever happens below
+        if path in _db_state:
+            return _db_state[path]
+        _db_state[path] = None          # once, whatever happens below
+        if not festore.configured():
+            _say("[felobby] WARNING: POL_DATABASE_URL is not set -- the character "
+                 "store stays on the JSON file %s" % path)
+            return None
         try:
-            n_a, n_c = festore.import_json(path, db)
-            _db_state[db] = db          # BEFORE the log line, not after it
+            legacy = _legacy_sqlite(path)
+            if legacy:
+                n_a = n_c = 0
+                if not festore.count():
+                    _say("[felobby] WARNING: PLAYER DATABASE: %s is the SQLite "
+                         "store from before PostgreSQL and holds the current "
+                         "characters, so %s (older) is NOT imported. Import "
+                         "%s into %s first." % (legacy, path, legacy,
+                                                festore.where()))
+            else:
+                n_a, n_c = festore.import_json(path)
+            _db_state[path] = True      # BEFORE the log line, not after it
             if n_c:
                 _say("[felobby] KEY: PLAYER DATABASE: imported %d "
                      "character(s) for %d account(s) from %s into %s. The JSON "
                      "file is UNTOUCHED and is now the backup -- set FE_DB= "
-                     "(empty) to fall back to it." % (n_c, n_a, path, db))
+                     "(empty) to fall back to it."
+                     % (n_c, n_a, path, festore.where()))
             else:
                 _say("[felobby] player database %s: %d character(s) on file"
-                     % (db, festore.count(db)))
+                     % (festore.where(), festore.count()))
         except Exception as e:                           # pragma: no cover
-            _db_state[db] = None
+            _db_state[path] = None
             _say("[felobby] WARNING: player database %s unusable (%r) -- falling "
-                 "back to the JSON store %s" % (db, e, path))
-    return _db_state[db]
+                 "back to the JSON store %s" % (festore.where(), e, path))
+    return _db_state[path]
+
+
+def _legacy_sqlite(path):
+    """The SQLite fe.db beside JSON store `path` (or at a path FE_DB still
+    names), when one exists.
+
+    WARNING: ITS PRESENCE MEANS THE JSON FILE IS STALE. The JSON store was frozen
+    as a backup on 2026-09-08 when fe.db took over, so importing it into an
+    empty PostgreSQL database would bring back characters as they were that
+    day and lose everything since. fe.db is what has to be imported.
+    """
+    env = (os.environ.get("FE_DB") or "").strip()
+    for cand in (env, os.path.join(os.path.dirname(os.path.abspath(path)),
+                                   "fe.db")):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
 
 
 def _normalise(rows):
-    """Tuples do not survive JSON, and they do not survive sqlite either.
+    """Tuples do not survive JSON, and they do not survive the database either.
 
     WARNING: ONE COPY, ON THE WAY OUT OF THE STORE, whichever store it was. feworld
     does `[tuple(x) for x in _load_char_field(...)]` at a dozen call sites
@@ -746,13 +781,13 @@ def _normalise(rows):
 def load_roster(path, account):
     """Characters saved for `account`, or None if there is no store yet.
 
-    SQLITE SINCE 2026-09-08 (festore.py), JSON before it and still as the
-    fallback. The old note here read "JSON, not SQLite, DELIBERATELY", on the
-    grounds that `data/accounts.db` was truncated once by a container restart
-    landing mid-commit. That hazard is real and it is why festore opens its own
-    file in TRUNCATE journal mode rather than joining accounts.db -- but it was
-    never an argument for hand-building atomicity in a whole-file rewrite that
-    two containers share. See festore.update_roster.
+    A DATABASE SINCE 2026-09-08 (festore.py: SQLite, then PostgreSQL from
+    2026-09-27), JSON before it and still as the fallback. The old note here
+    read "JSON, not SQLite, DELIBERATELY", on the grounds that
+    `data/accounts.db` was truncated once by a container restart landing
+    mid-commit. That hazard was real, but it was never an argument for
+    hand-building atomicity in a whole-file rewrite that two containers share.
+    See festore.update_roster.
 
     WARNING: ON THE DATABASE A FAULT RAISES festore.StoreUnavailable AND IS MEANT TO.
     Look at serve_lobby's caller: `if roster is None:` seeds a NEW player from
@@ -770,7 +805,7 @@ def load_roster(path, account):
     """
     db = use_db(path)
     if db:
-        return _normalise(festore.load_roster(account, db))
+        return _normalise(festore.load_roster(account))
     if not path or not os.path.exists(path):
         return None
     try:
@@ -797,7 +832,7 @@ def store_accounts(path):
     a roster still sitting under the pre-2026-08-24 shared account name."""
     db = use_db(path)
     if db:
-        return festore.store_accounts(db)
+        return festore.store_accounts()
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -820,7 +855,7 @@ def next_charid(path, roster):
     """
     db = use_db(path)
     if db:
-        return festore.next_charid(roster, db)
+        return festore.next_charid(roster)
     top = max([c.get("charid", 0) for c in (roster or [])] + [0])
     if path and os.path.exists(path):
         try:
@@ -862,13 +897,13 @@ def save_roster(path, account, roster):
     os.replace. A half-written roster read as a corrupt store on the next launch
     would lose every character, and a container restart can land anywhere.
 
-    On the database that atomicity is sqlite's: one DELETE + INSERT per account
+    On the database that atomicity is the database's: one DELETE + INSERT per account
     in one transaction. The temp-file dance below is what it replaces."""
     db = use_db(path)
     if db:
-        if festore.save_roster(account, roster, db):
+        if festore.save_roster(account, roster):
             print("[felobby]    saved %d character(s) for %r -> %s"
-                  % (len(roster or []), account, db), flush=True)
+                  % (len(roster or []), account, festore.where()), flush=True)
         return
     if not path:
         return
@@ -1871,11 +1906,10 @@ def main():
                     help="JSON file created characters are saved to and loaded "
                          "from, keyed by the RESOLVED POL MEMBER (feident.py) "
                          "-- not by --account, which is what made it one "
-                         "roster for the whole server. Set empty to disable. JSON "
-                         "and not SQLite on purpose: a container restart once "
-                         "truncated data/accounts.db, because WAL-mode SQLite on "
-                         "a Windows bind mount is not crash-safe "
-                         "(accounts-db-wal-hazard).")
+                         "roster for the whole server. Set empty to disable. "
+                         "With POL_DATABASE_URL set (and FE_DB not set empty) "
+                         "the characters live in the database instead and this "
+                         "file is imported once, then kept as a backup.")
     ap.add_argument("--char-reset", action="store_true",
                     help="ignore this member's stored characters and re-seed "
                          "from --characters, overwriting them on the next save")

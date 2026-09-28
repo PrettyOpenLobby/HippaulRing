@@ -34,10 +34,11 @@ FE never tells us who it is in a form we can trust:
     an output, not an input.
 
 So identity comes from where FMO gets it: `responders.py` writes a `session` row
-(member_id, nick, peer_ip, created_at) to accounts.db on every POL sign-in, an
-FE launch can only follow a POL login from the same box, and both FE containers
-mount the same `/data`. The freshest session row for the connecting address
-names the member.
+(member_id, nick, peer_ip, created_at) to the account database on every POL
+sign-in, and an FE launch can only follow a POL login from the same box. The
+account database is OpenLobby's PostgreSQL (POL_DATABASE_URL), read through
+`accounts.sessions_by_ip`, so felobby and feworld see the same rows wherever
+they run. The freshest session row for the connecting address names the member.
 
 WARNING -- TWO REAL LIMITS, STATED PLAINLY RATHER THAN DISCOVERED LATER.
 
@@ -65,11 +66,13 @@ across two connections is not available here. Two carries, tried in this order:
      `[cstr account]`, and that string is the one the client stored from our own
      `0xC010`. Put the store key on the wire and the client hands it straight
      back to the world door with no heuristic at all.
-  2. THE HANDOFF FILE, `data/fe_sessions.json`, written by felobby at
-     certification and read by feworld by peer address. This is the belt to the
-     echo's braces: the echo is the client re-sending a string we chose, which
-     is very likely verbatim but has NOT been proven byte-for-byte on a live
-     0x400F, so feworld does not depend on it alone.
+  2. THE HANDOFF RECORD, the kv key `fe:handoff:<ip>` (Valkey, POL_VALKEY_URL),
+     written by felobby at certification and read by feworld by peer address.
+     This is the belt to the echo's braces: the echo is the client re-sending a
+     string we chose, which is very likely verbatim but has NOT been proven
+     byte-for-byte on a live 0x400F, so feworld does not depend on it alone.
+     It is live state with a HANDOFF_TTL expiry; losing Valkey loses only the
+     handoffs in flight, and feworld then falls back to a direct lookup.
 
 Both are checked, and feworld LOGS WHICH ONE FIRED -- because a carry that
 quietly stopped working and fell through to an address lookup is
@@ -79,7 +82,6 @@ import datetime
 import io
 import json
 import os
-import sqlite3
 import threading
 import time
 
@@ -101,41 +103,6 @@ FE_CONTENT_CODE = 11
 LEGACY_ACCOUNT = "TestPlayer"
 
 
-def _default_accounts_db():
-    """`<repo>/data/accounts.db` -- the same file on host and in the container,
-    because services/ is bind-mounted at /app so `_HERE/../data` resolves to
-    pol-server/data either way. (Probing an absolute `/data` first is wrong on
-    Windows, where it means `<current drive>/data`: felobby.py learned that the
-    hard way, wrote to E:/data, and looked like it had worked.)"""
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "accounts.db")
-
-
-def _default_session_store():
-    """`<repo>/data/fe_sessions.json` -- the felobby -> feworld handoff."""
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "fe_sessions.json")
-
-
-def _default_char_store():
-    """`<repo>/data/fe_characters.json` -- felobby's roster, READ ONLY here.
-
-    feident needs it for one question: which member keys actually own Fantasy
-    Earth characters. That is the tie-break when two POL accounts share an
-    address, and it is the difference between handing a player their roster and
-    handing them somebody else's empty one. felobby owns this file; this module
-    never writes it. (It cannot import felobby to reuse `store_accounts()` --
-    felobby imports THIS module.)"""
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "fe_characters.json")
-
-
-def _default_ip_memory():
-    """`<repo>/data/fe_ip_members.json` -- which FE player last used an address."""
-    d = os.path.normpath(os.path.join(_HERE, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else _HERE, "fe_ip_members.json")
-
-
 #: The resolutions confident enough to REMEMBER for an address.
 #:
 #: `sole` is one member, no guessing. `roster` is several members at the address
@@ -153,20 +120,21 @@ def _default_ip_memory():
 #: guess is a guess that outlives its evidence.
 REMEMBERABLE = ("sole", "roster")
 
-#: Empty disables POL-member keying and leaves every connection on an address
+#: Off disables POL-member keying and leaves every connection on an address
 #: key. Provided so a capture run can be made hermetic, NOT as a fallback --
 #: there is no configuration in which sharing one roster is the right answer.
-ACCOUNTS_DB = os.environ.get("FE_ACCOUNTS_DB",
-                             os.environ.get("POL_ACCOUNTS_DB",
-                                            _default_accounts_db()))
+#: The member lookup reads OpenLobby's account database (POL_DATABASE_URL)
+#: through `accounts`; there is no file path to configure any more.
+MEMBER_LOOKUP = os.environ.get("FE_MEMBER_LOOKUP", "1").strip().lower() not in (
+    "", "0", "off", "no", "false")
 
-SESSION_STORE = os.environ.get("FE_SESSION_STORE", _default_session_store())
+#: The FE-player-per-address memory (kv `fe:ipmember:<ip>`). Off disables it.
+IP_MEMORY = os.environ.get("FE_IP_MEMORY", "1").strip().lower() not in (
+    "", "0", "off", "no", "false")
 
-#: felobby's character store, read (never written) for the tie-break above.
-CHAR_STORE = os.environ.get("FE_CHAR_STORE", _default_char_store())
-
-#: The FE-player-per-address memory. Empty disables it entirely.
-IP_MEMORY = os.environ.get("FE_IP_MEMORY", _default_ip_memory())
+#: The kv key prefixes. Both are live state in Valkey (polcore.kv).
+HANDOFF_KEY = "fe:handoff:"
+IP_MEMORY_KEY = "fe:ipmember:"
 
 #: What to do when a LIVE POL session row names a member who owns no Fantasy
 #: Earth characters, at an address remembered for an FE player who does. That
@@ -226,7 +194,7 @@ SESSION_ROW_TTL = 3600.0
 
 #: How long the FE-player memory below may name an address after its POL
 #: session row has been purged. Only ever written for a player who OWNS FE
-#: characters, and only ever read when accounts.db has nothing at all for the
+#: characters, and only ever read when the account database has nothing for the
 #: address -- see `_ip_memory_get`.
 IP_MEMORY_TTL = float(os.environ.get("FE_IP_MEMORY_TTL", str(30 * 86400)))
 
@@ -250,27 +218,52 @@ def _utcnow():
 # POL member resolution
 # ---------------------------------------------------------------------------
 
-def roster_member_keys(path=None):
+def _accounts():
+    """OpenLobby's `accounts` module, found the way fedb finds polcore
+    (OPENLOBBY_DIR, else the checkout beside this repository; in the image it
+    is simply on the path). Imported on first use so a process that never
+    resolves a member never pays for it."""
+    import fedb  # noqa: F401  -- puts OpenLobby's services/ on sys.path
+    import accounts
+    return accounts
+
+
+def _kv():
+    """polcore.kv: Valkey at POL_VALKEY_URL, or the in-process store."""
+    import fedb  # noqa: F401
+    from polcore import kv
+    return kv
+
+
+def lookup_arg(args):
+    """`lookup` for identify() from a parsed `--member-lookup on|off`: None
+    (the FE_MEMBER_LOOKUP default) when the option was not given."""
+    val = getattr(args, "member_lookup", None)
+    return None if val is None else val == "on"
+
+
+def roster_member_keys():
     """The store keys that own at least one Fantasy Earth character.
 
-    Read-only, failure-tolerant: an unreadable or absent store yields an empty
-    set, which simply disables the tie-break rather than breaking a login.
+    Read from the player database (festore.store_accounts), the store felobby
+    and feworld write. Until 2026-09-28 this read `fe_characters.json`, which
+    stopped being written when the characters moved into the database, so the
+    tie-break was consulting a roster frozen at the import. Under the `FE_DB=`
+    rollback (characters on the JSON file) this returns what the database
+    holds, which may be nothing; the tie-break then reports `ambiguous`, which
+    is logged, never a silent guess.
+
+    Failure-tolerant: an unreachable store yields an empty set, which simply
+    disables the tie-break rather than breaking a login.
     """
-    p = CHAR_STORE if path is None else path
-    if not p:
-        return set()
     try:
-        with io.open(p, encoding="utf-8") as f:
-            blob = json.load(f)
-    except (OSError, ValueError):
+        import festore
+        return {k for k, n in festore.store_accounts().items() if n}
+    except Exception:                          # noqa: BLE001
         return set()
-    if not isinstance(blob, dict):
-        return set()
-    return {k for k, v in (blob.get("accounts") or {}).items() if v}
 
 
-def member_for_ip(ip, tag="feident", accounts_db=None, window=None,
-                  roster=None):
+def member_for_ip(ip, tag="feident", lookup=None, window=None, roster=None):
     """The POL member behind `ip`, or None.
 
     Returns {key, member_id, nick, content_id, confidence, detail}; `key` is the
@@ -290,24 +283,20 @@ def member_for_ip(ip, tag="feident", accounts_db=None, window=None,
                     because a character CREATED under a guess lands in somebody
                     else's roster and cannot be told apart afterwards.
 
+    `lookup` False skips the database entirely (None: FE_MEMBER_LOOKUP).
+
     NEVER RAISES -- a database fault must not break an FE login -- but it is
     always LOGGED, because a lookup that quietly did not run looks exactly like
     one that ran and found nobody, and those need different fixes.
     """
-    db_path = ACCOUNTS_DB if accounts_db is None else accounts_db
-    if not db_path:
+    if not (MEMBER_LOOKUP if lookup is None else lookup):
         return None
     win = MEMBER_WINDOW if window is None else window
-    cutoff = (_utcnow() - datetime.timedelta(seconds=win)
-              ).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        db = sqlite3.connect(db_path, timeout=2)
+        acc = _accounts()
+        conn = acc.connect()
         try:
-            rows = db.execute(
-                "SELECT member_id, nick, created_at FROM session"
-                " WHERE peer_ip = ? AND created_at >= ?"
-                " ORDER BY created_at DESC LIMIT 32",
-                (ip, cutoff)).fetchall()
+            rows = acc.sessions_by_ip(conn, ip, win)
             if not rows:
                 return None
             # One entry per member, keeping that member's freshest row. Ordered
@@ -329,24 +318,22 @@ def member_for_ip(ip, tag="feident", accounts_db=None, window=None,
                 else:
                     pick, confidence = cands[0], "ambiguous"
             mid, nick, at = pick
-            cid = _content_id(db, mid)
+            cid = _content_id(acc, conn, mid)
         finally:
-            db.close()
+            conn.close()
     except Exception as e:                     # noqa: BLE001 -- see docstring
-        _log(tag, "WARN POL member lookup for %s failed (%r; accounts.db at %s) "
-                  "-- this connection falls back to an ADDRESS key, so its "
+        _log(tag, "WARN POL member lookup for %s failed (%r) -- this "
+                  "connection falls back to an ADDRESS key, so its "
                   "characters land somewhere other than its last session's"
-                  % (ip, e, db_path))
+                  % (ip, e))
         return None
 
     if confidence == "roster":
-        losers = sorted(c[0] for c in cands if c[0] != mid)
         _log(tag, "%s has recent POL sessions for members %s -- taking member "
                   "%s (%r), the only one of them that owns Fantasy Earth "
                   "characters. The freshest row alone would have said member "
                   "%s and shown an EMPTY character list."
                   % (ip, sorted(c[0] for c in cands), mid, nick, cands[0][0]))
-        del losers
     elif confidence == "ambiguous":
         _log(tag, "WARN %s has recent POL sessions for members %s and the "
                   "roster cannot separate them (none or several own FE "
@@ -364,42 +351,37 @@ def member_for_ip(ip, tag="feident", accounts_db=None, window=None,
                          confidence)}
 
 
-def _content_id(db, member_id):
-    """This member's Fantasy Earth Content ID, or None.
-
-    The same query as accounts.member_content_id, inlined rather than imported:
-    accounts.py is a 4,500-line module that opens its own connections, and this
-    is one read on a connection already in hand. If a third caller needs it,
-    import accounts rather than growing a second copy.
-    """
+def _content_id(acc, conn, member_id):
+    """This member's Fantasy Earth Content ID, or None: the active one, on the
+    primary handle first (accounts.member_content_id)."""
     try:
-        row = db.execute(
-            "SELECT hc.content_id FROM handle_content hc"
-            " JOIN handle h ON h.id = hc.handle_id"
-            " WHERE h.member_id = ? AND hc.content_code = ?"
-            "   AND hc.content_id IS NOT NULL AND hc.status = 'active'"
-            " ORDER BY h.is_primary DESC, h.id ASC LIMIT 1",
-            (member_id, FE_CONTENT_CODE)).fetchone()
+        return acc.member_content_id(conn, member_id, FE_CONTENT_CODE)
     except Exception:                          # noqa: BLE001
         return None
-    return row[0] if row else None
 
 
-def _ip_memory_get(ip, path=None):
-    """The FE player last seen unambiguously at `ip`, or None."""
-    p = IP_MEMORY if path is None else path
-    if not p:
+def _ip_memory_get(ip):
+    """The FE player last seen unambiguously at `ip`, or None.
+
+    Kept in kv under `fe:ipmember:<ip>` with an IP_MEMORY_TTL expiry. It is a
+    HINT CACHE: losing Valkey loses it, and the cost is only that a returning
+    player whose POL session row has been purged lands on an address key once,
+    until their next unambiguous login writes it again.
+    """
+    if not IP_MEMORY:
         return None
-    blob = _read(p)
-    rec = (blob.get("by_ip") or {}).get(ip)
-    if not rec:
+    try:
+        rec = _kv().get_json(IP_MEMORY_KEY + ip)
+    except Exception:                          # noqa: BLE001
+        return None
+    if not isinstance(rec, dict):
         return None
     if time.time() - rec.get("at", 0) > IP_MEMORY_TTL:
         return None
     return rec
 
 
-def _ip_memory_put(ip, ident, tag="feident", path=None):
+def _ip_memory_put(ip, ident, tag="feident"):
     """Remember an UNAMBIGUOUS FE player at `ip`.
 
     Deliberately narrow, because a sticky wrong answer would be worse than the
@@ -414,30 +396,28 @@ def _ip_memory_put(ip, ident, tag="feident", path=None):
     PCSX2 on the FE player's own machine) is exactly the account that must
     never be written here, or it would have inherited the address for a month.
     """
-    p = IP_MEMORY if path is None else path
-    if (not p or ident.get("confidence") not in REMEMBERABLE
+    if (not IP_MEMORY or ident.get("confidence") not in REMEMBERABLE
             or not ident.get("member_id")):
         return False
     rec = {"key": ident["key"], "member_id": ident.get("member_id"),
            "nick": ident.get("nick"), "at": time.time()}
-    with _lock:
-        blob = _read(p)
-        by_ip = blob.setdefault("by_ip", {})
-        prev = by_ip.get(ip) or {}
-        by_ip[ip] = rec
-        for k in [k for k, v in by_ip.items()
-                  if time.time() - v.get("at", 0) > IP_MEMORY_TTL]:
-            del by_ip[k]
-        ok = _write(p, blob)
-    if ok and prev.get("key") != rec["key"]:
+    try:
+        kv = _kv()
+        prev = kv.get_json(IP_MEMORY_KEY + ip) or {}
+        kv.set_json(IP_MEMORY_KEY + ip, rec, ttl=IP_MEMORY_TTL)
+    except Exception as e:                     # noqa: BLE001
+        _log(tag, "WARN %s not remembered (%r) -- this only matters once the "
+                  "player's POL session row has expired" % (ip, e))
+        return False
+    if prev.get("key") != rec["key"]:
         _log(tag, "%s is now remembered as %s (was %s) -- used only if "
-                  "accounts.db has NO session row for this address"
+                  "the account database has NO session row for this address"
                   % (ip, rec["key"], prev.get("key") or "nobody"))
-    return ok
+    return True
 
 
-def identify(ip, tag="feident", accounts_db=None, window=None,
-             char_store=None, ip_memory=None, prefer_remembered=None):
+def identify(ip, tag="feident", lookup=None, window=None,
+             prefer_remembered=None):
     """Resolve `ip` to a store identity, always returning a usable dict.
 
     Order, and why:
@@ -458,18 +438,18 @@ def identify(ip, tag="feident", accounts_db=None, window=None,
     """
     if prefer_remembered is None:
         prefer_remembered = PREFER_REMEMBERED
-    roster = roster_member_keys(char_store)
-    got = member_for_ip(ip, tag=tag, accounts_db=accounts_db, window=window,
+    roster = roster_member_keys()
+    got = member_for_ip(ip, tag=tag, lookup=lookup, window=window,
                         roster=roster)
     if got:
         if got.get("confidence") in REMEMBERABLE and got["key"] in roster:
-            _ip_memory_put(ip, got, tag=tag, path=ip_memory)
+            _ip_memory_put(ip, got, tag=tag)
             return got
         if got["key"] not in roster:
             # The live login owns no FE characters. If this address is
             # remembered for somebody who does, the two claims disagree and
             # neither the address nor anything else on the wire can settle it.
-            rec = _ip_memory_get(ip, path=ip_memory)
+            rec = _ip_memory_get(ip)
             other = (rec or {}).get("key")
             if other and other in roster and other != got["key"]:
                 if prefer_remembered:
@@ -478,9 +458,9 @@ def identify(ip, tag="feident", accounts_db=None, window=None,
                               "remembered for %s, which does. Taking %s "
                               "(FE_PREFER_REMEMBERED_PLAYER is on). If a NEW "
                               "player is meant to be starting here, turn it off "
-                              "or clear this address from %s."
+                              "or delete the kv key %s%s."
                               % (ip, got["key"], other, other,
-                                 IP_MEMORY if ip_memory is None else ip_memory))
+                                 IP_MEMORY_KEY, ip))
                     return {"key": other, "member_id": (rec or {}).get("member_id"),
                             "nick": (rec or {}).get("nick"), "content_id": None,
                             "confidence": "remembered-preferred",
@@ -502,7 +482,7 @@ def identify(ip, tag="feident", accounts_db=None, window=None,
                            "address and this login does not" % other)
         return got
 
-    rec = _ip_memory_get(ip, path=ip_memory)
+    rec = _ip_memory_get(ip)
     if rec and rec.get("key") in roster:
         _log(tag, "no POL session row for %s -- but %s owns Fantasy Earth "
                   "characters and was the last player seen here (%s). Using "
@@ -581,7 +561,7 @@ def wire_account(ident, mode="member", fixed=None):
 # account cannot distinguish "these bytes identify the ACCOUNT" from "these
 # bytes identify the INSTALL", and those want opposite fixes:
 #
-#   per-ACCOUNT  -> key on them directly; no address, no handoff file, and two
+#   per-ACCOUNT  -> key on them directly; no address, no handoff record, and two
 #                   POL accounts on one machine finally get two rosters.
 #   per-INSTALL  -> useless for that case; the answer is instead correlating
 #                   the varying remainder against the session token WE mint.
@@ -659,83 +639,48 @@ def record_blob(ident, blob, tag="felobby", path=None):
 # felobby -> feworld handoff
 # ---------------------------------------------------------------------------
 
-def remember(ip, ident, wire, tag="felobby", path=None):
+def remember(ip, ident, wire, tag="felobby"):
     """Record who is at `ip` so feworld can key the same roster.
 
-    Written atomically (temp file + os.replace) for the same reason the
-    character store is: a container restart landing mid-write must not be able
-    to leave a file that parses as "nobody is here".
+    Two kv keys, `fe:handoff:<ip>` and `fe:handoff:wire:<wire>`, each holding
+    the same record with a HANDOFF_TTL expiry. Valkey serves both containers,
+    so nothing depends on a shared /data any more. Never raises: a handoff
+    that could not be written leaves feworld the account echo and a direct
+    lookup, and the failure is LOGGED.
     """
-    p = SESSION_STORE if path is None else path
-    if not p:
-        return
     rec = {"key": ident["key"], "member_id": ident.get("member_id"),
            "nick": ident.get("nick"), "content_id": ident.get("content_id"),
            "wire": wire, "at": time.time()}
-    with _lock:
-        blob = _read(p)
-        by_ip = blob.setdefault("by_ip", {})
-        by_wire = blob.setdefault("by_wire", {})
-        by_ip[ip] = rec
-        by_wire[wire] = rec
-        _expire(by_ip)
-        _expire(by_wire)
-        if not _write(p, blob):
-            _log(tag, "WARN handoff store %s not written -- feworld falls back "
-                      "to the account echo, then to an address lookup" % p)
-            return
-    _log(tag, "handoff: %s -> %s (wire account %r) in %s"
-              % (ip, ident["key"], wire, p))
+    try:
+        kv = _kv()
+        kv.set_json(HANDOFF_KEY + ip, rec, ttl=HANDOFF_TTL)
+        if wire:
+            kv.set_json(HANDOFF_KEY + "wire:" + wire, rec, ttl=HANDOFF_TTL)
+    except Exception as e:                     # noqa: BLE001
+        _log(tag, "WARN handoff for %s not written (%r) -- feworld falls back "
+                  "to the account echo, then to an address lookup" % (ip, e))
+        return
+    _log(tag, "handoff: %s -> %s (wire account %r) in kv %s%s"
+              % (ip, ident["key"], wire, HANDOFF_KEY, ip))
 
 
-def recall(ip=None, wire=None, path=None):
+def recall(ip=None, wire=None):
     """The identity felobby recorded, by account string first and address
-    second, or None. Expired records are ignored rather than deleted: a reader
-    must not need write access to the handoff store."""
-    p = SESSION_STORE if path is None else path
-    if not p:
-        return None
-    with _lock:
-        blob = _read(p)
-    for table, k in (("by_wire", wire), ("by_ip", ip)):
-        if not k:
-            continue
-        rec = blob.get(table, {}).get(k)
-        if rec and time.time() - rec.get("at", 0) <= HANDOFF_TTL:
-            return dict(rec, via=table)
+    second, or None. The kv expiry retires a record; the `at` check is kept so
+    a record never outlives HANDOFF_TTL even on a store without expiry."""
+    try:
+        kv = _kv()
+        for table, key in (("by_wire", wire and HANDOFF_KEY + "wire:" + wire),
+                           ("by_ip", ip and HANDOFF_KEY + ip)):
+            if not key:
+                continue
+            rec = kv.get_json(key)
+            if isinstance(rec, dict) and \
+                    time.time() - rec.get("at", 0) <= HANDOFF_TTL:
+                return dict(rec, via=table)
+    except Exception as e:                     # noqa: BLE001
+        _log("feident", "WARN handoff lookup for %s failed (%r)" % (ip, e))
     return None
-
-
-def _expire(table):
-    now = time.time()
-    for k in [k for k, v in table.items() if now - v.get("at", 0) > HANDOFF_TTL]:
-        del table[k]
-
-
-def _read(path):
-    try:
-        with io.open(path, encoding="utf-8") as f:
-            blob = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return blob if isinstance(blob, dict) else {}
-
-
-def _write(path, blob):
-    # PER-PROCESS temp name. felobby and feworld are separate containers over
-    # the same /data, and both now resolve identities, so a shared "<path>.tmp"
-    # lets one container's half-written file be os.replace()d into place by the
-    # other. The replace stays atomic either way; this stops the two from
-    # writing the same scratch file at all.
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        with io.open(tmp, "w", encoding="utf-8") as f:
-            json.dump(blob, f, indent=1, ensure_ascii=False, sort_keys=True)
-        os.replace(tmp, path)
-    except OSError:
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -746,80 +691,79 @@ def _selftest():
     two POL members resolve to two different keys, that an unresolved connection
     lands on its own address key rather than a shared one, and that the handoff
     round-trips by both address and account string.
+
+    The accounts live in a throwaway PostgreSQL database (tools/fepg.py), made
+    with OpenLobby's own accounts functions; the characters in festore; the
+    handoff and the address memory in an in-process kv.
     """
-    import tempfile
+    import sys
+    sys.path.insert(0, os.path.join(_HERE, os.pardir, "tools"))
+    import fepg
+    if fepg.fresh_database() is None:
+        return fepg.skip_or_fail("feident")
+    import festore
+    acc = _accounts()
+    kv = _kv()
+    kv.reset(kv.MemoryKV())
     state = {"ok": True}
 
     def check(label, cond):
         print("%-58s %s" % (label, "ok" if cond else "FAIL"))
         state["ok"] = state["ok"] and bool(cond)
 
-    tmpdir = tempfile.mkdtemp(prefix="feident-")
-    db_path = os.path.join(tmpdir, "accounts.db")
-    db = sqlite3.connect(db_path)
-    db.executescript(
-        "CREATE TABLE session (token TEXT PRIMARY KEY, member_id INTEGER,"
-        " nick TEXT, peer_ip TEXT, iv TEXT, lobby_port INTEGER,"
-        " created_at TEXT, expires_at TEXT);"
-        "CREATE TABLE handle (id INTEGER PRIMARY KEY, member_id INTEGER,"
-        " is_primary INTEGER);"
-        "CREATE TABLE handle_content (handle_id INTEGER, content_code INTEGER,"
-        " content_id TEXT, status TEXT, linked_at TEXT);")
-    now = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    older = (_utcnow() - datetime.timedelta(minutes=5)
-             ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.executemany("INSERT INTO session (token, member_id, nick, peer_ip,"
-                   " created_at, expires_at) VALUES (?,?,?,?,?,?)", [
-                       ("t1", 16, "UA4XX8PKP", "192.0.2.5", now, now),
-                       ("t2", 21, "OTHERNICK", "192.0.2.6", now, now),
-                       ("t3", 99, "GHOSTNICK", "192.0.2.5", older, now),
-                       # 2026-09-04 REGRESSION FIXTURE. The shape that handed
-                       # a returning player somebody else's empty roster: the player
-                       # who OWNS the characters signed in FIRST, a second
-                       # account on the same box signed in AFTER, and "freshest
-                       # row wins" therefore named the wrong one.
-                       ("t4", 43, "INTRUDER", "192.0.2.8", now, now),
-                       ("t5", 42, "REALOWNER", "192.0.2.8", older, now),
-                       # Two candidates, NEITHER owning characters -- nothing
-                       # can separate them and the answer must say so.
-                       ("t6", 50, "TWINA", "192.0.2.9", now, now),
-                       ("t7", 51, "TWINB", "192.0.2.9", older, now),
-                       # The 2026-09-04 shape at its worst: the OTHER account is
-                       # the only one with a live row, because the FE player's
-                       # was purged an hour ago. Nothing to tie-break against.
-                       ("t8", 88, "PS2TESTER", "192.0.2.10", now, now),
-                       # Same login, at an address nobody is remembered for --
-                       # a genuinely new player, who must NOT be disturbed.
-                       ("t9", 88, "PS2TESTER", "192.0.2.11", now, now),
-                   ])
-    db.execute("INSERT INTO handle VALUES (1, 16, 1)")
-    db.execute("INSERT INTO handle_content VALUES (1, ?, '1000000123',"
-               " 'active', ?)", (FE_CONTENT_CODE, now))
-    db.commit()
-    db.close()
+    conn = acc.connect()
+    m = {}
+    for name, cid in (("UA4XX8PKP", "1000000123"), ("OTHERNICK", None),
+                      ("GHOSTNICK", None), ("INTRUDER", None),
+                      ("REALOWNER", None), ("TWINA", None), ("TWINB", None),
+                      ("PS2TESTER", None)):
+        m[name] = fepg.pol_member(conn, name, fe_content_id=cid)[0]
+    for name, ip, age in (
+            ("UA4XX8PKP", "192.0.2.5", 0),
+            ("OTHERNICK", "192.0.2.6", 0),
+            ("GHOSTNICK", "192.0.2.5", 300),
+            # 2026-09-04 REGRESSION FIXTURE. The shape that handed a
+            # returning player somebody else's empty roster: the player who
+            # OWNS the characters signed in FIRST, a second account on the
+            # same box signed in AFTER, and "freshest row wins" therefore
+            # named the wrong one.
+            ("INTRUDER", "192.0.2.8", 0),
+            ("REALOWNER", "192.0.2.8", 300),
+            # Two candidates, NEITHER owning characters -- nothing can
+            # separate them and the answer must say so.
+            ("TWINA", "192.0.2.9", 0),
+            ("TWINB", "192.0.2.9", 300),
+            # The 2026-09-04 shape at its worst: the OTHER account is the
+            # only one with a live row, because the FE player's was purged
+            # an hour ago. Nothing to tie-break against.
+            ("PS2TESTER", "192.0.2.10", 0),
+            # Same login, at an address nobody is remembered for -- a
+            # genuinely new player, who must NOT be disturbed.
+            ("PS2TESTER", "192.0.2.11", 0)):
+        fepg.pol_session(conn, m[name], name, ip, age_s=age)
+
+    def key(name):
+        return "member:%d" % m[name]
 
     # Who owns Fantasy Earth characters. The tie-break when an address has more
     # than one candidate, and the gate on being remembered at all.
-    roster_path = os.path.join(tmpdir, "fe_characters.json")
-    with io.open(roster_path, "w", encoding="utf-8") as f:
-        json.dump({"accounts": {"member:16": [{"name": "Lex"}],
-                                "member:21": [{"name": "Solo"}],
-                                "member:42": [{"name": "RealOwner"}]}}, f)
-    mem_path = os.path.join(tmpdir, "fe_ip_members.json")
+    for i, name in enumerate(("UA4XX8PKP", "OTHERNICK", "REALOWNER")):
+        festore.save_roster(key(name), [{"charid": i + 1, "name": name}])
+    check("the roster tie-break reads the player database",
+          roster_member_keys() == {key("UA4XX8PKP"), key("OTHERNICK"),
+                                   key("REALOWNER")})
 
     def ident(ip, **kw):
-        kw.setdefault("accounts_db", db_path)
-        kw.setdefault("char_store", roster_path)
-        kw.setdefault("ip_memory", mem_path)
+        kw.setdefault("lookup", True)
         return identify(ip, **kw)
 
     a = ident("192.0.2.5")
     b = ident("192.0.2.6")
     check("two members resolve to two different keys", a["key"] != b["key"])
-    check("member 16 keyed as member:16", a["key"] == "member:16")
+    check("the member is keyed as member:<id>", a["key"] == key("UA4XX8PKP"))
     check("FE Content ID resolved", a["content_id"] == "1000000123")
     check("the character owner wins over a ghost at the same address",
-          a["member_id"] == 16)
+          a["member_id"] == m["UA4XX8PKP"])
 
     c = ident("192.0.2.7")
     check("unknown address gets an ADDRESS key, not a shared one",
@@ -829,12 +773,17 @@ def _selftest():
 
     narrow = ident("192.0.2.5", window=60)
     check("a narrow window still names the fresh member, not the ghost",
-          narrow["key"] == "member:16")
+          narrow["key"] == key("UA4XX8PKP"))
+
+    # 192.0.2.9 has live rows but is never remembered (it is ambiguous)
+    off = ident("192.0.2.9", lookup=False)
+    check("FE_MEMBER_LOOKUP off keys by address (a hermetic capture run)",
+          off["key"] == "addr:192.0.2.9")
 
     # ---- 2026-09-04: the failure that started this ------------------------
     d = ident("192.0.2.8")
     check("REGRESSION a FRESHER non-owner does NOT steal the owner's roster",
-          d["key"] == "member:42")
+          d["key"] == key("REALOWNER"))
     check("...and the pick is reported as the roster tie-break",
           d["confidence"] == "roster")
 
@@ -846,21 +795,18 @@ def _selftest():
 
     # ---- the one-hour session-row expiry ----------------------------------
     check("an unambiguous FE player is remembered for their address",
-          (_ip_memory_get("192.0.2.6", path=mem_path) or {}).get("key")
-          == "member:21")
+          (_ip_memory_get("192.0.2.6") or {}).get("key") == key("OTHERNICK"))
+    check("...in kv, with an expiry",
+          0 < kv.ttl(IP_MEMORY_KEY + "192.0.2.6") <= IP_MEMORY_TTL)
     check("an AMBIGUOUS resolution is never remembered",
-          _ip_memory_get("192.0.2.9", path=mem_path) is None)
+          _ip_memory_get("192.0.2.9") is None)
     check("a non-owner is never remembered in a roster tie-break",
-          (_ip_memory_get("192.0.2.8", path=mem_path) or {}).get("key")
-          != "member:43")
+          (_ip_memory_get("192.0.2.8") or {}).get("key") != key("INTRUDER"))
 
-    db2 = sqlite3.connect(db_path)
-    db2.execute("DELETE FROM session WHERE peer_ip = '192.0.2.6'")
-    db2.commit()
-    db2.close()
+    acc.close_sessions(conn, m["OTHERNICK"])
     gone = ident("192.0.2.6")
     check("REGRESSION a purged session row no longer loses the roster",
-          gone["key"] == "member:21")
+          gone["key"] == key("OTHERNICK"))
     check("...and it is reported as remembered, not as a live login",
           gone["confidence"] == "remembered")
 
@@ -868,36 +814,33 @@ def _selftest():
     check("memory never invents an identity for an address it never saw",
           unknown["key"] == "addr:192.0.2.77")
     check("...and the address answer names the rosters that DO exist",
-          "member:16" in unknown["detail"])
+          key("UA4XX8PKP") in unknown["detail"])
 
     # ---- CONTESTED: a live non-FE login where an FE player is remembered ---
     # This is 2026-09-04 exactly, and it is the case the roster tie-break
-    # CANNOT reach: member 88 is the only candidate with a live row.
-    with io.open(mem_path, encoding="utf-8") as f:
-        mem = json.load(f)
-    mem.setdefault("by_ip", {})["192.0.2.10"] = {
-        "key": "member:16", "member_id": 16, "nick": "UA4XX8PKP",
-        "at": time.time() - 7200}
-    with io.open(mem_path, "w", encoding="utf-8") as f:
-        json.dump(mem, f)
+    # CANNOT reach: PS2TESTER is the only candidate with a live row.
+    kv.set_json(IP_MEMORY_KEY + "192.0.2.10",
+                {"key": key("UA4XX8PKP"), "member_id": m["UA4XX8PKP"],
+                 "nick": "UA4XX8PKP", "at": time.time() - 7200},
+                ttl=IP_MEMORY_TTL)
 
     off = ident("192.0.2.10", prefer_remembered=False)
     check("contested is DETECTED, not served silently",
           off["confidence"] == "contested")
     check("...and the default still serves the live login (new players safe)",
-          off["key"] == "member:88")
+          off["key"] == key("PS2TESTER"))
     check("...and the detail names who it is contested with",
-          "member:16" in off["detail"])
+          key("UA4XX8PKP") in off["detail"])
 
     on = ident("192.0.2.10", prefer_remembered=True)
     check("REGRESSION 2026-09-04 resolves to the FE player when preferred",
-          on["key"] == "member:16")
+          on["key"] == key("UA4XX8PKP"))
     check("...and says it took the remembered player",
           on["confidence"] == "remembered-preferred")
 
     fresh = ident("192.0.2.11", prefer_remembered=True)
     check("a NEW player at an unremembered address is untouched",
-          fresh["key"] == "member:88" and fresh["confidence"] == "sole")
+          fresh["key"] == key("PS2TESTER") and fresh["confidence"] == "sole")
 
     # ---- 2026-09-04 #2: the memory was never written on the path that matters
     # On a box running PCSX2 beside the Viewer BOTH accounts have live rows, so
@@ -914,23 +857,30 @@ def _selftest():
     check("the 192.0.2.8 resolution really is `roster`, not `sole`",
           d["confidence"] == "roster")
     check("REGRESSION a `roster` login IS remembered (not only `sole`)",
-          (_ip_memory_get("192.0.2.8", path=mem_path) or {}).get("key")
-          == "member:42")
+          (_ip_memory_get("192.0.2.8") or {}).get("key") == key("REALOWNER"))
 
     # Replay the evening on that address: owner's row purged, the other account
     # still signing in. The collision must be SEEN, not served.
-    db3 = sqlite3.connect(db_path)
-    db3.execute("DELETE FROM session WHERE peer_ip = '192.0.2.8'")
-    db3.execute("INSERT INTO session (token, member_id, nick, peer_ip,"
-                " created_at, expires_at) VALUES ('tA', 43, 'INTRUDER',"
-                " '192.0.2.8', ?, ?)", (now, now))
-    db3.commit()
-    db3.close()
+    acc.close_sessions(conn, m["REALOWNER"])
+    acc.close_sessions(conn, m["INTRUDER"])
+    fepg.pol_session(conn, m["INTRUDER"], "INTRUDER", "192.0.2.8")
     check("REGRESSION the purged-owner collision is CONTESTED, not `sole`",
           ident("192.0.2.8", prefer_remembered=False)["confidence"]
           == "contested")
     check("...and preferring the remembered player resolves it to the owner",
-          ident("192.0.2.8", prefer_remembered=True)["key"] == "member:42")
+          ident("192.0.2.8", prefer_remembered=True)["key"] == key("REALOWNER"))
+
+    # ---- the felobby -> feworld handoff -----------------------------------
+    remember("192.0.2.5", a, "member:%d" % m["UA4XX8PKP"])
+    check("the handoff is found by the echoed account string",
+          (recall(ip="192.0.2.99", wire=a["key"]) or {}).get("via") == "by_wire")
+    check("...and by address when the echo is mangled",
+          (recall(ip="192.0.2.5", wire="garbled") or {}).get("key") == a["key"])
+    check("...and it expires with HANDOFF_TTL",
+          0 < kv.ttl(HANDOFF_KEY + "192.0.2.5") <= HANDOFF_TTL)
+    check("an address with no handoff recalls nothing",
+          recall(ip="192.0.2.6", wire="garbled") is None)
+    conn.close()
 
     print("\n%s" % ("all checks passed" if state["ok"] else "SOMETHING FAILED"))
     return 0 if state["ok"] else 1

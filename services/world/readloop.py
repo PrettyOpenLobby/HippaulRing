@@ -3068,7 +3068,7 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # resolve_account() turns it into the store key felobby used: the
             # echo first (free and exact when the client is verbatim, which is
             # LIKELY but has never been proven byte-for-byte on a live 0x400F),
-            # then felobby's handoff file by address, then a direct POL member
+            # then felobby's kv handoff by address, then a direct POL member
             # lookup. It logs which one fired, because a carry that quietly
             # stopped working looks exactly like one that worked.
             key = character.resolve_account(acct, wire._peer_ip(conn), args)

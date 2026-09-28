@@ -1304,7 +1304,7 @@ def main():
                     choices=["resolve", "echo"],
                     help="how the character store is keyed. `resolve` turns the "
                          "0x400F account echo into the POL member felobby "
-                         "resolved (echo -> felobby's handoff file -> a direct "
+                         "resolved (echo -> felobby's kv handoff -> a direct "
                          "lookup; see resolve_account). `echo` keys by the raw "
                          "echoed string, which with felobby's old constant "
                          "--account is ONE ROSTER FOR EVERY PLAYER -- kept only "
@@ -2293,18 +2293,14 @@ def main():
                          "while the Status screen is open. These exist because "
                          "the alternative is a --force-recreate, and that "
                          "drops the session you are testing in.")
-    ap.add_argument("--accounts-db", default=None,
-                    help="POL accounts.db used to resolve an address to a member "
-                         "when the echo and the handoff both miss (default: "
-                         "data/accounts.db, or $FE_ACCOUNTS_DB / "
-                         "$POL_ACCOUNTS_DB). Empty skips the lookup.")
+    ap.add_argument("--member-lookup", choices=("on", "off"), default=None,
+                    help="resolve an address to a POL member from the account "
+                         "database when the echo and the handoff both miss "
+                         "(default on, or $FE_MEMBER_LOOKUP). `off` skips the "
+                         "lookup.")
     ap.add_argument("--member-window", type=float, default=None,
                     help="seconds a POL session row may still name the member at "
                          "an address (default 86400 / $FE_MEMBER_WINDOW)")
-    ap.add_argument("--session-store", default=None,
-                    help="felobby's handoff file (default data/fe_sessions.json). "
-                         "Empty disables it, leaving only the account echo and "
-                         "the direct lookup.")
     for _fn in ext.EXT_ARGS:
         _fn(ap)
     # The game rules as tuned in play. Each is still a command-line option

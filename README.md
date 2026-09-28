@@ -47,6 +47,23 @@ reconstructed from 2006 community records; SE's server-side original was
 never public) and `fe-area-names-en.tsv` (English renderings of the area
 names).
 
+## The title plugin (the Viewer's profile)
+
+The core builds the profile the Viewer shows for a Fantasy Earth Content ID from
+data only this title holds, so a small plugin runs inside the core's `login`
+and `authsess` processes (OpenLobby's `services/titles.py`, `POL_TITLES`).
+`Dockerfile.title` layers it on the core image and `docker-compose.title.yml`
+swaps that image into those two services. From this directory, with the core
+checked out beside it:
+
+```
+docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.title.yml     up -d --build login authsess
+```
+
+Without it the game plays the same; only the Viewer's profile screen for a Fantasy Earth Content ID stays empty. The plugin reads the player database (`FE_DB`, on the shared data volume). To run several titles, build each title image on the previous
+one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
+`.env`, for example `POL_TITLES=tmtitle,fetitle`.
+
 ## Pointing a client at it
 
 The client discovers this stack through the core lobby: content id 11 in the

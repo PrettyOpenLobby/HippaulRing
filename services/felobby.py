@@ -134,7 +134,7 @@ except ImportError:                     # standalone use outside services/
 
 try:
     # KEY: THE PLAYER DATABASE -- see festore.py for what moved into it and why
-    # it is its own file rather than a table in accounts.db. Guarded because a
+    # where its table lives. Guarded because a
     # store that will not import must degrade to the JSON file it replaces,
     # loudly, rather than take the lobby down: a player who cannot reach the
     # character screen has no way back to the Viewer.
@@ -1293,7 +1293,7 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
                   flush=True)
             # The name we send is the name the client keeps and hands to the
             # world door in 0x400F, so in the default `member` mode it carries
-            # the store key across to feworld by itself. The handoff file below
+            # the store key across to feworld by itself. The kv handoff below
             # is the belt to that echo's braces -- see feident.py.
             wire = ident.get("wire") or feident.wire_account(ident)
             body = inner_msg(0xC010, wire.encode("cp932", "replace") + b"\0")
@@ -1303,9 +1303,7 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
                   % wire, flush=True)
             print("[felobby]    watch FE's log for '>MSG_CERTIFICATION_OK account='",
                   flush=True)
-            if args.session_store != "":
-                feident.remember(ident["ip"], ident, wire,
-                                 path=args.session_store or None)
+            feident.remember(ident["ip"], ident, wire)
         elif real_id == 0xC006:
             # Built at 0x05047e73 with NO fields, registering 0xC00D / 0xC00E as
             # its two acceptable replies (0x05047e5e). 0xC00D is
@@ -1793,9 +1791,9 @@ def resolve_identity(ip, args):
                            "on purpose; do not run a server on it."
                            % args.account}
     else:
-        # None -> feident's own default path; "" -> skip the lookup entirely.
+        # None -> FE_MEMBER_LOOKUP; "off" skips the lookup entirely.
         ident = feident.identify(ip, tag="felobby",
-                                 accounts_db=args.accounts_db,
+                                 lookup=feident.lookup_arg(args),
                                  window=args.member_window)
     ident["ip"] = ip
     ident["wire"] = feident.wire_account(ident, args.account_mode, args.account)
@@ -1976,19 +1974,14 @@ def main():
                          "fe_characters.json is keyed by it -- so every FE "
                          "player shared one character roster. Goes on the wire "
                          "NUL-terminated, cp932.")
-    ap.add_argument("--accounts-db", default=None,
-                    help="POL accounts.db consulted to turn the connecting "
-                         "address into a member (default: data/accounts.db, or "
-                         "$FE_ACCOUNTS_DB / $POL_ACCOUNTS_DB). Set empty to skip "
-                         "the lookup -- every connection then keys by ADDRESS, "
-                         "which is per-machine and still never shared.")
+    ap.add_argument("--member-lookup", choices=("on", "off"), default=None,
+                    help="turn the connecting address into a POL member from "
+                         "the account database's session rows (default on, or "
+                         "$FE_MEMBER_LOOKUP). `off` keys every connection by "
+                         "ADDRESS, which is per-machine and still never shared.")
     ap.add_argument("--member-window", type=float, default=None,
                     help="seconds a POL session row may still name the member at "
                          "an address (default 86400 / $FE_MEMBER_WINDOW)")
-    ap.add_argument("--session-store", default=None,
-                    help="the felobby -> feworld handoff file (default "
-                         "data/fe_sessions.json). Set empty to disable it and "
-                         "leave feworld relying on the 0x400F account echo.")
     ap.add_argument("--server-key", default="0123456789abcdef0123456789abcdef",
                     help="hex of OUR half of the key exchange (objC). MUST be "
                          "non-empty: the client runs key[i %% keylen] with an idiv "

@@ -14,11 +14,11 @@ def resolve_account(echoed, ip, args):
          all -- it is confirmed against felobby's handoff record rather than
          trusted blind, so a client that mangles or truncates the string falls
          through instead of inventing an account.
-      2. THE HANDOFF FILE, by address: felobby wrote data/fe_sessions.json at
-         certification, and both containers mount the same /data.
+      2. THE HANDOFF RECORD, by address: felobby wrote the kv key
+         fe:handoff:<ip> at certification (feident.remember).
       3. A DIRECT POL MEMBER LOOKUP for this address, for the case where
-         felobby could not write the handoff (read-only /data, say) but
-         accounts.db is readable.
+         felobby could not write the handoff (Valkey unreachable, say) but
+         the account database is readable.
 
     Falls back to the echoed string itself only when all three miss, and says
     so loudly: that is the old shared-roster behaviour and it should never be
@@ -30,8 +30,7 @@ def resolve_account(echoed, ip, args):
               "felobby sends a constant -- one roster for every player"
               % echoed, flush=True)
         return echoed
-    # None -> feident's default path, "" -> handoff disabled.
-    got = feident.recall(ip=ip, wire=echoed, path=args.session_store)
+    got = feident.recall(ip=ip, wire=echoed)
     if got and got.get("via") == "by_wire":
         print("[feworld]    identity: %s via the 0x400F ACCOUNT ECHO (%r), "
               "confirmed against felobby's handoff%s"
@@ -40,19 +39,18 @@ def resolve_account(echoed, ip, args):
                  if got.get("content_id") else ""), flush=True)
         return got["key"]
     if got:
-        print("[feworld]    identity: %s via felobby's HANDOFF FILE for %s. The "
+        print("[feworld]    identity: %s via felobby's HANDOFF RECORD for %s. The "
               "0x400F echo was %r, which did not match a recorded wire name -- "
               "worth a look if it repeats, because the echo is the carry that "
               "needs no address at all." % (got["key"], ip, echoed), flush=True)
         return got["key"]
-    ident = feident.identify(ip, tag="feworld", accounts_db=args.accounts_db,
+    ident = feident.identify(ip, tag="feworld", lookup=feident.lookup_arg(args),
                              window=args.member_window)
     if ident.get("member_id") is not None:
         print("[feworld]    identity: %s via a DIRECT POL lookup -- %s. Neither "
               "the echo (%r) nor a handoff record carried it, so felobby may "
-              "not be writing %s."
-              % (ident["key"], ident["detail"], echoed,
-                 args.session_store or "the handoff store"), flush=True)
+              "not be writing the kv handoff (fe:handoff:<ip>)."
+              % (ident["key"], ident["detail"], echoed), flush=True)
         return ident["key"]
     print("[feworld]    WARNING: identity NOT resolved for %s: no handoff record, no "
           "POL session row. Keying by %r -- if felobby is sending a constant "

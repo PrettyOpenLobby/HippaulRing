@@ -25,8 +25,9 @@ x-app: &app
   restart: unless-stopped
   environment: &feenv
     POL_ADVERTISE: "${FE_ADVERTISE:-}"
-    # the characters and the mail (festore.py, femail.py) live in the core's
-    # PostgreSQL database; docs/database.md in OpenLobby has the settings
+    # the characters, the mail and the world state (festore.py, femail.py,
+    # festate.py) live in the core's PostgreSQL database; docs/database.md in
+    # OpenLobby has the settings
     POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
     POL_VALKEY_URL: "valkey://valkey:6379/0"
   volumes:
@@ -80,8 +81,9 @@ services:
     <<: *app
     # The game rules and the world data are the parser's defaults (see
     # RELEASE_DEFAULTS in world/launch.py); override any of them by giving the
-    # option here. Spawn positions: fedata/fe_spawn.json seeds /data on the
-    # first start; in-game !spawn edits persist in /data afterwards.
+    # option here. Spawn positions: fedata/fe_spawn.json seeds the spawn row
+    # of fe_world_state on the first start; in-game !spawn edits persist in
+    # the database afterwards.
     entrypoint: ["python", "feworld.py"]
     ports:
       - "54850:54850"

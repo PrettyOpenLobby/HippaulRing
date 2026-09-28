@@ -74,7 +74,9 @@ def main():
                          "panel's URL as ?t=... Not a password -- it is the "
                          "difference between 'awkward to reach' and 'open'.")
     ap.add_argument("--spawn-file", default=None,
-                    help="the SPAWN STORE (default data/fe_spawn.json): area id "
+                    help="a JSON file for the SPAWN STORE instead of the "
+                         "database (default: the spawn row of fe_world_state, "
+                         "seeded from fedata/fe_spawn.json): area id "
                          "-> the point a player arrives at in that area, "
                          "written by `!spawn` from where the player is actually "
                          "standing. An area with no row falls back to "
@@ -155,7 +157,9 @@ def main():
                          "the adjacency rule works: 21 should become enterable "
                          "for a nation-2 character and stay shut for nation 3.")
     ap.add_argument("--territory-file", default=None,
-                    help="the TERRITORY STORE (default data/fe_territory.json): "
+                    help="a JSON file for the TERRITORY STORE instead of the "
+                         "database (default: the territory row of "
+                         "fe_world_state): "
                          "area id -> holding nation, seeded from fet_area and "
                          "rewritten whenever a field changes hands.")
     ap.add_argument("--islands", type=int, default=5,
@@ -1851,7 +1855,8 @@ def main():
                     help="override every quest's cooldown (-1 = each quest's "
                          "own, one in-game day = 2400 s).")
     ap.add_argument("--town-file", default=None, metavar="PATH",
-                    help="the TOWN FILE (default data/fe_town.json): per-group "
+                    help="a JSON file for the TOWN instead of the database "
+                         "(default: the town row of fe_world_state): per-group "
                          "NPCs, buildings and door->room mappings, written by "
                          "`!npc`, `!build` and `!door` as the town is walked "
                          "and served on every entry of that group. What SE's "

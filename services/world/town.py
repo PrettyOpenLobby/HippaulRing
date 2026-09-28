@@ -1,14 +1,13 @@
-"""The town file (data/fe_town.json): placed NPCs, door links, pushing the town."""
-import json
-import os
+"""The town store (festate "town"): placed NPCs, door links, pushing the town."""
 import struct
 import threading
-from . import buildings, chat, combat, deps, sess, wire
+import festate  # noqa: E402  -- the world state in PostgreSQL
+from . import buildings, chat, combat, sess, wire
 
 # ---------------------------------------------------------------------------
-# THE TOWN FILE -- data/fe_town.json. What SE's server knew and the client
-# does not ship: where the town's NPCs stand, which door is which, which
-# buildings are placed. Authored from the minimap by walking it: `!npc`,
+# THE TOWN -- the `town` store (fe_world_state, formerly data/fe_town.json).
+# What SE's server knew and the client does not ship: where the town's NPCs
+# stand, which door is which, which buildings are placed. Authored from the minimap by walking it: `!npc`,
 # `!build` and `!door` PERSIST here, and every entry of that group serves it.
 #
 #   {"39": {"npcs":      [{"model":233,"kind":1,"level":1,"x":..,"y":..,"z":..,"name":"Warrior_Weapon_Shop","script":2102}],
@@ -32,46 +31,45 @@ def town_mark_dirty(gid):
 
 
 def town_path(args):
-    p = getattr(args, "town_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(deps._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else deps._HERE, "fe_town.json")
-    return p
+    """Where the town lives: the `town` row of fe_world_state unless
+    --town-file names a file (festate.location). "" turns the town off."""
+    return festate.location("town", getattr(args, "town_file", None))
 
 
 def town_load(args):
     p = town_path(args)
     if not p:
         return {}
-    try:
-        with open(p, encoding="utf-8") as fh:
-            blob = json.load(fh)
-        return blob if isinstance(blob, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    blob = festate.read(p)
+    return blob if isinstance(blob, dict) else {}
 
 
 def town_get(args, gid, kind):
     return list((town_load(args).get(str(gid)) or {}).get(kind) or [])
 
 
+def _town_change(args, change):
+    """Apply `change(blob)` to the town and write it back, in one step:
+    `change` returns (changed, result). In the database this is one
+    transaction under the store's advisory lock, so an edit from the panel
+    and one from a player's `!npc` cannot lose each other. Returns `result`,
+    or None when the town could not be read or written (festate logs why)."""
+    with _TOWN_LOCK:
+        return festate.update(town_path(args), change, sort_keys=True)
+
+
 def town_add(args, gid, kind, rec):
-    """Append one record for group `gid` and write the file atomically."""
+    """Append one record for group `gid` and write the town."""
     p = town_path(args)
     if not p:
         return False
-    with _TOWN_LOCK:
-        blob = town_load(args)
+
+    def change(blob):
         blob.setdefault(str(gid), {}).setdefault(kind, []).append(rec)
-        tmp = "%s.tmp.%d" % (p, os.getpid())
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(blob, fh, indent=1, sort_keys=True)
-            os.replace(tmp, p)
-        except OSError as e:
-            print("[feworld]    WARNING: town file %s not written: %r" % (p, e), flush=True)
-            return False
+        return True, True
+
+    if not _town_change(args, change):
+        return False
     print("[feworld]    town file: %s += %s %s" % (p, kind, rec), flush=True)
     if kind == "npcs":
         town_mark_dirty(gid)
@@ -86,8 +84,8 @@ def town_undo(args, gid, kind=None):
     p = town_path(args)
     if not p:
         return None
-    with _TOWN_LOCK:
-        blob = town_load(args)
+
+    def change(blob):
         g = blob.get(str(gid)) or {}
         kinds = [kind] if kind else ["npcs", "buildings", "doors"]
         best = None
@@ -97,16 +95,13 @@ def town_undo(args, gid, kind=None):
         # no timestamps in the rows; "last" = the last row of the first
         # non-empty kind asked for, npcs first
         if best is None:
-            return None
-        row = g[best].pop()
-        tmp = "%s.tmp.%d" % (p, os.getpid())
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(blob, fh, indent=1, sort_keys=True)
-            os.replace(tmp, p)
-        except OSError as e:
-            print("[feworld]    WARNING: town file %s not written: %r" % (p, e), flush=True)
-            return None
+            return False, None
+        return True, (best, g[best].pop())
+
+    got = _town_change(args, change)
+    if got is None:
+        return None
+    best, row = got
     print("[feworld]    town file: %s -= %s %s" % (p, best, row), flush=True)
     if best == "npcs":
         town_mark_dirty(gid)
@@ -128,21 +123,16 @@ def town_del(args, gid, kind, idx):
     p = town_path(args)
     if not p:
         return None
-    with _TOWN_LOCK:
-        blob = town_load(args)
+
+    def change(blob):
         rows = (blob.get(str(gid)) or {}).get(kind) or []
         if not (0 <= int(idx) < len(rows)):
-            return None
-        row = rows.pop(int(idx))
-        tmp = "%s.tmp.%d" % (p, os.getpid())
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(blob, fh, indent=1, sort_keys=True)
-            os.replace(tmp, p)
-        except OSError as e:
-            print("[feworld]    WARNING: town file %s not written: %r" % (p, e),
-                  flush=True)
-            return None
+            return False, None
+        return True, rows.pop(int(idx))
+
+    row = _town_change(args, change)
+    if row is None:
+        return None
     print("[feworld]    town file: %s -= %s[%d] %s" % (p, kind, int(idx), row),
           flush=True)
     if kind == "npcs":
@@ -156,11 +146,11 @@ def town_set(args, gid, kind, idx, changes):
     p = town_path(args)
     if not p:
         return None
-    with _TOWN_LOCK:
-        blob = town_load(args)
+
+    def change(blob):
         rows = (blob.get(str(gid)) or {}).get(kind) or []
         if not 0 <= idx < len(rows):
-            return None
+            return False, None
         for k, v in changes.items():
             # WARNING: NUMBERS PASS THROUGH. The coercion below is for `!town set`,
             # where every value arrives as text off a command line. A caller
@@ -176,17 +166,14 @@ def town_set(args, gid, kind, idx, changes):
                 except ValueError:
                     pass
             rows[idx][k] = v
-        tmp = "%s.tmp.%d" % (p, os.getpid())
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(blob, fh, indent=1, sort_keys=True)
-            os.replace(tmp, p)
-        except OSError as e:
-            print("[feworld]    WARNING: town file %s not written: %r" % (p, e), flush=True)
-            return None
+        return True, rows[idx]
+
+    row = _town_change(args, change)
+    if row is None:
+        return None
     if kind == "npcs":
         town_mark_dirty(gid)
-    return rows[idx]
+    return row
 
 
 def town_door_for(args, gid, x, z):

@@ -1,9 +1,9 @@
-"""Doors: where a door puts you down (arrivals file) and the shipped portal table."""
-import json
+"""Doors: where a door puts you down (the arrivals store) and the shipped portal table."""
 import os
 import threading
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import deps, spawns
+import festate  # noqa: E402  -- the world state in PostgreSQL
+from . import spawns
 
 # ---------------------------------------------------------------------------
 # WHERE A DOOR PUTS YOU DOWN, per destination portal.
@@ -25,19 +25,17 @@ from . import deps, spawns
 # is reciprocal, so a v1 row keyed D is exactly a v2 row keyed portal(D).dest
 # with the same position -- same area, same spot. doorarr_load migrates, drops
 # any row whose spot has no ground in the destination's collision (landing
-# there hangs the client), and keeps the v1 file beside it.
+# there hangs the client), and keeps the v1 store (a file beside it, or the
+# door_arrive.v1 row).
 _DOORARR = {}
 DOORARR_VERSION = 2
 _DOORARR_LOCK = threading.Lock()
 
 
 def doorarr_path(args):
-    p = getattr(args, "door_arrive_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(deps._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else deps._HERE,
-                         "fe_door_arrive.json")
-    return p
+    """Where the door arrivals live: the `door_arrive` row of fe_world_state
+    unless args.door_arrive_file names a file (festate.location)."""
+    return festate.location("door_arrive", getattr(args, "door_arrive_file", None))
 
 
 def doorarr_load(args):
@@ -45,11 +43,8 @@ def doorarr_load(args):
     global _DOORARR
     out, raw, migrated = {}, {}, False
     path = doorarr_path(args)
-    try:
-        with open(path, encoding="utf-8") as fh:
-            raw = json.load(fh) or {}
-    except (OSError, ValueError):
-        raw = {}
+    raw = festate.read(path) or {}
+    raw_v1 = dict(raw) if isinstance(raw, dict) else {}
     version = raw.pop("_version", 1) if isinstance(raw, dict) else 1
     for k, v in (raw or {}).items():
         try:
@@ -82,15 +77,22 @@ def doorarr_load(args):
         out[new_key] = {"x": x, "z": z}
     with _DOORARR_LOCK:
         _DOORARR = out
-    if migrated and path and path != os.devnull:
+    if migrated and festate.persists(path):
+        # a file keeps its version-1 copy beside it; in the database the
+        # version-1 document is kept in its own row, door_arrive.v1
+        kept = "not kept"
         try:
-            if version < 2 and os.path.exists(path):
+            if version < 2 and festate.in_database(path):
+                if festate.write(festate.location("door_arrive.v1", None), raw_v1,
+                                 sort_keys=True):
+                    kept = festate.location("door_arrive.v1", None)
+            elif version < 2 and os.path.exists(path):
                 os.replace(path, path + ".v1")
+                kept = path + ".v1"
             doorarr_save(args)
             print("[feworld] door arrivals: migrated to version %d (%d kept); "
-                  "the previous file is %s"
-                  % (DOORARR_VERSION, len(out),
-                     path + ".v1" if version < 2 else "not kept"), flush=True)
+                  "the previous store is %s"
+                  % (DOORARR_VERSION, len(out), kept), flush=True)
         except OSError as e:
             print("[feworld] door arrivals: migration not written: %s" % e,
                   flush=True)
@@ -102,19 +104,12 @@ def doorarr_save(args):
     # os.devnull means "do not persist". Writing a temp file beside it and
     # renaming onto `nul` fails on Windows and strands nul.tmp.<pid> in the
     # working directory -- 33 of them had piled up from test runs.
-    if not p or p == os.devnull:
+    if not festate.persists(p):
         return
     with _DOORARR_LOCK:
         snap = {str(k): dict(v) for k, v in _DOORARR.items()}
     snap["_version"] = DOORARR_VERSION
-    tmp = "%s.tmp.%d" % (p, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(snap, indent=1, sort_keys=True))
-        os.replace(tmp, p)
-    except OSError as e:
-        print("[feworld] door arrival save failed: %s" % e, flush=True)
+    festate.write(p, snap, sort_keys=True)
 
 
 def doorarr_get(portal):

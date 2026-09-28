@@ -105,11 +105,12 @@ PARTIAL: BUILT 2026-09-11 off the static dump only. NOTHING of the 0xF5xx family
 been on a screen; the first live keep build is the proof.
 """
 import json
-import os
 import math
 import struct
 import threading
 import time
+
+import festate  # noqa: E402  -- the world state in PostgreSQL
 
 fw = None       # the feworld module, handed in by register()
 
@@ -176,11 +177,9 @@ _VOTE_SEQ = [0]
 # the store
 # ---------------------------------------------------------------------------
 def _path(args):
-    p = getattr(args, "campaign_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(fw._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else fw._HERE, "fe_campaign.json")
-    return p
+    """Where the campaign lives: the `campaign` row of fe_world_state unless
+    --campaign-file names a file (festate.location)."""
+    return festate.location("campaign", getattr(args, "campaign_file", None))
 
 
 def _row_from(v):
@@ -233,8 +232,7 @@ def load(args):
     global _STATE, _NATIONS
     out, nations = {}, {}
     try:
-        with open(_path(args), encoding="utf-8") as fh:
-            doc = json.load(fh) or {}
+        doc = festate.read(_path(args)) or {}
         for k, v in doc.items():
             if k == "nations":
                 for n, st in (v or {}).items():
@@ -248,7 +246,7 @@ def load(args):
                 out[int(k)] = _row_from(v)
             except (TypeError, ValueError, AttributeError, KeyError, IndexError):
                 continue
-    except (OSError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         pass
     with _LOCK:
         _STATE = out
@@ -258,19 +256,15 @@ def load(args):
 
 def save(args):
     p = _path(args)
-    if not p or p == os.devnull:
+    if not festate.persists(p):
         return
     with _LOCK:
         snap = {str(k): v for k, v in _STATE.items()}
         snap["nations"] = {str(k): dict(v) for k, v in _NATIONS.items()}
-    tmp = "%s.tmp.%d" % (p, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(snap, indent=1, sort_keys=True))
-        os.replace(tmp, p)
-    except OSError as e:
-        print("[fecampaign] save failed: %s" % e, flush=True)
+        # the rows are live dicts other threads mutate under _LOCK: serialise
+        # them before letting go of it
+        text = festate.dumps(snap, sort_keys=True)
+    festate.write(p, json.loads(text), sort_keys=True, tag="fecampaign")
 
 
 def state_of(area):
@@ -3687,7 +3681,8 @@ def add_args(ap):
                          "whose keep kept more hp, defender holding ties "
                          "(--keeps on).")
     ap.add_argument("--campaign-file", default=None,
-                    help="the campaign store (default data/fe_campaign.json)")
+                    help="keep the campaign in this JSON file instead of the "
+                         "database (default: the campaign row of fe_world_state)")
 
 
 def register(feworld):

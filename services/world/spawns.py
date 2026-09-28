@@ -1,13 +1,13 @@
-"""Where a player arrives: data/fe_spawn.json and the derived spawn points."""
-import json
+"""Where a player arrives: the spawn store and the derived spawn points."""
 import os
 import sys
 import threading
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
+import festate  # noqa: E402  -- the world state in PostgreSQL
 from . import buildings, deps, sess, territory, zones
 
 # ---------------------------------------------------------------------------
-# WHERE A PLAYER ARRIVES -- data/fe_spawn.json, area id -> (x, y, z, heading).
+# WHERE A PLAYER ARRIVES -- the spawn store (festate), area id -> (x, y, z, heading).
 #
 # WARNING: WHY THIS EXISTS. --spawn-pos is ONE position for the whole world and it
 # defaults to `0:0:0`, which prod has never overridden. Every field entry, the
@@ -30,14 +30,22 @@ _SPAWN = {}
 _SPAWN_LOCK = threading.Lock()
 
 
+def spawn_seed():
+    """The shipped arrival points (fedata/fe_spawn.json): what an empty store
+    starts from, so a fresh deployment does not drop players at the terrain
+    origin."""
+    return os.path.join(deps._HERE, "fedata", "fe_spawn.json")
+
+
 def spawn_path(args):
-    p = getattr(args, "spawn_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(deps._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else deps._HERE, "fe_spawn.json")
-    # first start: seed the live store from the shipped positions, so a
-    # fresh deployment does not drop players at the terrain origin
-    seed = os.path.join(deps._HERE, "fedata", "fe_spawn.json")
+    """Where the spawn store lives: the `spawn` row of fe_world_state unless
+    --spawn-file names a file (festate.location). The database row is seeded
+    from spawn_seed() by spawn_load; a named file that does not exist yet is
+    seeded here, as it always was."""
+    p = festate.location("spawn", getattr(args, "spawn_file", None))
+    if festate.in_database(p) or not festate.persists(p):
+        return p
+    seed = spawn_seed()
     if not os.path.exists(p) and os.path.exists(seed):
         try:
             import shutil
@@ -69,17 +77,14 @@ def spawn_load(args):
     """The store, then --spawn-area on top of it."""
     global _SPAWN
     out = {}
-    try:
-        with open(spawn_path(args), encoding="utf-8") as fh:
-            for k, v in (json.load(fh) or {}).items():
-                try:
-                    rows = _spawn_rows(v)
-                except (TypeError, ValueError):
-                    continue
-                if rows:
-                    out[int(k)] = rows
-    except (OSError, ValueError):
-        pass
+    stored = festate.read(spawn_path(args), seed=spawn_seed())
+    for k, v in (stored if isinstance(stored, dict) else {}).items():
+        try:
+            rows = _spawn_rows(v)
+            if rows:
+                out[int(k)] = rows
+        except (TypeError, ValueError):
+            continue
     for part in [x for x in (getattr(args, "spawn_area", "") or "").split(",") if x.strip()]:
         f = part.split(":")
         if len(f) not in (4, 5, 6):
@@ -103,18 +108,11 @@ def spawn_save(args):
     # os.devnull means "do not persist". Writing a temp file beside it and
     # renaming onto `nul` fails on Windows and strands nul.tmp.<pid> in the
     # working directory -- 33 of them had piled up from test runs.
-    if not p or p == os.devnull:
+    if not festate.persists(p):
         return
     with _SPAWN_LOCK:
         snap = {str(k): list(v) for k, v in _SPAWN.items()}
-    tmp = "%s.tmp.%d" % (p, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(snap, indent=1, sort_keys=True))
-        os.replace(tmp, p)
-    except OSError as e:
-        print("[feworld] spawn save failed: %s" % e, flush=True)
+    festate.write(p, snap, sort_keys=True)
 
 
 def spawn_rows_for(area):

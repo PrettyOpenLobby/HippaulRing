@@ -1,9 +1,7 @@
 """The minimap calibration per capital half: anchors and the fitted projection."""
-import json
-import os
 import threading
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import deps
+import festate  # noqa: E402  -- the world state in PostgreSQL
 
 # ---------------------------------------------------------------------------
 # THE MINIMAP CALIBRATION, per capital half.
@@ -44,12 +42,9 @@ MAPCAL_SCALE_BAND = (0.5, 2.0)
 
 
 def mapcal_path(args):
-    p = getattr(args, "mapcal_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(deps._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else deps._HERE,
-                         "fe_minimap_cal.json")
-    return p
+    """Where the calibration lives: the `minimap_cal` row of fe_world_state
+    unless args.mapcal_file names a file (festate.location)."""
+    return festate.location("minimap_cal", getattr(args, "mapcal_file", None))
 
 
 def _mapcal_anchor_rows(v):
@@ -67,14 +62,11 @@ def _mapcal_anchor_rows(v):
 def mapcal_load(args):
     global _MAPCAL
     out = {}
-    try:
-        with open(mapcal_path(args), encoding="utf-8") as fh:
-            for k, v in (json.load(fh) or {}).items():
-                rows = _mapcal_anchor_rows(v)
-                if rows:
-                    out[str(k)] = rows
-    except (OSError, ValueError):
-        pass
+    stored = festate.read(mapcal_path(args))
+    for k, v in (stored if isinstance(stored, dict) else {}).items():
+        rows = _mapcal_anchor_rows(v)
+        if rows:
+            out[str(k)] = rows
     with _MAPCAL_LOCK:
         _MAPCAL = out
     return out
@@ -85,18 +77,11 @@ def mapcal_save(args):
     # os.devnull means "do not persist". Writing a temp file beside it and
     # renaming onto `nul` fails on Windows and strands nul.tmp.<pid> in the
     # working directory -- 33 of them had piled up from test runs.
-    if not p or p == os.devnull:
+    if not festate.persists(p):
         return
     with _MAPCAL_LOCK:
         snap = {k: list(v) for k, v in _MAPCAL.items()}
-    tmp = "%s.tmp.%d" % (p, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(snap, indent=1, sort_keys=True))
-        os.replace(tmp, p)
-    except OSError as e:
-        print("[feworld] minimap calibration save failed: %s" % e, flush=True)
+    festate.write(p, snap, sort_keys=True)
 
 
 def mapcal_anchors(stem):

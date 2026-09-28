@@ -19,7 +19,7 @@ database (tools/fepg.py, or the one fe_run_all.py made for this suite):
   * with no database the stores stay in memory and no file appears;
   * the blob record keeps the newest FE_BLOB_LOG_MAX rows;
   * the board snapshot is published in kv with an expiry;
-  * CrystalRing's migration numbers stay in its own range.
+  * HippaulRing's migration numbers stay in its own range.
 """
 import json
 import os
@@ -111,7 +111,7 @@ def run(db, fedb, festate, feworld, fecampaign, feforce, femap, feident, mods):
     for version, name, _ in db.migration_files(fedb.MIGRATIONS_DIR):
         check("%s is numbered inside 1001..1999" % name, 1001 <= version <= 1999)
     core = db.migration_files()          # OpenLobby's own set
-    check("no CrystalRing number is one of OpenLobby's",
+    check("no HippaulRing number is one of OpenLobby's",
           not {v for v, _, _ in core} & {v for v, _, _ in
                                           db.migration_files(fedb.MIGRATIONS_DIR)})
     t = db.query_one("SELECT data_type FROM information_schema.columns"

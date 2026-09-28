@@ -19,9 +19,9 @@
 
 services:
   login:
-    image: crystalring-title:latest
+    image: hippaulring-title:latest
     build:
-      context: ../crystalring
+      context: ../hippaulring
       dockerfile: Dockerfile.title
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
@@ -33,7 +33,7 @@ services:
       POL_FE_WORLD: "${POL_FE_WORLD:-}"
 
   authsess:
-    image: crystalring-title:latest
+    image: hippaulring-title:latest
     pull_policy: never
     environment:
       POL_TITLES: "${POL_TITLES:-fetitle}"

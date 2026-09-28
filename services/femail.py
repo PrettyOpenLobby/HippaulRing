@@ -250,12 +250,12 @@ def add_args(ap):
 # --------------------------------------------------------------------------- #
 # the store
 # --------------------------------------------------------------------------- #
-#: The mailboxes. Every CrystalRing table starts with fe_ (fedb.py).
+#: The mailboxes. Every HippaulRing table starts with fe_ (fedb.py).
 TABLE = "fe_mail"
 
 
 def _ready():
-    """Apply CrystalRing's migrations once per process (fedb.ensure_schema)."""
+    """Apply HippaulRing's migrations once per process (fedb.ensure_schema)."""
     fedb.ensure_schema()
 
 

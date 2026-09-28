@@ -11,23 +11,23 @@
 
 services:
   fellb:
-    image: ghcr.io/prettyopenlobby/crystalring:${CRYSTALRING_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulring:${HIPPAULRING_TAG:-${CRYSTALRING_TAG:-latest}}
     pull_policy: missing
     build: !reset null
     volumes:
-      - ../crystalring/services/fedata:/app/fedata:ro
+      - ../hippaulring/services/fedata:/app/fedata:ro
   felobby:
-    image: ghcr.io/prettyopenlobby/crystalring:${CRYSTALRING_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulring:${HIPPAULRING_TAG:-${CRYSTALRING_TAG:-latest}}
     pull_policy: missing
     volumes:
-      - ../crystalring/services/fedata:/app/fedata:ro
+      - ../hippaulring/services/fedata:/app/fedata:ro
   feworld:
-    image: ghcr.io/prettyopenlobby/crystalring:${CRYSTALRING_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulring:${HIPPAULRING_TAG:-${CRYSTALRING_TAG:-latest}}
     pull_policy: missing
     volumes:
-      - ../crystalring/services/fedata:/app/fedata:ro
+      - ../hippaulring/services/fedata:/app/fedata:ro
   femap:
-    image: ghcr.io/prettyopenlobby/crystalring:${CRYSTALRING_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulring:${HIPPAULRING_TAG:-${CRYSTALRING_TAG:-latest}}
     pull_policy: missing
     volumes:
-      - ../crystalring/services/fedata:/app/fedata:ro
+      - ../hippaulring/services/fedata:/app/fedata:ro

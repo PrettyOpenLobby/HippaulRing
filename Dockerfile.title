@@ -3,7 +3,7 @@
 # The game's own services build from services/Dockerfile. This image is the
 # core plus the modules that run INSIDE the core's login and authsess
 # processes: the plugin, and the player database it reads (festore.py, with
-# fedb.py and CrystalRing's migrations; the database itself is the core's
+# fedb.py and HippaulRing's migrations; the database itself is the core's
 # PostgreSQL, POL_DATABASE_URL).
 # docker-compose.title.yml swaps it in for those two services. Build the core
 # first, or point OPENLOBBY_IMAGE at the image you use (a title image, to

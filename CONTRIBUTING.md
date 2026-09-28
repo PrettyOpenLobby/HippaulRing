@@ -1,6 +1,6 @@
-# Contributing to CrystalRing
+# Contributing to HippaulRing
 
-CrystalRing is the Fantasy Earth server: the lobby balancer, the lobby, the
+HippaulRing is the Fantasy Earth server: the lobby balancer, the lobby, the
 world and the optional map page. It runs beside the OpenLobby core, which
 handles PlayOnline login. This page says where things are, how to run the
 checks, and what a pull request needs.
@@ -22,7 +22,7 @@ services/
                     or JSON when FE_DB is empty)
   festate.py        the world stores, one row each of fe_world_state
   fedb.py           reaches the core's polcore; migrate, status and import
-  fe_migrations/    CrystalRing's migrations, numbered from 1001
+  fe_migrations/    HippaulRing's migrations, numbered from 1001
   fegamedata.py     the client's shipped tables, read from services/fedata/
   fedevtool.py      the world-building web panel (--devtool-port)
   fetitle.py        the title plugin that runs inside the OpenLobby core
@@ -172,7 +172,7 @@ the core's account tables and is turned off with `--member-lookup off` or
 A schema change is a new file in `services/fe_migrations/` with the next
 number. A shipped migration is never edited. The core's `schema_migrations`
 table is keyed by the number alone and shared with the core and the other
-titles, so CrystalRing keeps to 1001-1999 and a table name that starts with
+titles, so HippaulRing keeps to 1001-1999 and a table name that starts with
 `fe_`; a reused number is silently skipped.
 
 Moving a file into the database comes with an importer in `fedb.py`

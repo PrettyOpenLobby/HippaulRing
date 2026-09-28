@@ -14,7 +14,8 @@ COPY . /app/
 
 # Refuse to build an image without the generated cipher tables and game data
 # (see README: run tools/gen_blowfish_tables.py and tools/fedata_build.py
-# before building), or on a core image that has no polcore.
+# before building), or on a core image that has no polcore, or when the
+# core's live_sessions.py has been replaced by an older copy.
 RUN python - <<'EOF'
 import os, sys
 missing = [p for p in ("fe_blowfish_P.bin", "fe_blowfish_S.bin") if not os.path.exists(p)]
@@ -24,6 +25,9 @@ try:
     import fedb
 except ImportError as exc:
     sys.exit("the base image has no polcore (%s) - build it from the OpenLobby core image" % exc)
+import live_sessions
+if not hasattr(live_sessions, "marker_key"):
+    sys.exit("live_sessions.py is not the core's (no marker_key) - an old copy was built into the image")
 if not os.path.exists("fedata/fe-fet-area.tsv"):
     print("NOTE: fedata/ is not populated; run tools/fedata_build.py against "
           "your client install for a playable world", file=sys.stderr)

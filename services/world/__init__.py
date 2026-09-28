@@ -18,10 +18,10 @@
     entities.py        Drawing units: the player's own avatar, other players, NPCs and monsters (0x1006).
     movement.py        Movement: who owns a position, unit speed, the move rows and jump physics.
     buildings.py       Buildings and keeps: the type-1 record, construction timers, keep HP and hits.
-    spawns.py          Where a player arrives: data/fe_spawn.json and the derived spawn points.
+    spawns.py          Where a player arrives: the spawn store and the derived spawn points.
     mapcal.py          The minimap calibration per capital half: anchors and the fitted projection.
-    doors.py           Doors: where a door puts you down (arrivals file) and the shipped portal table.
-    town.py            The town file (data/fe_town.json): placed NPCs, door links, pushing the town.
+    doors.py           Doors: where a door puts you down (the arrivals store) and the shipped portal table.
+    town.py            The town store (festate "town"): placed NPCs, door links, pushing the town.
     populate.py        Filling a field with monster groups: spawn points, scatter, population.
     monsters.py        Shared monsters: one copy per field, relayed between sessions, and their AI.
     combat.py          Combat: registering a target, hit and kill pushes, the battle tally.

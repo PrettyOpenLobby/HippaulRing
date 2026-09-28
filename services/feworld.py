@@ -687,6 +687,7 @@ _OWNERS = {
     'spawn_push': 'populate',
     'spawn_rows_for': 'spawns',
     'spawn_save': 'spawns',
+    'spawn_seed': 'spawns',
     'spawn_scatter': 'populate',
     'spawn_side': 'spawns',
     'stat_2024_push': 'unitstate',

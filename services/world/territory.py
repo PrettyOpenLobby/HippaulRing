@@ -1,10 +1,9 @@
 """Nations and the territory map: the 0x3027 force record, who holds each area."""
-import json
-import os
 import struct
 import threading
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import character, deps, wire, zones
+import festate  # noqa: E402  -- the world state in PostgreSQL
+from . import character, wire, zones
 
 # ---------------------------------------------------------------------------
 # 0x3027 MSG_GET_FORCE_INFO_OK -- the NATION record.
@@ -145,11 +144,9 @@ _TERRITORY_LOCK = threading.Lock()
 
 
 def territory_path(args):
-    p = getattr(args, "territory_file", None)
-    if p is None:
-        d = os.path.normpath(os.path.join(deps._HERE, os.pardir, "data"))
-        p = os.path.join(d if os.path.isdir(d) else deps._HERE, "fe_territory.json")
-    return p
+    """Where the territory store lives: the `territory` row of fe_world_state
+    unless --territory-file names a file (festate.location)."""
+    return festate.location("territory", getattr(args, "territory_file", None))
 
 
 def territory_load(args):
@@ -162,16 +159,12 @@ def territory_load(args):
     """
     global _TERRITORY
     board = {a: r["nation"] for a, r in fegamedata.areas().items() if r["nation"]}
-    p = territory_path(args)
-    try:
-        with open(p, encoding="utf-8") as fh:
-            for k, v in (json.load(fh) or {}).items():
-                try:
-                    board[int(k)] = int(v)
-                except (TypeError, ValueError):
-                    continue
-    except (OSError, ValueError):
-        pass
+    stored = festate.read(territory_path(args))
+    for k, v in (stored if isinstance(stored, dict) else {}).items():
+        try:
+            board[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
     for part in [x for x in (getattr(args, "territory", "") or "").split(",") if x.strip()]:
         a, _, n = part.partition(":")
         try:
@@ -188,19 +181,12 @@ def territory_save(args):
     # os.devnull means "do not persist". Writing a temp file beside it and
     # renaming onto `nul` fails on Windows and strands nul.tmp.<pid> in the
     # working directory -- 33 of them had piled up from test runs.
-    if not p or p == os.devnull:
+    if not festate.persists(p):
         return
     with _TERRITORY_LOCK:
         snap = dict(_TERRITORY)
-    tmp = "%s.tmp.%d" % (p, os.getpid())
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps({str(k): v for k, v in sorted(snap.items())},
-                                indent=1, sort_keys=True))
-        os.replace(tmp, p)
-    except OSError as e:
-        print("[feworld] territory save failed: %s" % e, flush=True)
+    festate.write(p, {str(k): v for k, v in sorted(snap.items())},
+                  sort_keys=True)
 
 
 def territory_owner(area, args=None):

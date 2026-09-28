@@ -156,9 +156,10 @@ Which listener (if any) draws 0x206C..0x206F is unmeasured. What polls
 [player+0x299] is unmeasured.
 """
 import json
-import os
 import struct
 import threading
+
+import festate  # noqa: E402  -- the world state in PostgreSQL
 
 fw = None   # the feworld module, handed in by register()
 
@@ -259,14 +260,9 @@ _ALL_CHARS = None      # test hook: () -> [(account, char dict)]
 
 
 def force_path(args):
-    """data/fe_force.json beside fe_territory.json (same resolution rule as
-    feworld.territory_path); --force-file overrides."""
-    p = getattr(args, "force_file", None)
-    if p:
-        return p
-    here = getattr(fw, "_HERE", os.path.dirname(os.path.abspath(__file__)))
-    d = os.path.normpath(os.path.join(here, os.pardir, "data"))
-    return os.path.join(d if os.path.isdir(d) else here, "fe_force.json")
+    """The `force` row of fe_world_state, beside the territory store;
+    --force-file keeps it in that JSON file instead (festate.location)."""
+    return festate.location("force", getattr(args, "force_file", None) or None)
 
 
 def _load(args):
@@ -275,17 +271,15 @@ def _load(args):
     feworld's 0x206A arm (builtin, not overridden) reads args.force_table,
     which apply_force_targets built from --forces at start-up. A `!force`
     edit lands in that same dict, so the next GET_FORCE_INFO serves it; the
-    JSON file is what survives a restart.
+    stored force row (festate) is what survives a restart.
     """
     with _LOCK:
         if _STATE["loaded"]:
             return
         _STATE["loaded"] = True
         path = force_path(args)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                doc = json.load(fh)
-        except (OSError, ValueError):
+        doc = festate.read(path, tag="feforce")
+        if not isinstance(doc, dict):
             return
         _STATE["judge"] = doc.get("judge")
         table = getattr(args, "force_table", None)
@@ -305,15 +299,10 @@ def _save(args):
     path = force_path(args)
     doc = {"forces": {str(k): v for k, v in _STATE["forces"].items()},
            "judge": _STATE["judge"]}
-    try:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, ensure_ascii=False, indent=1)
-        os.replace(tmp, path)
+    if festate.write(path, doc, tag="feforce"):
         return True
-    except OSError as e:
-        print("[feforce] WARNING: could not write %s: %s" % (path, e), flush=True)
-        return False
+    print("[feforce] WARNING: could not write %s" % path, flush=True)
+    return False
 
 
 def force_rows(args):
@@ -848,8 +837,9 @@ def add_args(p):
     p.add_argument("--force-join", default="auto",
                    help="0x4012 policy: auto (= the builtin OK) or ng:CODE")
     p.add_argument("--force-file", default=None,
-                   help="force rows + judge policy JSON (default "
-                        "data/fe_force.json)")
+                   help="keep the force rows + judge policy in this JSON file "
+                        "instead of the database (default: the force row of "
+                        "fe_world_state)")
     p.add_argument("--chat-ng", default="off", choices=("off", "on"),
                    help="on: a /tell that reaches no session gets 0x1180 "
                         "MSG_WHISPER_NG code 8 instead of silence")

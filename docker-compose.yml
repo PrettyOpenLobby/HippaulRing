@@ -62,7 +62,7 @@ services:
   feworld:
     <<: *app
     # The game rules and the world data are the parser's defaults (see
-    # RELEASE_DEFAULTS in feworld.py); override any of them by giving the
+    # RELEASE_DEFAULTS in world/launch.py); override any of them by giving the
     # option here. Spawn positions: fedata/fe_spawn.json seeds /data on the
     # first start; in-game !spawn edits persist in /data afterwards.
     entrypoint: ["python", "feworld.py"]

@@ -78,7 +78,8 @@ python tools/fe_run_all.py
 ```
 
 runs the offline suite. Suites that need generated fedata are skipped until
-step 2 has been run.
+step 2 has been run. CONTRIBUTING.md lists where each part of the server
+lives and how to run the checks.
 
 ## What is not included, and why
 

@@ -26,10 +26,10 @@ services:
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build
+    # the player database felobby and feworld write is the core's PostgreSQL
+    # (POL_DATABASE_URL, set by the core's compose file for these services)
     environment:
       POL_TITLES: "${POL_TITLES:-fetitle}"
-      # the player database felobby and feworld write, on the shared data volume
-      FE_DB: "${FE_DB:-/data/fe.db}"
       POL_FE_WORLD: "${POL_FE_WORLD:-}"
 
   authsess:
@@ -37,5 +37,4 @@ services:
     pull_policy: never
     environment:
       POL_TITLES: "${POL_TITLES:-fetitle}"
-      FE_DB: "${FE_DB:-/data/fe.db}"
       POL_FE_WORLD: "${POL_FE_WORLD:-}"

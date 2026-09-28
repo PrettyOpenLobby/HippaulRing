@@ -1,13 +1,21 @@
-# Fantasy Earth game services. Requires the core lobby stack (openlobby)
-# running on the same Docker host: this compose joins its data volume for the
-# shared account/session database.
+# Fantasy Earth game services. This file is an OVERRIDE of OpenLobby's compose
+# file, not a stack of its own: the services join the core's project so they
+# can use its PostgreSQL and Valkey services and its data volume. With both
+# repositories checked out side by side, from this directory:
 #
 #   1. python tools/gen_blowfish_tables.py     (once)
 #   2. python tools/fedata_build.py --client <your FE install>   (once)
-#   3. docker compose up -d --build
+#   3. docker compose --project-directory ../openlobby \
+#          -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+#          up -d --build
+#
+# The image is built on the core image (openlobby:latest, or OPENLOBBY_IMAGE),
+# so build the core before the first FE build. Paths in this file are relative
+# to the core's directory, because that is the project directory.
 #
 # FE_ADVERTISE must be the address game clients reach this host on
-# (empty = 127.0.0.1, same-machine testing only).
+# (empty = 127.0.0.1, same-machine testing only). It is read from the core's
+# .env, since that is the project's.
 
 # fellb owns the image build; the other services consume it with
 # pull_policy: never so parallel builds cannot race on the tag.
@@ -15,28 +23,37 @@ x-app: &app
   image: crystalring:latest
   pull_policy: never
   restart: unless-stopped
-  environment:
+  environment: &feenv
     POL_ADVERTISE: "${FE_ADVERTISE:-}"
+    # the characters and the mail (festore.py, femail.py) live in the core's
+    # PostgreSQL database; docs/database.md in OpenLobby has the settings
+    POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
+    POL_VALKEY_URL: "valkey://valkey:6379/0"
   volumes:
     - pol-data:/data
     # fellb.log, felobby.log and feworld.log: kept across container recreates,
     # which the containers' own docker logs are not.
     - fe-logs:/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
 
 volumes:
-  pol-data:
-    external: true
-    name: openlobby_pol-data
   fe-logs:
 
 services:
   # The lobby balancer: one request, one reply naming the lobby's address.
   fellb:
     <<: *app
-    build: ./services
+    build:
+      context: ../crystalring/services
+      args:
+        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build
     environment:
-      POL_ADVERTISE: "${FE_ADVERTISE:-}"
+      <<: *feenv
       POL_FELLB_IP: "${FE_ADVERTISE:-127.0.0.1}"
       POL_FELLB_PORT: "54848"
       POL_FELLB_LOBBY_PORT: "54849"

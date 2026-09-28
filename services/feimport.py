@@ -123,7 +123,7 @@ def _table_exists(name):
 
 
 def _prepare(dry_run):
-    """Apply CrystalRing's migrations (not on a dry run, which writes
+    """Apply HippaulRing's migrations (not on a dry run, which writes
     nothing: a table that is not there yet reads as empty)."""
     if not dry_run:
         fedb.ensure_schema(log=lambda m: print("[fedb] %s" % m))

@@ -20,7 +20,7 @@
 # fellb owns the image build; the other services consume it with
 # pull_policy: never so parallel builds cannot race on the tag.
 x-app: &app
-  image: crystalring:latest
+  image: hippaulring:latest
   pull_policy: never
   restart: unless-stopped
   environment: &feenv
@@ -49,7 +49,7 @@ services:
   fellb:
     <<: *app
     build:
-      context: ../crystalring/services
+      context: ../hippaulring/services
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build

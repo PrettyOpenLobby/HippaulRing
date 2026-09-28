@@ -18,7 +18,7 @@ the whole file is rewritten on every skill purchase.
 
 WHERE IT LIVES. The `fe_character` table in the stack's PostgreSQL database,
 through OpenLobby's `polcore.db` (POL_DATABASE_URL; see fedb.py for how the
-package is found and how CrystalRing's migrations are numbered). Until
+package is found and how HippaulRing's migrations are numbered). Until
 2026-09-27 it was its own SQLite file, `data/fe.db`, kept apart from
 accounts.db because a container restart had truncated that file once
 (memory: accounts-db-wal-hazard). A server database has no such file to
@@ -47,7 +47,7 @@ import time
 import fedb
 from fedb import db
 
-#: The table. Every CrystalRing table starts with fe_ (fedb.py).
+#: The table. Every HippaulRing table starts with fe_ (fedb.py).
 TABLE = "fe_character"
 
 #: Scalar keys that get their own column. Everything else rides in `extra`.
@@ -450,7 +450,7 @@ def _selftest():
 
     print("festore selftest (%s)" % where())
 
-    # KEY: THE MIGRATION NUMBERING. CrystalRing's files share OpenLobby's
+    # KEY: THE MIGRATION NUMBERING. HippaulRing's files share OpenLobby's
     # schema_migrations table, which is keyed by version number alone, so a
     # number both sets used would be skipped by whichever set ran second.
     # Apply OpenLobby's set FIRST, as a stack does, then ours.
@@ -458,7 +458,7 @@ def _selftest():
     fedb.ensure_schema(log=lambda m: None)
     have = db.applied_migrations()
     check("OpenLobby's migrations applied first (%s)" % ", ".join(ol), bool(ol))
-    check("...and CrystalRing's still applied after them (1001, 1002)",
+    check("...and HippaulRing's still applied after them (1001, 1002)",
           {1001, 1002} <= set(have))
     check("fe_character and fe_mail exist",
           db.query_one("SELECT to_regclass('fe_character') IS NOT NULL AS a,"

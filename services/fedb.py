@@ -1,9 +1,9 @@
-"""fedb.py -- where CrystalRing reaches OpenLobby's storage layer.
+"""fedb.py -- where HippaulRing reaches OpenLobby's storage layer.
 
 The player database (festore.py) and the in-game mail (femail.py) live in the
 PostgreSQL database the whole stack shares, through OpenLobby's `polcore.db`
 (POL_DATABASE_URL, a pool per process, numbered migrations). This module finds
-that package, applies CrystalRing's own migrations once per process, and names
+that package, applies HippaulRing's own migrations once per process, and names
 the exceptions that mean "the database could not be used".
 
 Finding polcore:
@@ -14,15 +14,15 @@ Finding polcore:
     that the one checked out beside this repository (../openlobby) is used,
     the same rule tools/fe_title_test.py follows.
 
-CrystalRing's migrations are services/fe_migrations/NNNN_name.sql, applied with
+HippaulRing's migrations are services/fe_migrations/NNNN_name.sql, applied with
 `polcore.db.migrate(directory=...)`. They share OpenLobby's schema_migrations
-table, which is keyed by the version number alone, so CrystalRing numbers its
+table, which is keyed by the version number alone, so HippaulRing numbers its
 files from 1001 up: OpenLobby's own files start at 0001, and a version number
 that appears in both sets would be taken as already applied by whichever set
-ran second. Every table CrystalRing creates starts with `fe_`.
+ran second. Every table HippaulRing creates starts with `fe_`.
 
     python fedb.py migrate     apply what is pending (uses POL_DATABASE_URL)
-    python fedb.py status      list CrystalRing's migrations and their state
+    python fedb.py status      list HippaulRing's migrations and their state
 
     python fedb.py import fe_db FILE        an old fe.db into fe_character
     python fedb.py import fe_mail_db FILE   an old fe_mail.db into fe_mail
@@ -37,7 +37,7 @@ import threading
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: CrystalRing's migration files. Version numbers 1001..1999 are this
+#: HippaulRing's migration files. Version numbers 1001..1999 are this
 #: repository's; see the module docstring.
 MIGRATIONS_DIR = os.path.join(_HERE, "fe_migrations")
 
@@ -86,7 +86,7 @@ def errors():
 
 
 def ensure_schema(log=None):
-    """Apply CrystalRing's pending migrations, once per process and database.
+    """Apply HippaulRing's pending migrations, once per process and database.
 
     Cheap after the first call. Raises what `polcore.db.migrate` raises when
     the database cannot be reached, and remembers nothing then, so the next

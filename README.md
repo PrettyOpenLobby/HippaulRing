@@ -1,4 +1,4 @@
-# CrystalRing
+# HippaulRing
 
 A server reimplementation for Square Enix's Fantasy Earth (2006, the original
 PlayOnline-era service). Together with the core lobby stack it lets an
@@ -11,6 +11,9 @@ is extracted from YOUR OWN client install by the tools in this repository.
 
 ## Prerequisites
 
+- This repository checked out as `hippaulring`, which is where the compose files
+  look for it (`git clone https://github.com/PrettyOpenLobby/HippaulRing.git hippaulring`).
+  A checkout from before the rename, still named `crystalring`, needs renaming.
 - The core lobby stack (openlobby) checked out beside this repository
   (`../openlobby`) and running on the same Docker host. The Fantasy Earth
   services join its compose project and keep their characters and mail in
@@ -38,7 +41,7 @@ The image is built on the core image (`openlobby:latest`, or the image named
 by `OPENLOBBY_IMAGE`), so build the core first.
 
 Without building: the image is published to
-`ghcr.io/prettyopenlobby/crystalring` on every push (it carries the cipher
+`ghcr.io/prettyopenlobby/hippaulring` on every push (it carries the cipher
 tables, so step 1 is not needed); step 2 still runs on the host, and the
 override mounts your `services/fedata/` into the containers:
 
@@ -59,7 +62,7 @@ Characters (`services/festore.py`) and in-game mail (`services/femail.py`)
 are tables in the core's PostgreSQL database, `fe_character` and `fe_mail`,
 reached through the core's `polcore` package with `POL_DATABASE_URL`. The
 compose file sets it for every Fantasy Earth service. Their schema is
-CrystalRing's own, in `services/fe_migrations/`, and is applied when a service
+HippaulRing's own, in `services/fe_migrations/`, and is applied when a service
 first touches the database, or by hand:
 
 ```
@@ -67,8 +70,8 @@ docker compose --project-directory ../openlobby -f ../openlobby/docker-compose.y
 ```
 
 These files share the core's `schema_migrations` table, which records a
-migration by its number alone, so CrystalRing numbers its files from 1001 and
-the core keeps 0001 to 0999. Every CrystalRing table starts with `fe_`.
+migration by its number alone, so HippaulRing numbers its files from 1001 and
+the core keeps 0001 to 0999. Every HippaulRing table starts with `fe_`.
 
 The world state the game rewrites while it runs is in the same database
 (`services/festate.py`). Each store is one row of `fe_world_state`, holding

@@ -74,6 +74,7 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 gm.validate_pump(conn, outbound, mode, be, args)
                 war.war_deadline_pump(conn, outbound, mode, be, args)
                 monsters.monster_wander_pump(conn, outbound, mode, be, args)
+                monsters.monster_chase_tick(conn, outbound, mode, be, args)
                 death.revive_tick(conn, outbound, mode, be, args)   # a respawn wait
                 drops.drop_pump(conn, outbound, mode, be, args)
                 damage.item_effect_pump(conn, outbound, mode, be, args)
@@ -122,6 +123,9 @@ def _serve_loop(conn, args, session, outbound, mode, be):
         gm.validate_pump(conn, outbound, mode, be, args)
         war.war_deadline_pump(conn, outbound, mode, be, args)
         monsters.monster_wander_pump(conn, outbound, mode, be, args)
+        # the chase runs on this clock too, not only on the 0x2023 telemetry:
+        # a player standing still to target a monster sends none for seconds
+        monsters.monster_chase_tick(conn, outbound, mode, be, args)
         death.revive_tick(conn, outbound, mode, be, args)   # a respawn wait
         drops.drop_pump(conn, outbound, mode, be, args)
         damage.item_effect_pump(conn, outbound, mode, be, args)

@@ -343,6 +343,7 @@ _OWNERS = {
     '_building_side': 'buildings',
     '_charid_of_name': 'character',
     '_chase_clock_ms': 'monsters',
+    '_chase_lead': 'monsters',
     '_chat_room_join': 'chat',
     '_chat_room_leave': 'chat',
     '_chat_room_name': 'chat',

@@ -254,7 +254,15 @@ def mob_move_note(m, target, dur_ms, now=None):
     m["pos"] = tuple(target)
 
 
-def monster_chase_tick(conn, outbound, mode, be, args, client_body):
+def _chase_lead(args, every):
+    """How far ahead a chase step reaches, in seconds: past the latest the
+    next send can come (the chase interval plus one idle tick), with a
+    quarter second of margin for a relay on another session's thread."""
+    tick = max(0.0, float(getattr(args, "idle_tick_ms", 250) or 0) / 1000.0)
+    return max(2.0 * every, every + tick + 0.25)
+
+
+def monster_chase_tick(conn, outbound, mode, be, args, client_body=None):
     """Walk every aggro'd monster toward the player with 0x2023 action 0.
 
     WARNING: CREDIT WHERE IT IS DUE, AND A CORRECTION TO THIS FILE'S OWN COMMIT
@@ -334,6 +342,22 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body):
     should walk at all rather than be placed. The live-test report is the
     spec here -- "the enemy does sort of animate now when attacking, but
     doesn't follow the character at all".
+
+    2026-09-28, "enemies feel jittery and hard to target": this ran ONLY on
+    the chasing player's own 0x2023 telemetry, and each step lasted exactly
+    the gap since the last one (1.2 u / 800 ms every ~800 ms). An FE client
+    standing still goes quiet for 3-6 s (see readloop's idle tick), so the
+    moment a player stopped to target a monster, the monster moved in
+    bursts, one step then a stand. While walking, any step that landed late
+    left the monster with no move task, so it stood a frame and restarted its
+    walk. The client's attach (0x050781E0, 0x05078226..0x0507826D) DELETES a
+    running move of equal or lower priority for a new one, and only refuses a
+    move whose END has already passed. So the chase now runs on the session's
+    own pump clock (client_body None) and each step covers _chase_lead() --
+    longer than the gap to the next send -- so a move is always replaced
+    mid-walk and the monster never stands between steps. mob_pos still reads
+    the replaced move part-way, so the server's copy stays where the client
+    has it.
     """
     if getattr(args, "combat", "off") != "on":
         return
@@ -341,7 +365,7 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body):
         return
     if not sess._SESSION.get("in_field"):
         return
-    if len(client_body) != movement._MV_LEN:
+    if client_body is not None and len(client_body) != movement._MV_LEN:
         return
     mm = _mob_mode(args)
     if mm == "wait":
@@ -395,9 +419,9 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body):
             # little outside the stop band, still inside --monster-range
             continue
         # at least _MOB_MIN_STEP; the duration below follows the step, so a
-        # longer step is a longer move, never a faster one
-        step = min(max(speed * (now - last if last else every), _MOB_MIN_STEP),
-                   room)
+        # longer step is a longer move, never a faster one. It LEADS the next
+        # send (_chase_lead), so the next step replaces it mid-walk.
+        step = min(max(speed * _chase_lead(args, every), _MOB_MIN_STEP), room)
         steps.append(step)
         speeds.append(speed)
         m["chase_at"] = now
@@ -421,7 +445,7 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body):
         dur_ms = max(1, int(round(step / max(speed, 0.001) * 1000.0)))
         durs.append(dur_ms)
         mob_move_note(m, (nx, ny, nz), dur_ms, now)
-        if timing == "client":
+        if timing == "client" and client_body is not None:
             out[movement._MV_A:movement._MV_A + 8] = client_body[movement._MV_A:movement._MV_A + 8]
         else:
             t0 = _chase_clock_ms()
@@ -439,7 +463,8 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body):
         n = sess._SESSION.get("chase_n", 0) + 1
         sess._SESSION["chase_n"] = n
         if n <= 3 or n % 40 == 0:
-            if timing == "client" and len(client_body) >= movement._MV_B + 4:
+            if (timing == "client" and client_body is not None
+                    and len(client_body) >= movement._MV_B + 4):
                 _a, _b = struct.unpack_from(">II", client_body, movement._MV_A)
                 _why = ("the CLIENT's own pair, whose difference is %d ms -- "
                         "a step that long never visibly moves"

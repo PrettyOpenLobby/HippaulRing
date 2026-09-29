@@ -1061,26 +1061,56 @@ def main():
                                  type_id=1004)
             feworld.monster_chase_tick(None, None, None, None, a_, body)
             return 12.0 - S["mobs"][17]["pos"][0]
+        # 2026-09-28: a step reaches _chase_lead() ahead (1.0 s at the
+        # defaults), not the 0.5 s interval, so the next send replaces it
+        # mid-walk instead of after the monster has stopped.
+        lead = feworld._chase_lead(args_stub(), 0.5)
         run = feworld.fegamedata.model_speed(17)[1]
         check("the default chases at the model's OWN run speed (Duke_Orc 3.7)",
-              abs(_one(17) - run * 0.5) < 0.01 and abs(run - 3.7) < 0.01,
-              (_one(17), run))
-        # 2026-09-12 (live: an orc "slingshotting toward my player and
-        # back"): walk's 1.8 x 0.5 s = 0.9u is under the client's 1.0u move
-        # discard (0x04FEAAD4), so it goes out as _MOB_MIN_STEP -- timed at
-        # the WALK speed, so the step is longer and the speed is unchanged.
+              abs(_one(17) - run * lead) < 0.01 and abs(run - 3.7) < 0.01,
+              (_one(17), run, lead))
         step_w = _one(17, monster_speed="walk")
         a_w, b_w = struct.unpack_from(">II", cap4.inner(0)[1], feworld._MV_A)
         walk_ = feworld.fegamedata.model_speed(17)[0]
-        check("...'walk' uses +0x41c instead: its 0.9u step is sent as "
-              "_MOB_MIN_STEP, timed at the walk speed (1.8)",
-              abs(step_w - feworld._MOB_MIN_STEP) < 0.01 and abs(walk_ - 1.8) < 0.01
+        check("...'walk' uses +0x41c instead, timed at the walk speed (1.8)",
+              abs(step_w - walk_ * lead) < 0.01 and abs(walk_ - 1.8) < 0.01
               and (b_w - a_w) & 0xFFFFFFFF
-              == int(round(feworld._MOB_MIN_STEP / walk_ * 1000.0)),
+              == int(round(step_w / walk_ * 1000.0)),
               (step_w, (b_w - a_w) & 0xFFFFFFFF, walk_))
+        # 2026-09-12 (live: an orc "slingshotting toward my player and
+        # back"): 0.5 u/s x the lead is under the client's 1.0u move discard
+        # (0x04FEAAD4), so it goes out as _MOB_MIN_STEP -- timed at that
+        # speed, so the step is longer and the speed is unchanged.
+        step_s = _one(17, monster_speed="0.5")
+        a_s, b_s = struct.unpack_from(">II", cap4.inner(0)[1], feworld._MV_A)
+        check("...a slow step is sent as _MOB_MIN_STEP, timed at its speed",
+              abs(step_s - feworld._MOB_MIN_STEP) < 0.01
+              and (b_s - a_s) & 0xFFFFFFFF
+              == int(round(feworld._MOB_MIN_STEP / 0.5 * 1000.0)),
+              (step_s, (b_s - a_s) & 0xFFFFFFFF))
         check("...a number still pins every monster (the old behaviour)",
-              abs(_one(17, monster_speed="10") - 5.0) < 0.01,
-              _one(17, monster_speed="10"))
+              abs(_one(17, monster_speed="5") - 5.0 * lead) < 0.01,
+              _one(17, monster_speed="5"))
+        # 2026-09-28, "enemies feel jittery": each step must outlast the gap
+        # to the next send (interval + one idle tick), or the client finishes
+        # the move, stands, and restarts the walk when the next one lands.
+        a_d = args_stub(idle_tick_ms=250)
+        gap = 0.5 + 0.25
+        check("a chase step outlasts the gap to the next send",
+              feworld._chase_lead(a_d, 0.5) > gap
+              and feworld._chase_lead(args_stub(idle_tick_ms=1000), 0.5)
+              > 0.5 + 1.0, feworld._chase_lead(a_d, 0.5))
+        # and it runs WITHOUT a telemetry body -- the pump clock calls it so
+        # a player standing still to target still sees the monster come
+        S["mobs"] = {}
+        cap4.frames[:] = []
+        a_p = args_stub(combat="on", monster_chase="on", monster_aggro=15.0,
+                        monster_range=8.0, monster_chase_interval=0.0)
+        feworld.mob_register(a_p, 17, 17, 0, 15, 12.0, 0.0, 0.0, type_id=1004)
+        feworld.monster_chase_tick(None, None, None, None, a_p)
+        check("the chase moves a monster on the pump clock (no 0x2023 body)",
+              len(cap4.frames) == 1 and S["mobs"][17]["pos"][0] < 12.0,
+              (len(cap4.frames), S["mobs"][17]["pos"]))
         check("...and two models chase at DIFFERENT speeds by default",
               abs(_one(17) - _one(41)) > 1.0, (_one(17), _one(41)))
         # 2026-09-12: A RESPAWN KEEPS ITS OWN TYPE, NAME AND SPAWN POINT. A

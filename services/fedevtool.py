@@ -187,7 +187,25 @@ class _Handler(BaseHTTPRequestHandler):
                 st = {"error": "%s: %s" % (type(e).__name__, e)}
             st["log"] = log_tail()
             return self._send(200, st)
+        route = (self.server.devtool_routes or {}).get(("GET", path))
+        if route is not None:
+            return self._route(route, urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query))
         return self._send(404, {"error": "no such thing"})
+
+    def _actor(self):
+        """Who is at the keyboard, as the admin panel's proxy names them. Only
+        for the log; the token is what authorises."""
+        return (self.headers.get("X-Devtool-Actor") or "").strip()[:64]
+
+    def _route(self, fn, arg):
+        """One of a title's extra routes (start(routes=...)): fn(arg, actor)
+        -> (status, body[, content type]). Never takes the server down."""
+        try:
+            res = fn(arg, self._actor())
+        except Exception as e:
+            res = (500, {"ok": False, "msg": "%s: %s" % (type(e).__name__, e)})
+        return self._send(res[0], res[1], *(res[2:3] or ("application/json",)))
 
     def do_POST(self):
         if not self._authed():
@@ -216,10 +234,21 @@ class _Handler(BaseHTTPRequestHandler):
             # PRINTED, not only noted: refusals used to reach the panel's
             # message line and nowhere else, so a "random" failed placement
             # left nothing in the server log to explain it.
-            print("[devtool] edit %s -> %s%s" % (
+            print("[devtool] edit%s %s -> %s%s" % (
+                " by " + self._actor() if self._actor() else "",
                 json.dumps(op, sort_keys=True), "" if res.get("ok") else
                 "REFUSED: ", res.get("msg")), flush=True)
             return self._send(200, res)
+        route = (self.server.devtool_routes or {}).get(("POST", path))
+        if route is not None:
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 65536)).decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("not an object")
+            except (ValueError, OSError) as e:
+                return self._send(400, {"ok": False, "msg": "bad request: %s" % e})
+            return self._route(route, body)
         if path != "/cmd":
             return self._send(404, {"error": "no such thing"})
         try:
@@ -229,18 +258,22 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "unreadable body"})
         ok = enqueue(line)
         if ok:
-            note("[devtool] queued: %s" % line.strip())
+            note("[devtool] queued%s: %s" % (
+                " by " + self._actor() if self._actor() else "", line.strip()))
         return self._send(200, {"queued": ok, "line": line.strip(),
                                 "pending": len(_Q)})
 
 
 def start(port, bind, token, state_fn, edit_fn=None, page=None, name="fe-devtool",
-          floor_fn=None):
+          floor_fn=None, routes=None):
     """Start the panel on its own daemon thread. Returns the server, or None.
 
     `page` swaps the HTML for another title's panel (fmodevtool.py uses this
     server, its gate and its /state + /edit plumbing unchanged); `name` is
-    the thread's, so a stack dump says which panel it is.
+    the thread's, so a stack dump says which panel it is. `routes` adds pages
+    and endpoints of the title's own: {("GET"|"POST", "/path"): fn}, where
+    fn(query dict or JSON body, actor) returns (status, body[, content type]).
+    They sit behind the same token gate as everything else here.
 
     Raises SystemExit for the one configuration that is genuinely dangerous:
     a non-loopback bind with no token.
@@ -261,6 +294,7 @@ def start(port, bind, token, state_fn, edit_fn=None, page=None, name="fe-devtool
     srv.devtool_floor = floor_fn
     srv.devtool_token = token or ""
     srv.devtool_page = page
+    srv.devtool_routes = dict(routes or {})
     t = threading.Thread(target=srv.serve_forever, name=name, daemon=True)
     t.start()
     return srv
@@ -562,7 +596,9 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
 <script>
 const T = new URLSearchParams(location.search).get('t') || '';
 const q = s => document.querySelector(s);
-const qs = p => T ? p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(T) : p;
+// Relative, so the page works both at / and behind the admin panel's
+// /games/<title>/ proxy (which adds the token itself).
+const qs = p => { p = p.replace(/^\//, ''); return T ? p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(T) : p; };
 let live = false, area = null;
 
 async function send(line){

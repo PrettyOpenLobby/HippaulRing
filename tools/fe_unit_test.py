@@ -478,6 +478,216 @@ def part_crystal():
     check("0x20AE is logged, nothing sent", out == [])
 
 
+def _capture_out():
+    """send_world_frame captured as (mid, unit, payload); returns (out,
+    restore)."""
+    out = []
+    saved = (fenet.bf_encrypt, fenet.traffic_wrap, feworld.send_world_frame)
+    fenet.bf_encrypt = lambda st, body, mode, be: body
+    fenet.traffic_wrap = lambda data, seq=1: data
+
+    def _capture(conn, mid, body, prefix):
+        unit, msg = struct.unpack_from(">IH", body, 0)
+        out.append((msg, unit, body[6:]))
+    feworld.send_world_frame = _capture
+
+    def restore():
+        fenet.bf_encrypt, fenet.traffic_wrap, feworld.send_world_frame = saved
+    return out, restore
+
+
+def part_status():
+    """world/status.py (2026-10-01): statuses from the skills' own
+    EFFECT_DATA rows, what the server enforces with them, and the wire bits
+    behind --status-effects-wire."""
+    def check(label, cond, detail=""):
+        globals()["check"](label, cond, repr(detail) if detail != "" else "")
+
+    import time
+    from world import combat, damage, monsters, status
+    say("status effects")
+    # --- the data: which skill carries what
+    kinds = lambda sk: sorted(x["kind"] for x in status.skill_specs(sk))
+    check("Shield Bash L1 (35) STUNS (EFFECT_DATA 529, bitsE 0x10)",
+          kinds(35) == ["stun"], kinds(35))
+    check("Spider Web L1 (160) SLOWS by 10% (173, bitsB 0x6000, -0.1)",
+          kinds(160) == ["slow"]
+          and abs(status.skill_specs(160)[0]["factor"] - 0.9) < 1e-6,
+          status.skill_specs(160))
+    check("Ice Javelin L1 (330, the manual's Ice Bolt) SLOWS",
+          "slow" in kinds(330), kinds(330))
+    check("Freezing Wave L1 (335) ROOTS (bitsE 0x20, 'Rooted!!')",
+          "root" in kinds(335), kinds(335))
+    check("Arm Break L1 (195) DISARMS (bitsE 0x40)", "disarm" in kinds(195),
+          kinds(195))
+    vb = [x for x in status.skill_specs(190) if x["kind"] == "poison"]
+    check("Viper Bite L1 (190) POISONS: 15 HP every 2 s for 10 s",
+          vb and vb[0]["amount"] == 15 and vb[0]["tick_ms"] == 2000
+          and vb[0]["ms"] == 10000, vb)
+    check("Blaze Shot L1 (165) BURNS", "burn" in kinds(165), kinds(165))
+    check("Void Darkness L1 (205) BLINDS and lowers resistance",
+          kinds(205) == ["blind", "resist_down"], kinds(205))
+    check("Ender Pain L1 (5): no flinch + resistance up (GOOD, on the caster)",
+          [x["kind"] for x in status.good_specs(5)] == ["noflinch", "resist_up"],
+          status.skill_specs(5))
+    check("Hide L1 (140): hide (0x2000) and a 40% slow, from +0x2C's 120 s",
+          kinds(140) == ["hide", "slow"]
+          and status.skill_specs(140)[0]["ms"] == 120000, status.skill_specs(140))
+    check("詠唱 L1 (275): chant 0x2000000 = the bit Fire Lance (305) requires",
+          kinds(275) == ["chant"]
+          and status.skill_required_bits(305) == status.COND_CHANT)
+    check("Venomous's bite (monster skill 602) poisons",
+          "poison" in kinds(602), kinds(602))
+    check("the Antidote's 600 ms flag is not a status; it CURES poison (0x1)",
+          kinds(1052) == [] and status.skill_cures(1052) == 0x1)
+    check("the basic attack carries nothing", kinds(0) == [])
+
+    # --- the store
+    h = {}
+    status.apply(h, status.bad_specs(160), now=100.0)
+    check("a slow: speed factor 0.9", abs(status.speed_factor(h, 100.5) - 0.9) < 1e-6)
+    status.apply(h, status.bad_specs(335), now=100.0)
+    check("...rooted: 0", status.speed_factor(h, 100.5) == 0.0)
+    check("a hit breaks ROOT (manual) but not the slow",
+          status.break_on_hit(h) == ["root"] and status.has(h, "slow", 100.5))
+    status.apply(h, status.bad_specs(35), now=100.0)
+    status.break_on_hit(h)
+    check("a hit does NOT break STUN (manual)", status.has(h, "stun", 100.5))
+    check("...a stunned holder may not attack",
+          status.refusal(h, 100.5) == "stunned")
+    check("...and it runs out (3 s)", not status.has(h, "stun", 103.5)
+          and status.refusal(h, 103.5) is None)
+    h = {}
+    status.apply(h, status.bad_specs(190), src=7, now=0.0)
+    t = status.dot_ticks(h, 4.0)
+    check("poison ticks: two by t=4 s, 15 each, credited to the applier",
+          t == [("poison", 15, 7), ("poison", 15, 7)], t)
+    t = status.dot_ticks(h, 30.0)
+    check("...three more until it ends at 10 s, then nothing",
+          len(t) == 3 and not status.has(h, "poison", 30.0), t)
+
+    # --- a monster: a skill's statuses land, DoT kills pay the applier
+    a = _args(combat="on", monster_attack="on", kill_reward="off", drops="off",
+              kill_gold="off", status_effects="on")
+    _KEYS = ("in_field", "charid", "field", "room", "cpos", "mobs", "status",
+             "player_hp", "crouch_at", "crouch_pos", "pw_tick_at",
+             "crouch_tick_seen", "status_bits_sent", "player_dead")
+    for k in _KEYS:
+        feworld._SESSION.pop(k, None)
+    for k, v in dict(in_field=True, charid=7, field=12, room=-1,
+                     cpos=(0.0, 0.0, 0.0)).items():
+        feworld._SESSION[k] = v
+    m = {"type": 1, "level": 1, "name": "Dummy", "type_id": None, "hp": 1000,
+         "hpmax": 1000, "attack": 92, "defence": 0, "pos": (2.0, 0.0, 0.0),
+         "home": (2.0, 0.0, 0.0), "dead": False, "hits": 0}
+    feworld._SESSION["mobs"] = {4401: m}
+    out, restore = _capture_out()
+    try:
+        combat.mob_damage(None, None, "ecb", False, a, 4401, m, 10, 7, "t",
+                          skill=330)
+        check("Ice Javelin's hit SLOWS the monster", status.has(m, "slow"),
+              m.get("status"))
+        check("...and the chase reads it", monsters.status_speed(a, m) < 1.0)
+        combat.mob_damage(None, None, "ecb", False, a, 4401, m, 10, 7, "t",
+                          skill=335)
+        check("Freezing Wave ROOTS it: chase speed 0",
+              monsters.status_speed(a, m) == 0.0)
+        combat.mob_damage(None, None, "ecb", False, a, 4401, m, 10, 7, "t")
+        check("...the next hit breaks the root", not status.has(m, "root"))
+        combat.mob_damage(None, None, "ecb", False, a, 4401, m, 10, 7, "t",
+                          skill=35)
+        check("Shield Bash STUNS it: it refuses to swing",
+              status.mob_refusal(m) == "stunned")
+        status.clear(m)
+        m["hp"] = 20
+        combat.mob_damage(None, None, "ecb", False, a, 4401, m, 1, 7, "t",
+                          skill=190)
+        m["status"]["poison"]["next_at"] = time.monotonic() - 0.01   # due now
+        del out[:]
+        n = status.mob_pump(None, None, "ecb", False, a)
+        check("the monster's poison ticks through mob_damage (credited to 7)",
+              n >= 1 and m["ledger"].get(7, 0) >= 15, (n, m.get("ledger")))
+        m["hp"], m["dead"] = 5, False
+        m["status"]["poison"].update(next_at=time.monotonic() - 0.01)
+        status.mob_pump(None, None, "ecb", False, a)
+        check("...and a poison tick can KILL it (0x1004 sent)",
+              m["dead"] and any(o[0] == 0x1004 for o in out), out)
+
+        # --- the player: a crouch costs extra damage
+        s = feworld._SESSION
+        s.pop("crouch_at", None)
+        base, _w = damage.monster_hit_damage(a, {"attack": 92})
+        status.crouch_note(s, "test")
+        crouch, why = damage.monster_hit_damage(a, {"attack": 92})
+        check("a CROUCHED player takes --crouch-damage 1.3x (%d -> %d)"
+              % (base, crouch), crouch == int(round(base * 1.3)), why)
+        s["cpos"] = (5.0, 0.0, 0.0)
+        check("...standing up (moving off the spot) ends it",
+              damage.monster_hit_damage(a, {"attack": 92})[0] == base)
+        s["cpos"] = (0.0, 0.0, 0.0)
+        a1 = _args(crouch_damage=1.0)
+        status.crouch_note(s, "test")
+        check("--crouch-damage 1.0 turns it off",
+              damage.monster_hit_damage(a1, {"attack": 92})[0] == base)
+        s.pop("crouch_at", None)
+        s["pw_tick_at"] = 10.0
+        status.crouch_watch(s, 10.0)
+        s["pw_tick_at"] = 11.35
+        status.crouch_watch(s, 11.35)
+        check("two 0x2028 regen asks 1.35 s apart = the client's crouch cadence",
+              s.get("crouch_at") is not None)
+        s.pop("crouch_at", None)
+        s["pw_tick_at"] = 14.35
+        status.crouch_watch(s, 14.35)
+        check("...3 s apart = standing", s.get("crouch_at") is None)
+
+        # --- the player: poison ticks the HP down; wire off sends no CONDITION
+        s["player_hp"] = 100
+        status.player_apply(None, None, "ecb", False, a, status.bad_specs(190),
+                            src=4401)
+        s["status"]["poison"]["next_at"] = time.monotonic() - 0.01
+        del out[:]
+        status.player_pump(None, None, "ecb", False, a)
+        hp_push = [o for o in out if o[0] == 0x2024
+                   and struct.unpack_from(">I", o[2], 0)[0] == 0x4]
+        check("player poison: -15 HP, pushed as 0x2024 maskA 0x4",
+              s["player_hp"] == 85 and len(hp_push) == 1, (s["player_hp"], out))
+        check("...--status-effects-wire off: no CONDITION word goes out",
+              not [o for o in out if o[0] == 0x2024
+                   and struct.unpack_from(">I", o[2], 0)[0] == 0x100000])
+        aw = _args(combat="on", status_effects="on",
+                   status_effects_wire="on", unit_state=0x1E000000)
+        del out[:]
+        status.cond_sync(None, None, "ecb", False, aw)
+        cw = [o for o in out if o[0] == 0x2024]
+        check("--status-effects-wire on: 0x2024 maskA 0x100000 = base | POISON 0x1",
+              len(cw) == 1 and cw[0][2] == struct.pack(">III", 0x100000, 0,
+                                                       0x1E000001), cw)
+        del out[:]
+        status.cond_sync(None, None, "ecb", False, aw)
+        check("...sent once per change, not every pump", out == [])
+        status.clear(s)
+        status.cond_sync(None, None, "ecb", False, aw)
+        check("...and cleared when it ends",
+              out and out[-1][2] == struct.pack(">III", 0x100000, 0, 0x1E000000),
+              out)
+        # stunned/disarmed attacker: no damage on 0xA011
+        status.apply(s, status.bad_specs(195))          # Arm Break: disarm
+        m2 = dict(m, hp=500, dead=False, ledger={}, first={}, status={})
+        s["mobs"] = {4402: m2}
+        body = struct.pack(">IIII", 4402, 7, 0, 0) + struct.pack(">HB", 0, 1)
+        combat.combat_hit(None, None, "ecb", False, a, body)
+        check("a DISARMED player's 0xA011 does no damage (manual p.39)",
+              m2["hp"] == 500, m2["hp"])
+        status.clear(s)
+        combat.combat_hit(None, None, "ecb", False, a, body)
+        check("...and once it ends, it does", m2["hp"] < 500, m2["hp"])
+    finally:
+        restore()
+        for k in _KEYS:
+            feworld._SESSION.pop(k, None)
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -501,6 +711,7 @@ if __name__ == "__main__":
         part_condition()
         part_misc()
         part_crystal()
+        part_status()
     finally:
         if quiet:
             sys.stdout = _saved_out

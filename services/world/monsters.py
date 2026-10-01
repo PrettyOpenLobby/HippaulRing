@@ -3,7 +3,7 @@ import struct
 import threading
 import time
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import character, combat, damage, death, ext, extrun, itemrecords, movement, sess, town, wire
+from . import character, combat, damage, death, ext, extrun, itemrecords, movement, sess, status, town, wire
 
 # ---------------------------------------------------------------------------
 # SHARED MONSTERS (2026-09-13). Until today every session built its OWN copy
@@ -179,6 +179,16 @@ ext.register_relay("mob_move", _mob_relay_move)
 ext.register_relay("mob_hp", _mob_relay_hp)
 ext.register_relay("mob_del", _mob_relay_del)
 ext.register_relay("mob_spawn", _mob_relay_spawn)
+
+
+def status_speed(args, m):
+    """What monster `m`'s statuses do to its speed (world/status.py): 1.0,
+    a slow's fraction (Spider Web, Ice Javelin), or 0 while rooted or
+    stunned. 1.0 under --status-effects off."""
+    if not status.on(args) or not m.get("status"):
+        return 1.0
+    with _MOB_LOCK:
+        return status.speed_factor(m)
 
 
 def monster_speed_of(args, modeltype):
@@ -405,6 +415,11 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body=None):
         # this monster's OWN speed -- NPC_ModelType +0x420 by default, not one
         # number for every monster in the game
         speed = monster_speed_of(args, m.get("type", 0))
+        # rooted / stunned stand still; a slow walks slower (--status-effects)
+        sf = status_speed(args, m)
+        if sf <= 0:
+            continue
+        speed *= sf
         dx, dz = px - mx, pz - mz
         d = (dx * dx + dz * dz) ** 0.5
         if d > aggro or d <= stop:
@@ -606,6 +621,9 @@ def monster_attack_tick(conn, outbound, mode, be, args):
             # shared monsters: one swing per interval, whichever player
             if now - m.get("swing_at", 0) < m_every:
                 continue
+            # a stunned or disarmed monster does not swing (manual p.39)
+            if status.on(args) and m.get("status") and status.mob_refusal(m, now):
+                continue
             m["swing_at"] = now
         if protected:
             # the 15 s protection [SE interface05]: the swing happens, it
@@ -620,6 +638,16 @@ def monster_attack_tick(conn, outbound, mode, be, args):
         hp = max(0, int(sess._SESSION.get("player_hp", death.player_hp_max(args))) - dmg)
         sess._SESSION["player_hp"] = hp
         death.player_hp_push(conn, outbound, mode, be, args, hp)
+        if hp > 0 and status.on(args):
+            # the hit ends root/hide, then its OWN skill's bad statuses land
+            # (Venomous's bite poisons, Ice Lizard roots: SKILL_DATA +0x108)
+            status.player_hit_taken(conn, outbound, mode, be, args,
+                                    m["name"] or "monster %d" % obj)
+            sk = (m.get("atk_skill") or {}).get("skill")
+            if sk is not None:
+                status.player_apply(conn, outbound, mode, be, args,
+                                    status.bad_specs(sk), src=obj, skill=sk,
+                                    why="%s's skill %d" % (m["name"] or obj, sk))
         print("[feworld]    %s (L%s) hits the player for %d at %.1fu -- HP "
               "%d/%d [%s] (0x2024 maskA 0x4 carries the NEW hp; the client "
               "draws the difference as the damage number)"
@@ -797,6 +825,10 @@ def monster_wander_pump(conn, outbound, mode, be, args):
         tx, tz, d = target
         sp = fegamedata.model_speed(m.get("type", 0))
         walk = float(sp[0]) if sp and sp[0] else 1.5
+        sf = status_speed(args, m)
+        if sf <= 0:
+            continue                    # rooted or stunned (--status-effects)
+        walk *= sf
         dur_ms = max(1, int(round(d / max(walk, 0.1) * 1000.0)))
         durs.append(dur_ms)
         # the pause starts when it ARRIVES

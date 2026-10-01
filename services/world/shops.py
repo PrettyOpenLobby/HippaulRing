@@ -220,8 +220,12 @@ def item_sell_value(args, no):
     The buy price is the item table's own (+0x90, see fegamedata.items());
     the PERCENTAGE is ours -- FE's real buy-back rate is not in any table we
     have read, and 50 is the common MMO convention, labelled as a choice. An
-    item with no table price (Gold, the books, the Maiden set) sells for
-    nothing. `--shop-prices flat` keeps the old flat --shop-price basis."""
+    item whose table price is 0 (186 rows in this build, mostly high-level
+    armour, the rare Heroic and Maiden drops among them) sells for nothing.
+    The Goblin Book is NOT one of them (checked 2026-10-01, audit C24 said
+    0 G): its row (1836) carries 10 G, so a capital shop buys it for 5 G, as
+    the manual's FAQ says shops do. `--shop-prices flat` keeps the old flat
+    --shop-price basis."""
     pct = int(getattr(args, "sell_price", 0) or 0)
     if pct <= 0:
         return 0

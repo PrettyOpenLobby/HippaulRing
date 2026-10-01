@@ -1,7 +1,7 @@
 """Damage numbers both ways, resistance, item use effects."""
 import time
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import death, equipment, progression, sess, skilllist, staff
+from . import death, equipment, progression, sess, skilllist, staff, status
 
 #: The weakest monster in the shipped bestiary, used to normalise the ATTACK
 #: column into damage. Level 1 Venomous: 124 hp, attack 92.
@@ -244,17 +244,36 @@ def monster_hit_damage(args, m):
     calculator's effectDef/getRealDef). No RoD-era formula survives; what
     RoD players did write fits it ("the real effect is small for how much the
     耐性 number rises", fv_class.txt:68; Guard Reinforce's +44 "noticeably"
-    changes damage taken, hw_5.txt:210). WARNING: Not modelled: sitting (-70 % in
-    FEZ, "1.2-1.5x damage" felt in RoD), buffs, and the level-gap multiplier
-    on damage TAKEN (lv_diff f2/f3 -- which one is unsettled)."""
+    changes damage taken, hw_5.txt:210). WARNING: Not modelled: the level-gap
+    multiplier on damage TAKEN (lv_diff f2/f3 -- which one is unsettled).
+
+    2026-10-01: resistance up/down STATUSES (world/status.py: Ender Pain +,
+    Void Darkness -) move 耐性 before the cap, and a CROUCHED player takes
+    --crouch-damage more (taken_modifiers)."""
     dmg, why = monster_swing_damage(args, m)
-    if getattr(args, "armour_defence", "on") != "on":
-        return dmg, why
-    res, n, unknown = player_resistance(args)
-    if res <= 0:
-        return dmg, why + ("; no armour defence (%d worn piece(s) unknown)"
-                           % unknown if unknown else "")
-    out = max(1, int(round(dmg * (1.0 - res / float(RESIST_CAP)))))
-    return out, ("%s; armour 耐性 %d over %d piece(s)%s -> x%.3f"
-                 % (why, res, n, (", %d unknown" % unknown) if unknown else "",
-                    1.0 - res / float(RESIST_CAP)))
+    return taken_modifiers(args, dmg, why)
+
+
+def taken_modifiers(args, dmg, why, s=None):
+    """What the player's own state does to a hit about to land on them:
+    armour 耐性 (--armour-defence) plus the resistance statuses, then the
+    crouch multiplier. `s` is the victim's session (this thread's)."""
+    s = sess._SESSION if s is None else s
+    if getattr(args, "armour_defence", "on") == "on":
+        res, n, unknown = player_resistance(args)
+        delta = status.resist_delta(s) if status.on(args) else 0.0
+        eff = min(RESIST_CAP, max(0.0, res + delta))
+        if eff > 0:
+            dmg = max(1, int(round(dmg * (1.0 - eff / float(RESIST_CAP)))))
+            why = ("%s; armour 耐性 %d over %d piece(s)%s%s -> x%.3f"
+                   % (why, res, n, (", %d unknown" % unknown) if unknown else "",
+                      (", status %+g" % delta) if delta else "",
+                      1.0 - eff / float(RESIST_CAP)))
+        else:
+            why += ("; no armour defence (%d worn piece(s) unknown)"
+                    % unknown if unknown else "")
+    k = status.crouch_mult(args, s)
+    if k != 1.0:
+        dmg = max(1, int(round(dmg * k)))
+        why += "; CROUCHED x%g (--crouch-damage)" % k
+    return dmg, why

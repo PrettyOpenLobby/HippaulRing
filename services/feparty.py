@@ -131,7 +131,29 @@ WHAT IS CHOSEN (not measured) -- every one is a knob or documented:
     included the joiner's own row in the joiner's list is unknown -- it is
     included here, so the window shows every member.
   * a NO from the target maps to 0x1130 code 8 ("target refused"); the
-    client's auto-decline reason 7 is passed through as code 7.
+    client's auto-decline reason 7 (blacklisted inviter, or invites turned
+    off) maps to code 11 "Partner is busy; can't apply." -- it used to be
+    passed through as code 7, which the NG table reads as "They are already
+    in another party" (fixed 2026-10-01).
+  * TEARDOWN (2026-10-01, manual p.43): a member leaves the party on logout
+    (readloop.serve's finally -> session_end), on Field Out (0x2033 ->
+    field_out), and when their outdoor field/area changes, which covers the
+    capital's halves (tick, also nudged from fepresence's 0x2017 shadow).
+    The rest get 0x1135 (or 0x1136 when one is left); the leaver, while their
+    client is still in the scene, gets 0x1137. Pending invites to or from the
+    leaver are closed (inviter 0x1130, target 0x1133). A leader who leaves
+    hands over to the oldest member: the client has no "new leader" message
+    we know of, and the oldest member is the first row of every client's
+    list, so the server's view and the list agree.
+  * WAR (manual p.43): during PREP/WAR an invite across hostile sides is
+    refused with 0x1130 code 4 ("You serve different nations"), and a member
+    whose side becomes hostile to the leader's is removed (0x113C to them) --
+    checked on the member's own thread every --party-war-check seconds, and
+    by war_sweep() for a caller that wants it at once.
+  * BLACKLIST (manual p.48, both directions): an invite between two players
+    where either has the other on their blacklist is refused with code 11,
+    the same answer the client's own auto-decline gets.
+  * invites only within the same field (manual p.43): code 1.
   * an invite nobody answers within `--party-invite-timeout` (35 s, just past
     the prompt's own 30 s) is closed with 0x1130 code 8.
   * a cancel (0x113E) is answered with 0x1130 code 13 ("Cancelled.").
@@ -157,6 +179,7 @@ has no kind-2 unit for the inviter, so the judge prompt cannot open
 
 KNOBS (read with getattr; the test harness builds args by hand):
   --party-max 5   --party-phantom off|on   --party-proxy-unit 0
+  --party-war-check 2 (CHOSEN; 0 = off)
   --party-invite-timeout 35   --party-chat field|party   (field = what prod
   does today: every in-field session gets /party lines; party = members
   only, and a speaker with no party gets 0x113D)   --party-status b,w1,w2,d1,d2
@@ -215,6 +238,8 @@ NG_UNDEFINED, NG_MOVED_FIELD, NG_NO_PARAM, NG_SELF, NG_OTHER_NATION = 0, 1, 2, 3
 NG_NO_INVITER, NG_NO_TARGET, NG_ALREADY_IN_PARTY, NG_REFUSED = 5, 6, 7, 8
 NG_INVITER_CANCELLED, NG_BUSY, NG_PARTNER_BUSY, NG_FULL, NG_CANCELLED = 9, 10, 11, 12, 13
 NG_TARGET_BEING_INVITED = 25
+# the 0x2087 reason the client's AUTO-DECLINE sends (0x0505129f)
+AUTO_DECLINE = 7
 # 0x1138 codes
 LEAVE_NG_NO_OBJECT, LEAVE_NG_NOT_IN_PARTY = 1, 2
 # 0x113B codes
@@ -228,6 +253,11 @@ _LOCK = threading.Lock()
 _PARTIES = {}      # party id -> {"id", "leader", "members": {charid: rec}, "order": [charid]}
 _MEMBER_OF = {}    # charid -> party id
 _INVITES = {}      # (target charid, inviter charid) -> invite dict
+#: charid -> the session dict (fw._TLS.session) that holds that membership.
+#: A relog whose old socket has not timed out yet is two sessions on one
+#: charid; this says which one the party belongs to, so the old one's
+#: teardown cannot remove the new one and the new one can shed a ghost.
+_OWNER = {}
 _NEXT_PARTY = itertools.count(1)
 _NEXT_PHANTOM = itertools.count(0)
 _NAME_MAX = 0x20   # the 0x1134 name lands next to [unit+0x389..0x3ac]-sized
@@ -294,6 +324,33 @@ def add_args(ap):
     g.add_argument("--party-phantom-base", type=lambda s: int(s, 0),
                    default=0x7F000000,
                    help="first ChrID handed to phantom members")
+    g.add_argument("--party-war-check", type=float, default=2.0,
+                   help="seconds between a member's own check that their war "
+                        "side is not hostile to the leader's (manual p.43). "
+                        "CHOSEN. 0 = never")
+    # Knobs owned by world/chat.py and world/death.py. They are registered
+    # HERE because launch.py's parser is a shared file; move them there when
+    # it is convenient (both readers use getattr with these defaults).
+    w = ap.add_argument_group("chat range and logout (world/chat.py, "
+                              "world/death.py)")
+    w.add_argument("--say-range", type=float, default=60.0,
+                   help="/say (0x201A) reaches players within this many world "
+                        "units of the speaker (both positions known, same "
+                        "room). CHOSEN: no retail number is known. 0 = the "
+                        "whole field (the pre-2026-10-01 behaviour)")
+    w.add_argument("--validate-cancel-on-hit", choices=("on", "off"),
+                   default="off",
+                   help="taking damage while a Field Out countdown is pending "
+                        "sends 0x1158 MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY "
+                        "and drops the 0x1157 FINISH (manual p.22/23: being "
+                        "attacked cancels). The arm 0x050AD1EC was read "
+                        "statically; not yet seen live")
+    w.add_argument("--validate-capital", choices=("instant", "wait"),
+                   default="instant",
+                   help="Field Out from a capital finishes at once (0x1157 "
+                        "right after the 0x1154 OK) instead of after "
+                        "--validate-finish seconds (manual p.22/23: logout in "
+                        "a capital is immediate)")
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +515,7 @@ def _remove_member(p, cid):
     if cid in p["order"]:
         p["order"].remove(cid)
     _MEMBER_OF.pop(cid, None)
+    _OWNER.pop(cid, None)
     if p["leader"] == cid and p["order"]:
         p["leader"] = p["order"][0]
 
@@ -465,6 +523,7 @@ def _remove_member(p, cid):
 def _drop_party(p):
     for cid in list(p["order"]):
         _MEMBER_OF.pop(cid, None)
+        _OWNER.pop(cid, None)
     _PARTIES.pop(p["id"], None)
 
 
@@ -487,21 +546,27 @@ def _phantom_rec(args, name, cls=0):
 # the join: shared by the target's YES, the phantom accept and `!party accept`
 # ---------------------------------------------------------------------------
 def _join(ctx, inviter_cid, inviter_name, inviter_cls, joiner_rec,
-          joiner_is_me):
+          joiner_is_me, inviter_session=None):
     """Put `joiner_rec` into the inviter's party (creating it with the inviter
     as leader), then PUSH the resulting state (rule 2): every existing member
     gets 0x1134 N=1 {joiner}; the joiner gets 0x1134 N=all. Returns (party,
     existing member charids) or (None, code) on refusal."""
+    mine = fw._TLS.session
     with _LOCK:
         if _party_of(joiner_rec["charid"]) is not None:
             return None, NG_ALREADY_IN_PARTY
         p = _party_of(inviter_cid)
         if p is None:
             p = _new_party(_rec(inviter_cid, inviter_name, inviter_cls))
+            owner = mine if inviter_cid == _my_charid(ctx) else inviter_session
+            if owner is not None:
+                _OWNER[inviter_cid] = owner
         if len(p["order"]) >= _k(ctx.args, "party_max", 5):
             return None, NG_FULL
         existing = list(p["order"])
         _add_member(p, joiner_rec)
+        if joiner_is_me:
+            _OWNER[joiner_rec["charid"]] = mine
         everyone = _records(p)
     for cid in existing:
         if cid == _my_charid(ctx):
@@ -603,6 +668,20 @@ def _unit_name(ctx, obj):
 def _invite_session(ctx, me, target, target_obj):
     """A real cross-session invite: record it, relay the prompt."""
     tcid = int(target["session"]["charid"]) & 0xFFFFFFFF
+    ts = target["session"]
+    _reap_ghost(tcid)
+    # the manual's rules (p.43, p.48), before the model is touched
+    rule = None
+    if not _same_field(fw._TLS.session, ts):
+        rule = NG_MOVED_FIELD, "not in the same field (manual p.43)"
+    elif _hostile(fw._TLS.session, ts, ctx.args):
+        rule = NG_OTHER_NATION, "hostile war sides (manual p.43)"
+    elif _blocked(ctx, ts, tcid, target.get("name")):
+        rule = NG_PARTNER_BUSY, "blacklist, one way or the other (manual p.48)"
+    if rule is not None:
+        _reply(ctx, 0x1130, err_body(rule[0]),
+               why="NG %d: %s" % (rule[0], rule[1]))
+        return
     with _LOCK:
         if _party_of(tcid) is not None:
             code = NG_ALREADY_IN_PARTY
@@ -613,7 +692,8 @@ def _invite_session(ctx, me, target, target_obj):
             _INVITES[(tcid, me)] = {
                 "inviter": me, "inviter_name": _my_name(ctx),
                 "inviter_class": _my_class(ctx), "target": tcid,
-                "target_obj": target_obj, "t0": time.time()}
+                "target_obj": target_obj, "t0": time.time(),
+                "inviter_session": fw._TLS.session}
     if code is not None:
         _reply(ctx, 0x1130, err_body(code), why="NG %d" % code)
         return
@@ -654,13 +734,20 @@ def _judge(ctx, inv, yes, reason):
     me = _my_charid(ctx)
     if not yes:
         _reply(ctx, 0x1131, why="OK: the NO was taken (clears bit1 only)")
-        code = reason if 0 < reason <= NG_TARGET_BEING_INVITED else NG_REFUSED
+        if reason == AUTO_DECLINE:
+            # 0x0505129f's auto-decline: blacklisted inviter or invites
+            # turned off. Code 7 would read "already in another party".
+            code = NG_PARTNER_BUSY
+        else:
+            code = reason if 0 < reason <= NG_TARGET_BEING_INVITED else NG_REFUSED
         _post("party.canvass_ng", {"code": code, "target": me}, inv["inviter"])
-        _log("   declined -> inviter gets 0x1130 code %d" % code)
+        _log("   declined (reason %d) -> inviter gets 0x1130 code %d"
+             % (reason, code))
         return
     rec = _rec(me, _my_name(ctx), _my_class(ctx))
     p, code = _join(ctx, inv["inviter"], inv["inviter_name"],
-                    inv["inviter_class"], rec, True)
+                    inv["inviter_class"], rec, True,
+                    inviter_session=inv.get("inviter_session"))
     if p is None:
         _reply(ctx, 0x1132, err_body(code), why="join refused, code %d" % code)
         _post("party.canvass_ng", {"code": code, "target": me}, inv["inviter"])
@@ -802,7 +889,7 @@ def on_party_chat(ctx, inner):
         return
     n = 0
     for cid in members:
-        n += _post("party.chat", {"parts": parts}, cid)
+        n += _post("party.chat", {"parts": parts, "cid": me}, cid)
     _log("   party scope: queued for %d of %d member session(s)"
          % (n, len(members)))
 
@@ -855,15 +942,283 @@ def relay_kicked(ctx, pl):
 def relay_chat(ctx, pl):
     parts = pl["parts"]
     try:
-        blocked = set(r["name"] for r in fw.blacklist_rows(ctx.args))
+        # by the speaker's charid or the name case-folded (the client stores
+        # blacklist names upper-cased; an exact compare missed until 10-01)
+        blocked = fw.character.blacklist_hit(fw.blacklist_rows(ctx.args),
+                                             pl.get("cid"), parts[0])
     except Exception:                                  # noqa: BLE001
-        blocked = set()
-    if parts[0] in blocked:
+        blocked = False
+    if blocked:
         _log("   /party relay: %r is on this player's blacklist -- 0x05170e10 "
              "would drop it silently, dropped here instead" % parts[0])
         return
     fw.chat_send(ctx.conn, ctx.outbound, ctx.mode, ctx.be, ctx.args, 0x208A,
                  parts, speaker=0)
+
+
+# ---------------------------------------------------------------------------
+# the manual's rules: same field, war sides, blacklist (manual p.43, p.48)
+# ---------------------------------------------------------------------------
+def _area(s):
+    """The outdoor field a session stands in, else None (on the map, not
+    loaded, or indoors: a room's `field` is the island's war field, not the
+    capital the door is in, so indoors says nothing about a move)."""
+    if not s or not s.get("in_field") or s.get("room", -1) != -1:
+        return None
+    return s.get("field")
+
+
+def _same_field(a, b):
+    """Both in the same field. Unknown on either side passes: a refusal on a
+    guess is worse than the old behaviour."""
+    fa, fb = (a or {}).get("field"), (b or {}).get("field")
+    return fa is None or fb is None or fa == fb
+
+
+def _war_side(s, args):
+    """"atk"/"def" for a session standing in a field at PREP/WAR, else None.
+    The member row fecampaign keeps for a sign-up wins; else the nation (the
+    attacker's nation is "atk", the holder's "def"; anyone else has no side
+    until they sign up). Read only, from any thread."""
+    import sys
+    fc = sys.modules.get("fecampaign")
+    area = _area(s)
+    if fc is None or area is None:
+        return None
+    try:
+        if int(area) in fw.CAPITAL_GROUP_IDS:
+            return None
+        r = fc.state_of(area)
+        if r["phase"] not in (fc.PREP, fc.WAR):
+            return None
+        cid, acct = s.get("charid"), s.get("account")
+        if cid is not None:
+            m = (r.get("members") or {}).get("%s|%d" % (acct, int(cid)))
+            if m is not None and m.get("side") in ("atk", "def"):
+                return m["side"]
+        nation = s.get("campaign_nation")
+        if not nation:
+            nation = (s.get("pres_card") or {}).get("force")
+        nation = int(nation or 0)
+        if not nation:
+            return None
+        if nation == int(r.get("atk") or 0):
+            return "atk"
+        if nation == fw.territory_owner(area, args):
+            return "def"
+    except Exception:                                  # noqa: BLE001
+        return None
+    return None
+
+
+def _hostile(a, b, args):
+    sa, sb = _war_side(a, args), _war_side(b, args)
+    return sa is not None and sb is not None and sa != sb
+
+
+def _blocked(ctx, ts, tcid, tname):
+    """Either side has the other blacklisted (character.blacklist_blocked)."""
+    try:
+        return bool(fw.character.blacklist_blocked(
+            ctx.args, ts.get("account"), tcid, tname or ""))
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
+# ---------------------------------------------------------------------------
+# teardown: logout, Field Out, an area change, a hostile side (manual p.43)
+# ---------------------------------------------------------------------------
+def _live(s):
+    """Is session dict `s` still a listed world session?"""
+    return any(e["session"] is s for e in fw.ext_sessions())
+
+
+def _reap_ghost(cid):
+    """`cid`'s membership belongs to a session that is gone (it died without
+    its teardown running, which only an exception in serve() could do): drop
+    it so the player is not "already in a party" with nobody behind it."""
+    with _LOCK:
+        owner = _OWNER.get(cid)
+        ghost = owner is not None and _party_of(cid) is not None \
+            and not _live(owner)
+    if ghost:
+        _log("charid %d's membership has no live session -- removed" % cid)
+        _drop_member(cid, "ghost")
+
+
+def _drop_member(cid, why):
+    """Take `cid` out of its party and tell the rest: 0x1135 each, or 0x1136
+    when one member would be left. Returns the party dict, or None."""
+    with _LOCK:
+        p = _party_of(cid)
+        if p is None:
+            return None
+        was_leader = p["leader"] == cid
+        _remove_member(p, cid)
+        rest = list(p["order"])
+        breakup = len(rest) < 2
+        if breakup:
+            _drop_party(p)
+    for other in rest:
+        if breakup:
+            _post("party.breakup", {}, other)
+        else:
+            _post("party.del", {"charid": cid}, other)
+    _log("charid %d left party %d (%s); %s" % (
+        cid, p["id"], why, "BROKEN UP (%d left)" % len(rest) if breakup
+        else "leader now %d%s" % (p["leader"], " (handed over)" if was_leader
+                                  else "")))
+    return p
+
+
+def _drop_invites(cid, code):
+    """Close every pending invite to or from `cid`: the inviter's wait
+    window gets 0x1130 `code`, the target's prompt 0x1133."""
+    with _LOCK:
+        hit = [(k, v) for k, v in _INVITES.items()
+               if v["inviter"] == cid or v["target"] == cid]
+        for k, _v in hit:
+            _INVITES.pop(k, None)
+    for _k_, v in hit:
+        if v["inviter"] == cid:
+            _post("party.judge_cancel", {"inviter": cid}, v["target"])
+        else:
+            _post("party.canvass_ng", {"code": code, "target": cid},
+                  v["inviter"])
+    return len(hit)
+
+
+def leave_all(why, code=NG_NO_TARGET, ctx=None, self_mid=None):
+    """THIS session's character leaves its party and drops its invites.
+    `self_mid` (0x1137 / 0x113C) is sent to its own client when `ctx` is
+    given -- only while that client is still in the scene. Never raises."""
+    if fw is None:
+        return False
+    try:
+        s = fw._TLS.session
+        cid = s.get("charid") if s is not None else None
+        if cid is None:
+            return False
+        cid = int(cid) & 0xFFFFFFFF
+        with _LOCK:
+            owner = _OWNER.get(cid)
+        if owner is not None and owner is not s:
+            return False          # a newer session of this charid holds it
+        _drop_invites(cid, code)
+        p = _drop_member(cid, why)
+        if p is not None and ctx is not None and self_mid:
+            _reply(ctx, self_mid, why="%s (%s)" % (NAMES.get(self_mid, ""), why))
+        return p is not None
+    except Exception:                                  # noqa: BLE001
+        import traceback
+        _log("leave_all(%s) failed:" % why)
+        traceback.print_exc()
+        return False
+
+
+def session_end():
+    """Logout / disconnect: called from readloop.serve()'s finally, on the
+    dying session's own thread. Manual p.43: a leader who logs out hands the
+    party over and it carries on without them."""
+    return leave_all("logout", NG_NO_TARGET)
+
+
+def field_out(ctx=None):
+    """Field Out (0x2033 answered): leaving the field screen leaves the party
+    (manual p.43). Nothing to the leaver: its scene, and the party manager
+    with it (0x05050f90 is a scene object), is going away."""
+    return leave_all("field out", NG_MOVED_FIELD)
+
+
+def area_check(ctx):
+    """An area change leaves the party (manual p.43: another field, or
+    another area inside the capital). Called from the tick and nudged from
+    fepresence's 0x2017 shadow; compares the outdoor field this member had
+    when last seen with the one they stand in now."""
+    me = _my_charid(ctx)
+    if me is None:
+        return False
+    now = _area(fw._TLS.session)
+    with _LOCK:
+        p = _party_of(me)
+        rec = p["members"].get(me) if p else None
+        if rec is None or now is None:
+            return False
+        was = rec.get("area")
+        if was is None:
+            rec["area"] = now
+            return False
+        moved = was != now
+    if moved:
+        return leave_all("moved from area %s to %s" % (was, now),
+                         NG_MOVED_FIELD, ctx, 0x1137)
+    return False
+
+
+def _membership_tick(ctx, me):
+    s = fw._TLS.session
+    with _LOCK:
+        p = _party_of(me)
+        owner = _OWNER.get(me)
+        if p is not None and owner is None:
+            _OWNER[me] = owner = s
+        leader = p["leader"] if p else None
+    if p is None:
+        return
+    if owner is not s:
+        # this charid's party was joined by an OLDER session (a relog whose
+        # old socket has not timed out): this client has no party list, so
+        # the membership is a ghost -- shed it the way a logout would
+        _log("charid %d: party %d belongs to an older session -- removed"
+             % (me, p["id"]))
+        with _LOCK:
+            _OWNER[me] = s
+        leave_all("relog", NG_NO_TARGET)
+        return
+    if area_check(ctx):
+        return
+    every = float(_k(ctx.args, "party_war_check", 2.0) or 0)
+    if not every or leader == me:
+        return
+    now = time.time()
+    if now - float(s.get("party_war_t", 0) or 0) < every:
+        return
+    s["party_war_t"] = now
+    with _LOCK:
+        lead_s = _OWNER.get(leader)
+    if lead_s is None:
+        ent = _session_by_charid(leader)
+        lead_s = ent["session"] if ent else None
+    if lead_s is not None and _hostile(s, lead_s, ctx.args):
+        leave_all("on a side hostile to the leader", NG_OTHER_NATION, ctx,
+                  0x113C)
+
+
+def war_sweep(args):
+    """Remove every member whose war side is hostile to their leader's, at
+    once, from any thread (manual p.43). Each member's own tick does the same
+    within --party-war-check seconds; this is for a caller that has just
+    started a war or taken a sign-up and wants it now. Returns the charids
+    removed."""
+    if fw is None:
+        return []
+    with _LOCK:
+        plan = [(p["leader"], list(p["order"])) for p in _PARTIES.values()]
+        owners = dict(_OWNER)
+    out = []
+    for leader, order in plan:
+        lead_s = owners.get(leader)
+        if lead_s is None:
+            continue
+        for cid in order:
+            s = owners.get(cid)
+            if cid == leader or s is None or not _hostile(s, lead_s, args):
+                continue
+            _drop_invites(cid, NG_OTHER_NATION)
+            if _drop_member(cid, "war: hostile to the leader") is not None:
+                _post("party.kicked", {}, cid)
+                out.append(cid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +1229,7 @@ def tick(ctx):
     me = _my_charid(ctx)
     if me is None:
         return
+    _membership_tick(ctx, me)
     limit = _k(ctx.args, "party_invite_timeout", 35.0)
     now = time.time()
     with _LOCK:

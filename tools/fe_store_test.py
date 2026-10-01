@@ -282,6 +282,58 @@ def main():
         felobby._default_store = saved
         feworld._SESSION.pop("exp", None)
 
+    print("\n-- character names (manual p.24, audit B11) " + "-" * 23)
+    on = argparse.Namespace(char_store=store, char_name_check="on")
+    off = argparse.Namespace(char_store=store, char_name_check="off")
+    check("a name on file on any account is taken, case blind (err 12)",
+          felobby.add_character_refusal(on, [], "lEX") == 12)
+    check("a free name passes", felobby.add_character_refusal(on, [], "Lex2") == 0)
+    check("a row not saved yet counts too",
+          felobby.add_character_refusal(on, [{"name": "Newbie"}], "NEWBIE") == 12)
+    check("2 or 11 characters, '_', full-width: err 11 (can't be used)",
+          [felobby.add_character_refusal(on, [], n)
+           for n in ("ab", "abcdefghijk", "Lex_1", "Ｌｅｘ")]
+          == [11, 11, 11, 11])
+    check("3 and 10 characters are the edges that pass",
+          [felobby.add_character_refusal(on, [], n)
+           for n in ("abc", "abcdefghij")] == [0, 0])
+    check("--char-name-check off (default) only logs, never refuses",
+          felobby.add_character_refusal(off, [], "lex") == 0
+          and felobby.add_character_refusal(
+              argparse.Namespace(char_store=store), [], "ab") == 0)
+    print("\n-- the King's message flag, read across accounts (audit B10) " + "-" * 6)
+    from world import staff
+    saved = felobby._default_store
+    felobby._default_store = lambda: store
+    try:
+        ra = felobby.load_roster(store, a["key"])
+        rb = felobby.load_roster(store, b["key"])
+        ra[0]["king_message"] = 1
+        felobby.save_roster(store, a["key"], ra)
+        staff._KING_HEARD.clear()
+        check("king_message_heard: True for the character that heard it",
+              staff.king_message_heard(ra[0]["charid"]) is True)
+        check("...False for one on another account that did not",
+              staff.king_message_heard(rb[0]["charid"]) is False)
+    finally:
+        felobby._default_store = saved
+        staff._KING_HEARD.clear()
+    print("\n-- character names on the JSON store " + "-" * 31)
+    jstore = os.path.join(tmp, "names.json")
+    with open(jstore, "w", encoding="utf-8") as f:
+        json.dump({"accounts": {"member:9": [{"charid": 70, "name": "Zed"}]}}, f)
+    old_env = os.environ.get("FE_DB")
+    os.environ["FE_DB"] = ""
+    try:
+        check("the JSON store is searched across accounts too",
+              felobby.name_owner(jstore, "zed") == ("member:9", 70)
+              and felobby.name_owner(jstore, "Zee") is None)
+    finally:
+        if old_env is None:
+            os.environ.pop("FE_DB", None)
+        else:
+            os.environ["FE_DB"] = old_env
+
     print("\n-- the old behaviour stays reproducible, and only on request " + "-" * 6)
     fixed = lobby_args(store, mode="fixed")
     fa = felobby.resolve_identity("192.0.2.5", fixed)

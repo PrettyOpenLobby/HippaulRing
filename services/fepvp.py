@@ -37,11 +37,23 @@ on`. A player killed by another player with monster combat off would stay
 down forever, so this module pumps the revive itself whenever a session is
 dead and the monster tick is not running.
 
+DAMAGE (2026-10-01, audit 26; --pvp-model table, the default): the same
+numbers a monster hit uses. The ATTACKER's thread takes damage.
+player_hit_damage -- its ATTACK (class base + weapon) x the skill's POWER %
+x the level-gap row for (victim level - attacker level) -- and the VICTIM's
+thread applies what only it knows: armour and the resistance statuses, and
+the crouch multiplier (damage.taken_modifiers). The reach is the skill's
+own: SKILL_DATA range +0xF8 plus radius +0x134 (the child's radius when the
+skill explodes), radius only when the skill is AIMED (+0x1d8 bit 0x800, the
+attack centred on the aim point), plus --pvp-slack for a position up to one
+heartbeat stale. The skill's bad statuses land on the victim (world/
+status.py). --pvp-model flat restores the old flat --pvp-damage /
+--hit-damage and the one --pvp-range sphere for every skill.
+
 CHOSEN, NOT MEASURED:
-  * damage is `--pvp-damage`, defaulting to `--hit-damage` (what this player
-    does to a monster). No weapon/skill/defence model exists on either side
-    of the wire yet, so a flat number is the honest placeholder -- the same
-    one monsters got until fet_npc_type's ATTACK column was read.
+  * the level-gap row is fet_npc_lv_diff_correction, a MONSTER table: no
+    player-vs-player table ships, so the same row is used with the victim's
+    level in the monster's place (equal levels read 1.4).
   * a hit is refused between players of the SAME nation unless
     `--pvp-friendly on`. RoD was nation-vs-nation; friendly fire is not.
   * the spawn-protection window and the death penalty are the monster rules,
@@ -67,6 +79,9 @@ import math
 import struct
 import sys
 import time
+
+import fegamedata
+from world import damage as _damage_mod, staff as _staff, status as _status
 
 fw = None                       # the feworld module, handed in by register()
 
@@ -130,6 +145,19 @@ def add_args(ap):
                     help="damage one player hit does. 0 (default) = whatever "
                          "--hit-damage is, i.e. what this player does to a "
                          "monster. No weapon/skill/defence model exists yet.")
+    ap.add_argument("--pvp-model", default="table", choices=("table", "flat"),
+                    help="table (default, 2026-10-01): a player hit is the "
+                         "attacker's ATTACK x the skill's POWER x the level "
+                         "row (damage.player_hit_damage), less the victim's "
+                         "armour and statuses, more if they are crouched; the "
+                         "reach is the skill's own range + radius from "
+                         "SKILL_DATA. flat = the old behaviour: --pvp-damage "
+                         "(or --hit-damage) for every hit, one --pvp-range "
+                         "sphere for every skill. `!pvp model flat` live.")
+    ap.add_argument("--pvp-slack", type=float, default=3.0, metavar="UNITS",
+                    help="--pvp-model table: added to a skill's reach for a "
+                         "peer position up to one heartbeat (~2.5 s) stale "
+                         "(CHOSEN, the same 3 u the chest pickup allows).")
     ap.add_argument("--pvp-friendly", default="off", choices=("on", "off"),
                     help="allow hits between players of the SAME nation. "
                          "Default off -- RoD was nation-vs-nation.")
@@ -171,11 +199,77 @@ def _presence():
     return sys.modules.get("fepresence")
 
 
-def _damage(args):
+def _flat_damage(args):
     n = int(getattr(args, "pvp_damage", 0) or 0)
     if n > 0:
         return n
     return max(1, int(getattr(args, "hit_damage", 25) or 25))
+
+
+def _model(args):
+    return "flat" if getattr(args, "pvp_model", "table") == "flat" else "table"
+
+
+def _hit_model(args):
+    """What the VICTIM is told to do with a hit: "table" = apply its own
+    armour/status/crouch modifiers; "flat" = take the number as sent (the
+    flat model, or a --pvp-damage pin)."""
+    if _model(args) == "flat" or int(getattr(args, "pvp_damage", 0) or 0) > 0:
+        return "flat"
+    return "table"
+
+
+def _damage(args, skill=None, victim=None):
+    """(damage, why) of one hit by THIS session's player with `skill` on the
+    peer session `victim`. --pvp-damage N > 0 still pins a flat N."""
+    if _model(args) == "flat" or int(getattr(args, "pvp_damage", 0) or 0) > 0:
+        n = _flat_damage(args)
+        return n, "flat %d" % n
+    lvl = None
+    if victim is not None:
+        try:
+            lvl = int(victim.get("pvp_level") or 0) or None
+        except (TypeError, ValueError):
+            lvl = None
+    if lvl is None:
+        lvl = int(_staff.char_level(args))
+    return _damage_mod.player_hit_damage(args, {"level": lvl}, skill=skill)
+
+
+def _reach(args, skill, targeted):
+    """How far from the attack's centre a skill hits: --pvp-range under
+    --pvp-model flat; else range + radius (radius alone when AIMED) plus
+    --pvp-slack. A skill with no SKILL_DATA row falls back to --pvp-range."""
+    flat = float(getattr(args, "pvp_range", 10.0) or 0.0)
+    if _model(args) == "flat":
+        return flat
+    rng, rad = fegamedata.skill_radius(skill)
+    if not rng and not rad:
+        return flat
+    aimed = bool(fegamedata.skills().get(int(skill), {}).get("sel1d8", 0) & 0x800)
+    reach = rad if (aimed and not targeted) else rng + rad
+    return reach + float(getattr(args, "pvp_slack", 3.0) or 0.0)
+
+
+def self_cast(ctx, skill):
+    """The caster's own statuses from a cast (any 0x1031/0x1032, PvP or
+    not): a GOOD status (Hide, chant, Ender Pain) lands on the caster; a
+    damaging skill ends the caster's Hide (CHOSEN, FEZ). Returns the kinds
+    set."""
+    args = ctx.args
+    if not _status.on(args) or skill is None:
+        return []
+    s = fw._SESSION
+    good = _status.good_specs(skill)
+    if good:
+        return _status.player_apply(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
+                                    args, good, src=s.get("charid"),
+                                    skill=skill, why="own skill %d" % skill)
+    if _status.has(s, "hide") and fegamedata.skill_power(skill) > 0:
+        _status.table(s).pop("hide", None)
+        _log("charid %s attacked (skill %d) -- Hide ends" % (s.get("charid"), skill))
+        _status.cond_sync(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+    return []
 
 
 def _my_nation(args):
@@ -223,13 +317,24 @@ def on_hit(ctx, inner):
             _log("charid %s swung at charid %d -- SAME NATION (%d), no damage "
                  "(--pvp-friendly off)" % (me, target, mine))
             return True
-        dmg = _damage(args)
+        if _status.on(args):
+            why = _status.refusal(fw._SESSION)
+            if why:
+                _log("charid %s is %s -- the hit on charid %d does nothing"
+                     % (me, why, target))
+                return True
+            if _status.hidden_from(fw._SESSION, victim):
+                _log("charid %d is HIDDEN -- it can't be target-locked, no "
+                     "damage" % target)
+                return True
+        dmg, dwhy = _damage(args, skill, victim)
         n = fw.ext_post("pvp.hit", {"from": me, "to": int(target),
-                                    "dmg": dmg, "skill": int(skill)},
+                                    "dmg": dmg, "skill": int(skill),
+                                    "model": _hit_model(args)},
                         to=lambda s, _n: s is victim)
-        _log("charid %s HIT charid %d for %d (skill %d) -- posted to %d "
+        _log("charid %s HIT charid %d for %d (skill %d: %s) -- posted to %d "
              "session(s); their own thread applies it"
-             % (me, target, dmg, skill, n))
+             % (me, target, dmg, skill, dwhy, n))
         return True
     except Exception as e:                              # noqa: BLE001
         _log("0xA011 handler failed (%r) -- declined, feworld's arm answers" % (e,))
@@ -259,17 +364,28 @@ def on_cast(ctx, inner):
     posted. Never raises out (feprog's tap is inside a try as well)."""
     try:
         args = ctx.args
+        f = inner[2:]
+        if len(f) >= 19:
+            try:
+                self_cast(ctx, struct.unpack_from(">H", f, 17)[0])
+            except Exception as e:                      # noqa: BLE001
+                _log("status on cast failed (%r) -- the cast still counts" % (e,))
         if not _active(args):
             return 0
         rng = float(getattr(args, "pvp_range", 10.0) or 0.0)
         if rng <= 0:
             return 0
-        f = inner[2:]
         if len(f) < 28:
             return 0
         a, b, _flag, _t1, _t2, skill, _one, c, _wpn = struct.unpack_from(
             ">IIBIIHBII", f, 0)
         s = fw._SESSION
+        if _status.on(args):
+            why = _status.refusal(s)
+            if why:
+                _log("charid %s cast skill %d while %s -- no player damage"
+                     % (s.get("charid"), skill, why))
+                return 0
         me = int(s.get("charid") or 0)
         if not me or not s.get("in_field"):
             return 0
@@ -299,7 +415,7 @@ def on_cast(ctx, inner):
         key = (s.get("field"), s.get("room"))
         mine = _my_nation(args)
         friendly = getattr(args, "pvp_friendly", "off") == "on"
-        dmg = _damage(args)
+        rng = _reach(args, skill, bool(c))
         n = 0
         for ent in fw.ext_sessions():
             ps = ent["session"]
@@ -319,15 +435,19 @@ def on_cast(ctx, inner):
             theirs = _nation_of_session(ps)
             if mine and theirs and mine == theirs and not friendly:
                 continue
+            if c and _status.on(args) and _status.hidden_from(s, ps):
+                continue                 # manual p.38: Hide can't be locked
+            dmg, dwhy = _damage(args, skill, ps)
             k = fw.ext_post("pvp.hit", {"from": me, "to": cid, "dmg": dmg,
-                                        "skill": int(skill)},
+                                        "skill": int(skill),
+                                        "model": _hit_model(args)},
                             to=lambda s_, _n, ps=ps: s_ is ps)
             if k:
                 n += k
                 _log("charid %d cast skill %d at (%.1f, %.1f, %.1f): charid %d "
-                     "is %.1f u away (range %.1f) -- HIT for %d, their thread "
-                     "applies it" % (me, skill, pos[0], pos[1], pos[2], cid, d,
-                                     rng, dmg))
+                     "is %.1f u away (reach %.1f) -- HIT for %d (%s), their "
+                     "thread applies it" % (me, skill, pos[0], pos[1], pos[2],
+                                            cid, d, rng, dmg, dwhy))
         if not n:
             k = int(s.get("pvp_cast_miss", 0) or 0) + 1
             s["pvp_cast_miss"] = k
@@ -380,7 +500,8 @@ def _credit_war(ctx, payload):
         return
     try:
         area = camp._here(ctx.args)
-        got = camp.pc_damage(ctx.args, area, dealt, kill=bool(payload.get("dead")))
+        got = camp.pc_damage(ctx.args, area, dealt, kill=bool(payload.get("dead")),
+                             victim=payload.get("to"))
     except Exception as e:                              # noqa: BLE001
         _log("   war score credit failed (%r) -- the damage still landed" % (e,))
         return
@@ -415,6 +536,11 @@ def on_hit_relay(ctx, payload):
     hpmax = fw.player_hp_max(args)
     if "player_hp" not in s:
         s["player_hp"] = hpmax
+    if payload.get("model") == "table":
+        # what only the VICTIM's thread knows: its armour, its statuses, its
+        # posture (damage.taken_modifiers, the same as a monster's hit)
+        dmg, twhy = _damage_mod.taken_modifiers(args, dmg, "swing %d" % dmg, s)
+        _log("charid %s: %s -> %d" % (s.get("charid"), twhy, dmg))
     before = int(s.get("player_hp", hpmax))
     hp = max(0, before - dmg)
     s["player_hp"] = hp
@@ -427,6 +553,15 @@ def on_hit_relay(ctx, payload):
     _log("charid %s took %d from %s -- HP %d/%d"
          % (s.get("charid"), dmg, who, hp, hpmax))
     if hp > 0:
+        if _status.on(args):
+            _status.player_hit_taken(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
+                                     args, who)
+            sk = payload.get("skill")
+            if sk is not None and not payload.get("tower"):
+                _status.player_apply(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
+                                     args, _status.bad_specs(int(sk)),
+                                     src=attacker, skill=int(sk),
+                                     why="%s's skill %d" % (who, int(sk)))
         report(hp=hp, hpmax=hpmax, dead=False, dealt=dealt)
         return
     s["player_dead"] = True
@@ -448,6 +583,16 @@ def pump(ctx):
     try:
         if not _active(ctx.args):
             return
+        s = fw._SESSION
+        now = time.monotonic()
+        if s.get("in_field") and now - float(s.get("pvp_level_at", -1e9)) > 10.0:
+            # this player's level, published for an ATTACKER's thread
+            # (_damage reads it off this dict; it can't read our store)
+            s["pvp_level_at"] = now
+            try:
+                s["pvp_level"] = int(_staff.char_level(ctx.args))
+            except Exception:                           # noqa: BLE001
+                s["pvp_level"] = None
         if not fw._SESSION.get("player_dead"):
             return
         if (getattr(ctx.args, "combat", "off") == "on"
@@ -479,7 +624,11 @@ def gm(ctx, line):
         except ValueError:
             _log("!pvp damage N -- N must be a number")
             return True
-        _log("!pvp damage: one hit now does %d" % _damage(ctx.args))
+        _log("!pvp damage: one hit now does %d" % _flat_damage(ctx.args))
+        return True
+    if verb == "model" and len(words) > 2:
+        ctx.args.pvp_model = "flat" if words[2].lower() == "flat" else "table"
+        _log("!pvp model %s" % ctx.args.pvp_model)
         return True
     if verb == "range" and len(words) > 2:
         try:
@@ -497,14 +646,16 @@ def gm(ctx, line):
         ctx.args.pvp_friendly = "on" if words[2].lower() == "on" else "off"
         _log("!pvp friendly %s" % ctx.args.pvp_friendly)
         return True
-    _log("!pvp: %s (--pvp %s, %s), damage %d, friendly %s, show-damage %s"
+    _log("!pvp: %s (--pvp %s, %s), model %s, flat damage %d, friendly %s, "
+         "show-damage %s"
          % ("ON" if _on(ctx.args) else "OFF", getattr(ctx.args, "pvp", "off"),
             "forced by !pvp" if _FORCE[0] is not None else "from the flag",
-            _damage(ctx.args), getattr(ctx.args, "pvp_friendly", "off"),
+            _model(ctx.args), _flat_damage(ctx.args),
+            getattr(ctx.args, "pvp_friendly", "off"),
             getattr(ctx.args, "pvp_show_damage", "on")))
     _log("   cast path: range %.1f u, war gate %s"
          % (float(getattr(ctx.args, "pvp_range", 6.0) or 0),
             getattr(ctx.args, "pvp_war", "on")))
     _log("   verbs: !pvp on|off, !pvp damage N, !pvp friendly on|off, "
-         "!pvp range N, !pvp war on|off")
+         "!pvp range N, !pvp war on|off, !pvp model table|flat")
     return True

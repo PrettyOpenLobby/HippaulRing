@@ -21,7 +21,7 @@ EXP, 60 s prep):
    5. death: 10% of NEXT (stops at 0 into the level), 20% gold, war -3 crystals
    6. crystals: +50 HP heal drains the SAME deposit the draws do; one deposit
       beside each base; the server does not pace draws; 700 per deposit
-   7. buildings: caps 25/10/1/1, HP 9,500/8,000/18,000/4,000, radius 38 cells
+   7. buildings: caps 25/10/1/1, HP 12,000/8,000/18,000/4,000, radius 38 cells
    8. base damage: an obelisk destroyed = 4 of 480 dots, a war death = 1
    9. war EXP + Rings: the wiki's worked examples, +1 level at most
   10. war prep 65 s
@@ -135,8 +135,10 @@ def part_exp(wa):
           wa.exp_curve == "rod", wa.exp_curve)
     got = [feworld.exp_need(wa, L) for L in (1, 2, 4, 10, 19, 20, 30, 34, 35,
                                              39, 40)]
-    check("NEXT 30/45/100/350 at Lv1/2/4/10, 5200 at Lv19, 7000 at Lv20",
-          got[:6] == [30, 45, 100, 350, 5200, 7000], got)
+    check("NEXT 32 at Lv1 (the manual's Exp 0/32 screenshot, not the wiki's 30)",
+          got[0] == 32, got)
+    check("NEXT 45/100/350 at Lv2/4/10, 5200 at Lv19, 7000 at Lv20",
+          got[1:6] == [45, 100, 350, 5200, 7000], got)
     check("...150,000 at Lv30, 500k/700k at Lv34/35 (the 2006-03 edits), "
           "2.4M at Lv39, 3.2M at Lv40",
           got[6:] == [150000, 500000, 700000, 2400000, 3200000], got)
@@ -192,9 +194,11 @@ def part_kills(wa):
         check("...and +2258 EXP into the level (stored class_exp)",
               STORE.get("class_exp") == {"0": 2258}, STORE.get("class_exp"))
         b = sent(0x1075)[-1] if sent(0x1075) else b""
-        check("...pushed as 0x1075 mask 0x6 with NEXT 30 (Lv1, RoD) and 2258",
+        # NEXT at Lv1 is 32, the manual's Exp 0/32 screenshot (pp.32-33),
+        # not the wiki's 30 (audit C19, 2026-10-01)
+        check("...pushed as 0x1075 mask 0x6 with NEXT 32 (Lv1) and 2258",
               b[:4] == struct.pack(">I", 0x6)
-              and struct.unpack_from(">I", b, 4)[0] == 30
+              and struct.unpack_from(">I", b, 4)[0] == 32
               and struct.unpack_from(">BBI", b, 8) == (1, 0, 2258), b.hex())
     finally:
         feworld.send = real
@@ -325,10 +329,11 @@ def part_buildings(args, alice):
           args.build_caps == "2006" and all(
               fecampaign.parse_caps("2006").get(t) == n
               for t, n in ((6, 25), (29, 25), (0, 10), (19, 10), (5, 1), (4, 1))))
-    check("--build-hp 2006: Obelisk 9500, Arrow Tower 8000, War Craft 18000, "
+    check("--build-hp 2006: Obelisk 12000 (the client's +0xb0, audit 23; the "
+          "wiki said 9500), Arrow Tower 8000, War Craft 18000, "
           "Gate 4000 (was 100/100)",
           [fewar.build_hp(args, t) for t in (6, 0, 5, 4)]
-          == [(9500, 9500), (8000, 8000), (18000, 18000), (4000, 4000)])
+          == [(12000, 12000), (8000, 8000), (18000, 18000), (4000, 4000)])
     check("--build-hp shipped = +0xb0: Obelisk 12000, Gate 18000",
           [fewar.build_hp(argparse.Namespace(build_hp="shipped"), t)
            for t in (6, 4)] == [(12000, 12000), (18000, 18000)])
@@ -362,8 +367,8 @@ def part_buildings(args, alice):
           r == [(0x100A, struct.pack(">I", 40))], r)
     r = build(6, 8, spot[0], spot[1] - 3)
     adds = [b for m, b in r if m == 0x1006]
-    check("an obelisk is served with 9500/9500 HP",
-          adds and struct.unpack_from(">ii", adds[0], 16) == (9500, 9500))
+    check("an obelisk is served with 12000/12000 HP",
+          adds and struct.unpack_from(">ii", adds[0], 16) == (12000, 12000))
     return [o for o, b in alice.session.get("war_buildings", {}).items()
             if b["type"] == 6][-1]
 
@@ -414,8 +419,9 @@ def part_rewards(args):
     c = {"look1": 0, "class_levels": {"0": 1}, "class_exp": {"0": 0}, "exp": 0}
     got = F.apply_war_exp(args, c, 100000)
     check("100,000 war EXP at Lv1: ONE level (Lv2), progress capped below "
-          "Lv2's NEXT (44 of 45)", c["class_levels"] == {"0": 2}
-          and c["class_exp"] == {"0": 44} and got == (74, 1, 2), (c, got))
+          "Lv2's NEXT (44 of 45; 32 + 44 = 76 credited)",
+          c["class_levels"] == {"0": 2}
+          and c["class_exp"] == {"0": 44} and got == (76, 1, 2), (c, got))
     c = {"look1": 0, "class_levels": {"0": 40}, "class_exp": {"0": 5}}
     check("at Lv40 EXP stops (「経験値は入りません」)",
           F.apply_war_exp(args, c, 5000) == (0, 40, 40)
@@ -443,8 +449,9 @@ def part_rewards(args):
     F.settle(args, 5, "atk", 1)
     check("Alice (won, 100%, bld 3100 = D, 20 crystals = E): Rings 1 + 3 = 4 "
           "(the invented bonus gave 1+2+3 = 6)", a0["ring"] == 4, a0)
-    check("...war EXP 50 x 100% x 100% + 50 x 5% = 52: Lv1 -> Lv2, 22 into it",
-          a0["class_levels"] == {"0": 2} and a0["class_exp"] == {"0": 22}
+    check("...war EXP 50 x 100% x 100% + 50 x 5% = 52: Lv1 (NEXT 32) -> Lv2, "
+          "20 into it", a0["class_levels"] == {"0": 2}
+          and a0["class_exp"] == {"0": 20}
           and a0["exp"] == 52, a0)
     check("Eve (lost, 50%, the keep untouched): rank Rings only (1), EXP 0",
           e0["ring"] == 1 and e0["class_exp"] == {"0": 0}, e0)

@@ -324,14 +324,34 @@ def _shared_building_checks(fecampaign, args, ctx):
     # from the drain checks, and its tower)
     far = next((c for c in ((2, 2), (253, 2), (2, 253), (253, 253))
                 if not fecampaign.in_influence(args, AREA, "atk", c)), (2, 2))
+    # `a` is the atk side's own tower, and an own-side swing is refused before
+    # the sphere is looked at (audit A1) -- so friendly fire is allowed for
+    # this one check, to let the influence gate be what answers
+    args.friendly_fire = "on"
     check("...from outside it, nothing lands [book 59]",
           not fecampaign.in_influence(args, AREA, "atk", far)
           and fecampaign.building_damage(args, AREA, a, 100, from_grid=far,
                                          by_side="atk") == "out of influence")
+    args.friendly_fire = "off"
     args.influence = "off"
     check("--influence off removes the gate",
           fecampaign.in_influence(args, AREA, "atk", far))
     args.influence = "buildings"
+
+    say("no friendly fire on war buildings (audit A1)")
+    hp0 = int(fecampaign.buildings_of(AREA)[a]["hp"][0])
+    check("a swing on your OWN side's building lands on nothing",
+          fecampaign.building_damage(args, AREA, a, 100, from_grid=g,
+                                     by_side="atk") == "own side"
+          and int(fecampaign.buildings_of(AREA)[a]["hp"][0]) == hp0)
+    got = fecampaign.building_damage(args, AREA, a, 100, by_side="def")
+    check("...the enemy's swing on it still lands",
+          got not in (None, "own side") and got[0] == hp0 - 100, repr(got))
+    args.friendly_fire = "on"
+    got = fecampaign.building_damage(args, AREA, a, 100, by_side="atk")
+    check("...and --friendly-fire on restores the old any-swing rule",
+          got not in (None, "own side") and got[0] == hp0 - 200, repr(got))
+    args.friendly_fire = "off"
 
 
 def _tower_checks(fecampaign, args):

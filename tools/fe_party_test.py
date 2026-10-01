@@ -208,6 +208,7 @@ def _reset_model():
         feparty._PARTIES.clear()
         feparty._MEMBER_OF.clear()
         feparty._INVITES.clear()
+        feparty._OWNER.clear()
 
 
 def ids(outbox):
@@ -613,8 +614,9 @@ def part2():
         check("a NO still gets 0x1131 (bit1 is not set on NO; harmless)",
               ids(bout) == [0x1131], repr(bout))
         aout = alice_pump()
-        check("the inviter gets 0x1130 [u32 7] (reason passed through)",
-              ids(aout) == [0x1130] and read_u32(aout[0][2]) == 7, repr(aout))
+        check("the auto-decline (reason 7) -> inviter 0x1130 [u32 11] "
+              "'Partner is busy', not 7 'already in another party'",
+              ids(aout) == [0x1130] and read_u32(aout[0][2]) == 11, repr(aout))
         check("no invite left pending", feparty._INVITES == {})
 
         # plain NO with reason 0 -> code 8
@@ -670,6 +672,210 @@ def part2():
         del alice_room
 
 
+# ---------------------------------------------------------------------------
+# PART 3 -- the manual's rules (2026-10-01): teardown on logout / field out /
+# area change, relog, war sides, blacklist both ways, same field
+# ---------------------------------------------------------------------------
+class _FakeCampaign(types.ModuleType):
+    """The two things feparty reads from fecampaign: state_of and the phase
+    constants. Sides come from member rows keyed 'account|charid'."""
+    PREP, WAR = 1, 2
+
+    def __init__(self):
+        super().__init__("fecampaign")
+        self.rows = {}
+
+    def state_of(self, area):
+        return self.rows.get(int(area), {"phase": 0, "atk": 0, "members": {}})
+
+
+def part3():
+    say("part 3: teardown, relog, war sides, blacklist, same field (manual p.43/p.48)")
+    _stub_store()
+    _reset_model()
+    a = _args(unit_id="auto", party_chat="party", party_proxy_unit=1000,
+              party_war_check=0.0001)
+    feworld._SESSION.clear()
+    feworld._TLS.session.update({"account": "t7", "charid": 7, "in_field": True})
+    feworld._chat_room_join()
+    feworld._chat_room_name("Alice")
+    bob = Fake(900011, 8, "Bob", a)
+    carol = Fake(900012, 9, "Carol", a)
+    saved_bl = feworld.blacklist_rows
+    saved_for = feworld.character.blacklist_rows_for
+    saved_fc = sys.modules.get("fecampaign")
+
+    def alice_pump():
+        out = []
+        with _capturing(out):
+            feworld.ext_pump(feworld.Ctx(_Conn(), None, "ecb", False, a))
+        return out
+
+    def invite(fake):
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, fake.charid)], out)
+        got = fake.pump()
+        if ids(got) != [0x112E]:
+            return out + got
+        fake.inbound(struct.pack(">HBII", 0x2087, 1, 7, 0))
+        alice_pump()
+        for f in (bob, carol):
+            f.pump()
+        return out
+
+    def members():
+        return [p["order"] for p in feparty._PARTIES.values()]
+
+    try:
+        # ---- logout of a member: party of two breaks up, relog is clean
+        invite(bob)
+        check("Alice+Bob formed", members() == [[7, 8]], repr(members()))
+        bob.run(lambda ctx: feparty.session_end())
+        aout = alice_pump()
+        check("Bob logs out -> Alice (alone) gets 0x1136; the party is gone",
+              ids(aout) == [0x1136] and feparty._PARTIES == {}
+              and feparty._MEMBER_OF == {}, repr(aout))
+        invite(bob)
+        check("...and Bob relogged can be invited again (no NG 7 ghost)",
+              members() == [[7, 8]], repr(members()))
+
+        # ---- the LEADER logs out with two others: hand over, carry on
+        invite(carol)
+        check("Alice+Bob+Carol", members() == [[7, 8, 9]], repr(members()))
+        feparty.session_end()
+        bout, cout = bob.pump(), carol.pump()
+        check("leader logout -> Bob and Carol each get 0x1135 [7]",
+              ids(bout) == [0x1135] and read_u32(bout[0][2]) == 7
+              and ids(cout) == [0x1135] and read_u32(cout[0][2]) == 7,
+              repr((bout, cout)))
+        p = list(feparty._PARTIES.values())[0]
+        check("...the party carries on, led by the oldest member (Bob)",
+              p["order"] == [8, 9] and p["leader"] == 8, repr(p))
+        bob.run(lambda ctx: feparty.session_end())
+        carol.pump()
+        _reset_model()
+
+        # ---- pending invites close when either side logs out
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        bob.pump()
+        bob.run(lambda ctx: feparty.session_end())
+        aout = alice_pump()
+        check("the invitee logs out -> inviter 0x1130 [u32 6]",
+              ids(aout) == [0x1130] and read_u32(aout[0][2]) == 6
+              and feparty._INVITES == {}, repr(aout))
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        bob.pump()
+        feparty.session_end()
+        bout = bob.pump()
+        check("the inviter logs out -> the invitee's prompt gets 0x1133",
+              ids(bout) == [0x1133] and feparty._INVITES == {}, repr(bout))
+
+        # ---- Field Out: nothing to the leaver, the rest are told
+        invite(bob)
+        out = []
+        with _capturing(out):
+            feparty.field_out()
+        check("Field Out -> nothing to the leaver (its scene is going)",
+              out == [], repr(out))
+        check("...Bob, left alone, gets 0x1136", ids(bob.pump()) == [0x1136])
+
+        # ---- an area change (capital half 21 -> 39) leaves the party
+        feworld._TLS.session.update({"field": 21, "room": -1})
+        bob.session.update({"field": 21, "room": -1})
+        invite(bob)
+        bob.run(feparty.tick)                    # records area 21
+        check("no move, no change", members() == [[7, 8]], repr(members()))
+        bob.session["field"] = 39
+        bout = bob.run(feparty.tick)
+        check("Bob changes area -> his client gets 0x1137 'Left the party.'",
+              ids(bout) == [0x1137], repr(bout))
+        check("...and Alice gets 0x1136", ids(alice_pump()) == [0x1136])
+        bob.session["field"] = 21
+        # a room (shop) is not an area change: field is the island's war field
+        invite(bob)
+        bob.run(feparty.tick)
+        bob.session.update({"field": 3, "room": 10})
+        check("entering a shop room does not leave the party",
+              ids(bob.run(feparty.tick)) == [] and members() == [[7, 8]])
+        bob.session.update({"field": 21, "room": -1})
+        bob.run(feparty.tick)
+        check("...nor does coming back out", members() == [[7, 8]])
+
+        # ---- relog while the old socket lives: the NEW session sheds the ghost
+        old = bob.session
+        bob.session = dict(old)                 # a new session, same charid
+        with feworld._CHAT_ROOM_LOCK:
+            feworld._CHAT_ROOM[bob.key]["session"] = bob.session
+        bob.run(feparty.tick)
+        check("a second session of charid 8 drops the old one's membership",
+              members() == [] and ids(alice_pump()) == [0x1136])
+        _reset_model()
+
+        # ---- same field only
+        bob.session["field"] = 39
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        check("invite across fields -> 0x1130 [u32 1] 'moved to another field'",
+              ids(out) == [0x1130] and read_u32(out[0][2]) == 1, repr(out))
+        bob.session["field"] = 21
+
+        # ---- blacklist, both directions (case-folded, as the client stores it)
+        feworld.blacklist_rows = lambda args: [{"id": 0x40000001, "name": "BOB"}]
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        check("Alice has BOB blacklisted -> 0x1130 [u32 11]",
+              ids(out) == [0x1130] and read_u32(out[0][2]) == 11, repr(out))
+        feworld.blacklist_rows = lambda args: []
+        feworld.character.blacklist_rows_for = (
+            lambda acct, cid: [{"id": 7, "name": "ALICE"}] if cid == 8 else [])
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        check("Bob has Alice blacklisted (by id) -> 0x1130 [u32 11]",
+              ids(out) == [0x1130] and read_u32(out[0][2]) == 11, repr(out))
+        feworld.character.blacklist_rows_for = saved_for
+        check("no prompt reached Bob", bob.drain() == [])
+
+        # ---- war: hostile sides cannot party; a member turned hostile leaves
+        fc = _FakeCampaign()
+        sys.modules["fecampaign"] = fc
+        for s in (feworld._TLS.session, bob.session):
+            s.update({"field": 5, "room": -1})
+        fc.rows[5] = {"phase": fc.WAR, "atk": 1,
+                      "members": {"t7|7": {"side": "atk"}, "t8|8": {"side": "def"}}}
+        out = []
+        _drive(a, [struct.pack(">HI", 0x112E, 8)], out)
+        check("at war, Alice (atk) inviting Bob (def) -> 0x1130 [u32 4]",
+              ids(out) == [0x1130] and read_u32(out[0][2]) == 4, repr(out))
+        fc.rows[5]["phase"] = 0
+        invite(bob)
+        check("at peace the same two can party", members() == [[7, 8]])
+        fc.rows[5]["phase"] = fc.WAR
+        bout = bob.run(feparty.tick)
+        check("the war starts -> Bob (hostile to his leader) gets 0x113C",
+              ids(bout) == [0x113C], repr(bout))
+        check("...and Alice is told (0x1136, alone)",
+              ids(alice_pump()) == [0x1136] and members() == [])
+        fc.rows[5]["phase"] = 0
+        invite(bob)
+        fc.rows[5]["phase"] = fc.WAR
+        gone = feparty.war_sweep(a)
+        check("war_sweep() removes the hostile member at once",
+              gone == [8] and members() == [], repr(gone))
+        check("...Bob is sent 0x113C by relay", ids(bob.pump()) == [0x113C])
+    finally:
+        feworld.blacklist_rows = saved_bl
+        feworld.character.blacklist_rows_for = saved_for
+        if saved_fc is None:
+            sys.modules.pop("fecampaign", None)
+        else:
+            sys.modules["fecampaign"] = saved_fc
+        bob.leave()
+        carol.leave()
+        feworld._chat_room_leave()
+        _reset_model()
+
+
 def main():
     # run_all pipes stdout, which on Windows is cp1252 -- feparty logs a
     # U+26A0 in its poster-gate line and the print would raise otherwise.
@@ -681,6 +887,7 @@ def main():
     try:
         part1()
         part2()
+        part3()
     except AssertionError as e:
         say("[fe_party_test] FAIL: %s" % e)
         sys.exit(1)

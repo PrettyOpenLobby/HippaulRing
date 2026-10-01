@@ -282,6 +282,83 @@ def main():
         fecampaign.pump(ctx)
         check("prep -> war with the keeps standing",
               fecampaign.phase_of(17) == fecampaign.WAR and 0x1015 in sent)
+
+        say("audit A1/A2: no friendly fire; a swing is the attacker's attack")
+        def keeps_now():
+            return fecampaign.state_of(17)["keeps"]
+        def reset_keeps():
+            with fecampaign._LOCK:
+                r17 = fecampaign._STATE[17]
+                r17["keeps"] = {"def": [3000, 3000], "atk": [3000, 3000]}
+                r17.pop("keep_carry", None)
+        args.building_damage = "flat"           # one swing = a visible 1600
+        del sent[:]
+        feworld.keep_hit(None, None, "ecb", False, args, 2900)
+        check("a swing on YOUR OWN side's castle lands on nothing",
+              keeps_now()["def"] == [3000, 3000] and 0x2024 not in sent,
+              "%r %r" % (ids(), keeps_now()))
+        args.friendly_fire = "on"
+        time.sleep(0.3)
+        feworld.keep_hit(None, None, "ecb", False, args, 2900)
+        check("...--friendly-fire on restores the old any-swing rule",
+              keeps_now()["def"][0] < 3000, repr(keeps_now()))
+        args.friendly_fire = "off"
+        reset_keeps()
+        args.keep_influence = "on"
+        far = next(c for c in ((2, 2), (253, 2), (2, 253), (253, 253))
+                   if not fecampaign.in_influence(args, 17, "def", c))
+        S["cpos"] = (feworld.grid_to_world(far[0]), 0.0,
+                     feworld.grid_to_world(far[1]))
+        time.sleep(0.3)
+        feworld.keep_hit(None, None, "ecb", False, args, 2901)
+        check("--keep-influence on: a swing on the enemy keep from outside "
+              "your own sphere lands on nothing", keeps_now()["atk"][0] == 3000)
+        own = feworld.keep_grids(17)["def"]
+        S["cpos"] = (feworld.grid_to_world(own[0]), 0.0,
+                     feworld.grid_to_world(own[1]))
+        time.sleep(0.3)
+        feworld.keep_hit(None, None, "ecb", False, args, 2901)
+        check("...and from inside it, it lands", keeps_now()["atk"][0] < 3000)
+        args.keep_influence = "off"
+        S.pop("cpos", None)
+        reset_keeps()
+        check("keep_damage(of=12M) scales onto --keep-hp: 1M of 12M = 250 of 3000",
+              fecampaign.keep_damage(args, 17, "atk", 1000000, of=12000000) == 2750)
+        got = [fecampaign.keep_damage(args, 17, "atk", 1500, of=12000000)
+               for _ in range(3)]
+        check("...and carries the fraction: three 0.375-point swings take 1",
+              got == [2750, 2750, 2749], repr(got))
+        reset_keeps()
+        saved_pa = feworld.player_attack
+        feworld.player_attack = lambda a: ("phys", 127, 56, 183)
+        args.building_damage = "attack"
+        try:
+            dmg, why = feworld.building_hit_damage(args, None)
+            check("a swing with no skill is the basic attack: 183 x 100%",
+                  dmg == 183.0, "%r %s" % (dmg, why))
+            S["morph"] = {"form": feworld.GIANT_FORM, "area": 17, "side": "def"}
+            dmg, why = feworld.building_hit_damage(args, None)
+            check("...a GIANT's swing is x --giant-building-mult (8)",
+                  dmg == 183.0 * 8, "%r %s" % (dmg, why))
+            S.pop("morph", None)
+            del sent[:]
+            for _ in range(22):
+                time.sleep(0.26)
+                feworld.keep_hit(None, None, "ecb", False, args, 2901)
+            check("22 beginner swings move a 3000 HP keep by ONE point "
+                  "(183 x 3000 / 12M each), not 22 x 400",
+                  keeps_now()["atk"][0] == 2999 and 0x2024 in sent,
+                  repr(keeps_now()))
+            args.building_damage = "flat"
+            dmg, why = feworld.building_hit_damage(args, 270)
+            check("--building-damage flat is the old flat --hit-damage",
+                  dmg == 1600.0, "%r %s" % (dmg, why))
+        finally:
+            feworld.player_attack = saved_pa
+            S.pop("morph", None)
+        reset_keeps()
+        # the checks below were written for the flat rule
+        args.building_damage = "flat"
         del sent[:]
         time.sleep(0.3)
         feworld.keep_hit(None, None, "ecb", False, args, 2901)

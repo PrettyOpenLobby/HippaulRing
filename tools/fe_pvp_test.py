@@ -79,6 +79,9 @@ def _args(**kw):
              presence="on", presence_stale=10.0, presence_submask=0x2FF,
              presence_gear="off", presence_hp="off",
              pvp="on", pvp_damage=0, pvp_friendly="off", pvp_show_damage="on",
+             # the checks below pin the OLD flat model (one number, one 10 u
+             # sphere); --pvp-model table has its own section (table_checks)
+             pvp_model="flat", status_effects="off",
              hit_damage=25, combat="off", monster_attack="off",
              revive_secs=8.0, unit_state=None,
              death_exp_pct=0, death_gold_pct=0, death_exp_of="next",
@@ -420,7 +423,7 @@ def main_checks():
           fepvp.gm(ctx_of(off), "!pvp off") is True and swing(a, 8) is False)
     fepvp._FORCE[0] = None
     check("!pvp damage 7 changes the number",
-          fepvp.gm(ctx_of(a), "!pvp damage 7") is True and fepvp._damage(a) == 7)
+          fepvp.gm(ctx_of(a), "!pvp damage 7") is True and fepvp._damage(a)[0] == 7)
     a.pvp_damage = 0
     check("!pvp status is answered", fepvp.gm(ctx_of(a), "!pvp") is True)
     check("an unrelated !verb is declined", fepvp.gm(ctx_of(a), "!war") is False)
@@ -456,6 +459,118 @@ def main_checks():
     feworld._chat_room_leave()
 
 
+def table_checks():
+    """--pvp-model table (2026-10-01, audit 26): the skill's own damage and
+    reach, the victim's own modifiers, statuses, Hide."""
+    print("\n--pvp-model table: skill damage, skill reach, statuses, Hide",
+          file=REPORT)
+    import fegamedata
+    from world import status
+    _stub_store()
+    a = _args(pvp_war="off", pvp_model="table", status_effects="on")
+    bargs = _args(pvp_war="off", pvp_model="table", status_effects="on")
+    out = _out()
+    out[:] = []
+    enter(7)
+    w = _Worker(); w.start()
+    w.do(_stub_store)
+    w.do(lambda: enter(8))
+    w.do(lambda: see(bargs, 900, (10.0, 20.0, 0.0)))
+    see(a, 100, (12.0, 20.0, 0.0))
+    w.do(lambda: see(bargs, 902, (10.0, 20.0, 0.0)))
+    bob = w.do(lambda: feworld._SESSION)
+    my_lvl = int(feworld.char_level(a))
+    bob["pvp_level"] = my_lvl                  # what Bob's pump publishes
+    POSTS = []
+    real_post = feworld.ext_post
+
+    def spy(kind, payload, to=None, include_me=False):
+        n = real_post(kind, payload, to=to, include_me=include_me)
+        if kind == "pvp.hit":
+            POSTS.append(dict(payload, n=n))
+        return n
+    feworld.ext_post = spy
+    try:
+        _k, _b, _w, atk = feworld.player_attack(a)
+        row = fegamedata.lv_diff_correction(0)
+        want = max(1, int(round(atk * fegamedata.skill_power(0) / 100.0
+                                * (row[0] if row else 1.0))))
+        cast(a, (12.0, 20.0, 0.0), skill=0, a_=3000, b_=4000)
+        check("the basic attack 2 u from Bob hits for ATTACK x POWER x level row "
+              "(%d), not the flat 25" % want,
+              len(POSTS) == 1 and POSTS[0]["dmg"] == want and want != 25
+              and POSTS[0]["model"] == "table", (POSTS, want))
+        rng, rad = fegamedata.skill_radius(0)
+        reach = rng + rad + 3.0
+        check("the basic attack's reach is SKILL_DATA range %g + radius %g + "
+              "slack 3" % (rng, rad), abs(fepvp._reach(a, 0, False) - reach) < 1e-6,
+              fepvp._reach(a, 0, False))
+        del POSTS[:]
+        cast(a, (10.0 + reach + 0.5, 20.0, 0.0), skill=0, a_=3001, b_=4001)
+        check("...a cast just past that reach misses (the old sphere was 10 u)",
+              POSTS == [], POSTS)
+        cast(a, (10.0 + reach - 0.5, 20.0, 0.0), skill=0, a_=3002, b_=4002)
+        check("...and just inside it hits", len(POSTS) == 1, POSTS)
+        w.do(lambda: pvp_pump(bargs))
+        hp = w.do(lambda: feworld._SESSION.get("player_hp"))
+        hpmax = w.do(lambda: feworld.player_hp_max(bargs))
+        check("Bob's thread took the two hits (no armour in the stub store)",
+              hp == hpmax - 2 * want, (hp, hpmax, want))
+        # crouched: the victim's own multiplier
+        w.do(lambda: status.crouch_note(feworld._SESSION, "test"))
+        del POSTS[:]
+        cast(a, (12.0, 20.0, 0.0), skill=0, a_=3003, b_=4003)
+        w.do(lambda: pvp_pump(bargs))
+        hp2 = w.do(lambda: feworld._SESSION.get("player_hp"))
+        check("a CROUCHED Bob takes --crouch-damage 1.3x (%d)"
+              % int(round(want * 1.3)), hp - hp2 == int(round(want * 1.3)),
+              (hp, hp2))
+        w.do(lambda: feworld._SESSION.pop("crouch_at", None))
+        # Viper Bite (190) poisons
+        del POSTS[:]
+        cast(a, (12.0, 20.0, 0.0), skill=190, target=8, a_=3004, b_=4004)
+        w.do(lambda: pvp_pump(bargs))
+        poisoned = w.do(lambda: status.has(feworld._SESSION, "poison"))
+        check("Viper Bite (skill 190, EFFECT_DATA 253 D81_PoisonStatus) "
+              "POISONS Bob", len(POSTS) == 1 and poisoned, (POSTS, poisoned))
+        # Hide: Bob hides; a TARGETED skill can't lock him, an area one can
+        w.do(lambda: status.apply(feworld._SESSION, status.good_specs(140)))
+        del POSTS[:]
+        cast(a, (12.0, 20.0, 0.0), skill=190, target=8, a_=3005, b_=4005)
+        check("Bob in HIDE (skill 140): a targeted skill can't lock him",
+              POSTS == [], POSTS)
+        cast(a, (12.0, 20.0, 0.0), skill=0, a_=3006, b_=4006)
+        w.do(lambda: pvp_pump(bargs))
+        check("...an area swing still hits, and the hit ends his Hide",
+              len(POSTS) == 1
+              and not w.do(lambda: status.has(feworld._SESSION, "hide")), POSTS)
+        # a stunned attacker does nothing
+        status.apply(feworld._SESSION, status.bad_specs(35))      # Shield Bash
+        del POSTS[:]
+        cast(a, (12.0, 20.0, 0.0), skill=0, a_=3007, b_=4007)
+        check("Lex STUNNED (Shield Bash 35): his cast does no player damage",
+              POSTS == [], POSTS)
+        status.clear(feworld._SESSION)
+        # --pvp-model flat = the rollback
+        cast(_args(pvp_war="off", pvp_model="flat"), (12.0, 20.0, 0.0), skill=0,
+             a_=3008, b_=4008)
+        check("--pvp-model flat: the old flat 25 again",
+              len(POSTS) == 1 and POSTS[0]["dmg"] == 25
+              and POSTS[0]["model"] == "flat", POSTS)
+        # Ender Pain (5) on the caster's own cast
+        cast(a, (12.0, 20.0, 0.0), skill=5, a_=3009, b_=4009)
+        check("Ender Pain (skill 5) on the CASTER: no flinch + resist up",
+              status.has(feworld._SESSION, "noflinch")
+              and status.resist_delta(feworld._SESSION) == 5.0,
+              status.active(feworld._SESSION))
+        status.clear(feworld._SESSION)
+    finally:
+        feworld.ext_post = real_post
+    w.do(feworld._chat_room_leave)
+    w.tasks.put(None)
+    feworld._chat_room_leave()
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -479,6 +594,7 @@ if __name__ == "__main__":
     try:
         main_checks()
         cast_checks()
+        table_checks()
     finally:
         if quiet:
             sys.stdout = _saved_out

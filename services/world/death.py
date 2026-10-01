@@ -36,11 +36,50 @@ from . import character, events, progression, sess, skilllist, spawns, wallet, w
 # and a relaunch for whoever is playing, so the revive timer is not optional:
 # it always runs, and --revive-secs only chooses how long.
 def player_hp_push(conn, outbound, mode, be, args, hp):
-    """0x2024 maskA bit 0x4 -- the DAMAGE EVENT. The body carries the NEW hp."""
+    """0x2024 maskA bit 0x4 -- the DAMAGE EVENT. The body carries the NEW hp.
+
+    Every player HP change goes out through here (monster hits, PvP, item
+    effects, heals, the revive), so this is where "being attacked" is seen:
+    a push LOWER than the last one is damage, and damage cancels a pending
+    Field Out countdown (validate_cancel_on_hit)."""
+    new = max(0, int(hp))
+    last = sess._SESSION.get("hp_pushed")
+    sess._SESSION["hp_pushed"] = new
+    if last is not None and new < int(last):
+        validate_cancel_on_hit(conn, outbound, mode, be, args, int(last) - new)
     wire.send(conn, outbound,
-         wire.inner_msg(0x2024, struct.pack(">IIh", 0x4, 0, max(0, int(hp)) & 0x7FFF),
+         wire.inner_msg(0x2024, struct.pack(">IIh", 0x4, 0, new & 0x7FFF),
                    wire.unit_id_of(args)),
          mode, be, args.seq_mode == "echo", args.world_prefix)
+
+
+#: 0x1158 MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY [u32 code]. Arm 0x050AD1EC
+#: (the validate screen's jump table 0x050AD2B8, read by hand): logs
+#: ">MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY %ld", sets [unit+0x138c] = 0,
+#: closes the screen (0x50ad470) and prints "Field move cancelled.". Static
+#: reading only; until 2026-10-01 only fewar's `!fieldout cancel` sent it.
+VALIDATE_CANCEL = 0x1158
+
+
+def validate_cancel_on_hit(conn, outbound, mode, be, args, dmg=0):
+    """Manual p.22/23: "Being attacked during that time cancels it." When a
+    Field Out countdown is pending (readloop armed `validate_due` on the
+    0x1154 OK), drop the 0x1157 FINISH and tell the client with 0x1158 code
+    0. --validate-cancel-on-hit off keeps the old behaviour (damage never
+    cancels). Returns True when a cancel went out."""
+    if getattr(args, "validate_cancel_on_hit", "off") != "on":
+        return False
+    if sess._SESSION.pop("validate_due", None) is None:
+        return False
+    wire.send(conn, outbound,
+         wire.inner_msg(VALIDATE_CANCEL, struct.pack(">I", 0),
+                   wire.unit_id_of(args)),
+         mode, be, args.seq_mode == "echo", args.world_prefix)
+    print("[feworld]    -> 0x1158 MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY 0: "
+          "hit for %d during the Field Out countdown -- the pending 0x1157 "
+          "FINISH is dropped (arm 0x050AD1EC: 'Field move cancelled.')" % dmg,
+          flush=True)
+    return True
 
 
 def player_dead_push(conn, outbound, mode, be, args, dead):

@@ -107,6 +107,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -869,6 +870,89 @@ def next_charid(path, roster):
     return top + 1
 
 
+#: 0xD005 MSG_LC_ADD_CHARACTER_NG [u32 err] codes, from the client's own
+#: (message id, code) -> text table (dump 0x0526F910.., 0x70-byte rows: msg id
+#: at +0, code at +0x20, text pointer at +0x2C). Its D005 arm (0x050258B5)
+#: reads the u32 with the stream reader 0x05045E60 and hands it to
+#: 0x050F9960, which looks the text up by (0xD005, code). Both of these rows
+#: carry flag 1 at +0x24; the other D005 rows are "System error" texts.
+ADD_NG_NAME_UNUSABLE = 11     # "That character name can't be used."
+ADD_NG_NAME_TAKEN = 12        # "That name is already taken."
+
+#: Manual p.24: a name is 3-10 half-width alphanumeric characters.
+NAME_RE = re.compile(r"[A-Za-z0-9]{3,10}\Z")
+
+
+def name_valid(name):
+    """True for a name the manual allows (3-10 half-width alphanumerics)."""
+    return bool(NAME_RE.match(str(name or "")))
+
+
+def name_owner(path, name, roster=None):
+    """(account or None, charid) of a character already called `name`, case
+    blind, across EVERY account in the store -- or None when it is free.
+
+    `roster` is checked too: it may hold rows the caller has not saved yet.
+    A store that cannot be read answers None (logged): the check then lets the
+    creation through, which is what the server did before it had one."""
+    want = str(name or "").lower()
+    for c in roster or []:
+        if str(c.get("name") or "").lower() == want:
+            return (None, int(c.get("charid") or 0))
+    if use_db(path):
+        try:
+            festore.fedb.ensure_schema()
+            row = festore.db.query_one(
+                "SELECT account, charid FROM fe_character"
+                " WHERE LOWER(name) = %s LIMIT 1", (want,))
+        except Exception as e:      # noqa: BLE001 -- any driver fault
+            print("[felobby] WARNING: name lookup for %r failed (%s) -- "
+                  "letting it through" % (name, e), flush=True)
+            return None
+        return (row["account"], int(row["charid"] or 0)) if row else None
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            blob = json.load(f)
+    except (ValueError, OSError):
+        return None
+    for acct, rows in blob.get("accounts", {}).items():
+        for c in rows or []:
+            if str(c.get("name") or "").lower() == want:
+                return (acct, int(c.get("charid") or 0))
+    return None
+
+
+def add_character_refusal(args, roster, name):
+    """The 0xD005 code to refuse creating `name` with, or 0 to create it.
+
+    Checks the manual's rules (p.24): 3-10 half-width alphanumerics, and no
+    name already registered on ANY account (case blind). Under
+    `--char-name-check off` (the default until a client has been seen taking
+    the NG) a name that breaks a rule is only logged and still created, as
+    before; `on` refuses it."""
+    code, why = 0, ""
+    if not name_valid(name):
+        code, why = ADD_NG_NAME_UNUSABLE, "not 3-10 half-width letters/digits"
+    else:
+        hit = name_owner(getattr(args, "char_store", None), name, roster)
+        if hit is not None:
+            code, why = ADD_NG_NAME_TAKEN, ("already used by charid %d%s"
+                                            % (hit[1], "" if hit[0] is None
+                                               else " on %s" % hit[0]))
+    if not code:
+        return 0
+    if str(getattr(args, "char_name_check", "off")) != "on":
+        print("[felobby]    WARNING: name %a is %s -- would answer 0xD005 err=%d, "
+              "but --char-name-check is off, so it is created anyway"
+              % (name, why, code), flush=True)
+        return 0
+    print("[felobby]    name %a is %s -- refusing (0xD005 err=%d)"
+          % (name, why, code), flush=True)
+    return code
+
+
 #: Identity confidences that are NOT safe to WRITE a roster under. Reading a
 #: wrong roster shows an empty character list and is recoverable; writing one
 #: puts a character in another member's store where nothing afterwards can tell
@@ -1620,10 +1704,17 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
             #
             # The u32 is a literal zero in the builder (`push 0` at 0x050f8ce9),
             # not a field the screen fills. The five loose bytes are the creation
-            # choices -- sex/class/face/hair and so on -- read out of the edit
-            # screen's object at +0x3aa, +0x3ab, +0x3b6, +0x3b8, +0x3b7; they are
-            # NOT named yet, and the order on the wire is 3b6, 3b8, 3b7, which is
-            # not their order in memory.
+            # choices read out of the edit screen's object at +0x3aa, +0x3ab,
+            # +0x3b6, +0x3b8, +0x3b7 (wire order 3b6, 3b8, 3b7, not memory
+            # order).
+            # KEY: NAMED 2026-10-01 BY THE CLIENT'S OWN LOG right after the
+            # send (0x050f8d28..0x050f8df3, format strings 0x052e3f38..0x052e3fb8):
+            # "Unit ID" = unit, "Slot No." = [ebp+0x7c] = the u8 after unit,
+            # "Name", "Sex" = +0x3aa, "Class" = +0x3ab, "Hair" = +0x3b6,
+            # "Body" = +0x3b8, "Face" = +0x3b7. So the second byte (`slot`) is
+            # the character-select SLOT the new character goes in, not an
+            # appearance choice, and it is not kept. Eye colour and hair colour
+            # are not on the wire at all.
             f = inner[2:]
             look = {}
             try:
@@ -1640,7 +1731,7 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
                             "look3": rest[8]}
             except (IndexError, ValueError):
                 unit, b1, cname, rest = 0, 0, "?", b""
-            print("[felobby]    ADD CHARACTER unit=%d b1=%d name=%r rest=%s"
+            print("[felobby]    ADD CHARACTER unit=%d slot=%d name=%r rest=%s"
                   % (unit, b1, cname, rest.hex()), flush=True)
             # ONE lock from the id allocation to the save. The id used to be
             # picked under the lock, the lock dropped, and the save taken
@@ -1648,38 +1739,53 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
             # same moment could both read `top + 1` before either wrote it,
             # and two accounts would own one charid (which feworld then uses
             # as the player's entity id).
+            # The name check runs under the same lock, so two screens asking
+            # for one name at the same moment cannot both pass it.
             with roster_lock(args.char_store):
-                charid = next_charid(args.char_store, roster)
-                vals = char_defaults(args.char_probe)
-                vals["name"] = cname
-                vals["charid"] = charid
-                vals["unit"] = unit
-                # KEEP THE PLAYER'S FACE. Without this the record goes back
-                # all zeros, the select screen rebuilds the default Male model
-                # from it, and the character you just designed comes back a
-                # stranger -- reported live 2026-08-17. The record->appearance
-                # copy at 0x04fe7519 is what makes these five the right five.
-                vals.update(look)
-                if look:
-                    print("[felobby]    keeping the creation choices: %s"
-                          % " ".join("%s=%d" % kv
-                                     for kv in sorted(look.items())),
-                          flush=True)
-                roster.append(vals)
-                warn_if_unsafe_write(ident, 'CREATING A CHARACTER')
-                save_roster(args.char_store, acct, roster)
+                ng = add_character_refusal(args, roster, cname)
+                if not ng:
+                    charid = next_charid(args.char_store, roster)
+                    vals = char_defaults(args.char_probe)
+                    vals["name"] = cname
+                    vals["charid"] = charid
+                    vals["unit"] = unit
+                    # KEEP THE PLAYER'S FACE. Without this the record goes back
+                    # all zeros, the select screen rebuilds the default Male
+                    # model from it, and the character you just designed comes
+                    # back a stranger -- reported live 2026-08-17. The
+                    # record->appearance copy at 0x04fe7519 is what makes these
+                    # five the right five.
+                    vals.update(look)
+                    if look:
+                        print("[felobby]    keeping the creation choices: %s"
+                              % " ".join("%s=%d" % kv
+                                         for kv in sorted(look.items())),
+                              flush=True)
+                    roster.append(vals)
+                    warn_if_unsafe_write(ident, 'CREATING A CHARACTER')
+                    save_roster(args.char_store, acct, roster)
             # WARNING: next_seq(), NOT the inbound `seq`. This reply and 0xD008 used
             # to stamp the client's own number straight back, which is
             # indistinguishable from next_seq() in `echo` mode -- and silently
             # wrong in `count` mode, where it also skipped our counter, so
             # every reply after it was one behind. Both fixed 2026-09-04.
-            send_frame(conn, 0x30,
-                       bf_encrypt(outbound,
-                                  traffic_wrap(inner_msg(0xD004,
-                                                         struct.pack(">I", charid)),
-                                               next_seq()), mode, be))
-            print("[felobby] -> 0x30 inner 0xD004 MSG_LC_ADD_CHARACTER_OK "
-                  "CharaID=%d (roster now %d)" % (charid, len(roster)), flush=True)
+            if ng:
+                send_frame(conn, 0x30,
+                           bf_encrypt(outbound,
+                                      traffic_wrap(inner_msg(0xD005,
+                                                             struct.pack(">I", ng)),
+                                                   next_seq()), mode, be))
+                print("[felobby] -> 0x30 inner 0xD005 MSG_LC_ADD_CHARACTER_NG "
+                      "err=%d for %r (nothing saved)" % (ng, cname), flush=True)
+            else:
+                send_frame(conn, 0x30,
+                           bf_encrypt(outbound,
+                                      traffic_wrap(inner_msg(0xD004,
+                                                             struct.pack(">I", charid)),
+                                                   next_seq()), mode, be))
+                print("[felobby] -> 0x30 inner 0xD004 MSG_LC_ADD_CHARACTER_OK "
+                      "CharaID=%d (roster now %d)" % (charid, len(roster)),
+                      flush=True)
         elif real_id == 0xC003:
             # MSG_CL_DELETE_CHARACTER_REQUEST (0x050f86b6), `[u8 unit][u32 charid]`
             # -- the client logs it as `unitID=%d`. Answers: 0xD006 OK (NO FIELDS)
@@ -1945,6 +2051,13 @@ def main():
                          "logs can be traced back to the bytes that produced it. "
                          "Off by default: an arbitrary value in a field used as a "
                          "table index is a plausible way to crash the client.")
+    ap.add_argument("--char-name-check", default="off", choices=["on", "off"],
+                    help="refuse a new character whose name is not 3-10 half-width "
+                         "letters/digits (0xD005 err 11) or is already used on any "
+                         "account, case blind (err 12) -- manual p.24. The NG and "
+                         "its codes are read from the client's code, but no client "
+                         "has been seen taking one yet, so it is OFF by default: "
+                         "off only logs the name it would have refused.")
     ap.add_argument("--notice", default=None, metavar="TITLE|TEXT",
                     help="answer 0xC009 with a 0xD014 notice window instead of "
                          "0xD015 'nothing to show'. FE then blocks in lobby state "

@@ -234,8 +234,9 @@ def main():
         fecampaign.declare(args, 29, 3)                # nation 1 is now at war
         del SENT[:]
         alice.send(fecampaign.F_BUILD_KEEP, keep_body(16, far[0], far[1]))
-        check("a holder nation already at war -> code 11 (SE: 隣接している国が戦争中)",
-              [parse_err(b)[0] for b in got(11, 0xF504)] == [11])
+        check("a holder nation already at war -> code 10, the keep-limit row "
+              "(SE: 隣接している国が戦争中; was 11 'undefined error')",
+              [parse_err(b)[0] for b in got(11, 0xF504)] == [10])
         with fecampaign._LOCK:
             fecampaign._STATE.pop(29, None)
         for p in (bob, carol, dave):
@@ -356,9 +357,61 @@ def main():
         vs[0].send(fecampaign.F_BUILD_KEEP, keep_body(16, g2[0], g2[1]))
         vs[4].send(fecampaign.F_REPLY_KEEP, b"\x01")
         deliver(players)
-        check("with 5 needed, ONE reject makes it unreachable: code 4 at once",
-              [parse_err(b)[0] for b in got(32, 0xF504)] == [4])
+        check("with 5 needed, ONE reject leaves it OPEN: only 3 rejects or "
+              "60 s cancel (manual p.49; it used to cancel as unreachable)",
+              not got(32, 0xF504) and 2 in fecampaign._VOTES, repr(SENT))
+        with fecampaign._LOCK:
+            fecampaign._VOTES[2]["until"] = time.time() - 1
+        vs[0].act(fecampaign.pump)
+        deliver(players)
+        check("...and the timeout ends it: code 5",
+              [parse_err(b)[0] for b in got(32, 0xF504)] == [5]
+              and 2 not in fecampaign._VOTES)
         args.declare_accepts = 4
+
+        say("--declare-voters rotate: the whole nation votes, five at a time")
+        extra = [Player("W%d" % i, 40 + i, 3, 2, args) for i in range(2)]
+        players += extra
+        args.declare_voters = "rotate"
+        del SENT[:]
+        vs[0].send(fecampaign.F_BUILD_KEEP, keep_body(16, g2[0], g2[1]))
+        deliver(players)
+        first = parse_state(got(30, 0xF502)[0])["members"]
+        check("seven of nation 3 here: the first five hold the slots",
+              first == [30, 31, 32, 33, 34] and not got(40, 0xF502), repr(first))
+        del SENT[:]
+        vs[1].send(fecampaign.F_REPLY_KEEP, b"\x01")
+        deliver(players)
+        st = parse_state(got(30, 0xF502)[-1])
+        check("an answered slot passes to a countryman who has not had one",
+              st["members"] == [30, 40, 32, 33, 34] and len(got(40, 0xF502)) == 1,
+              repr(st))
+        vs[2].send(fecampaign.F_REPLY_KEEP, b"\x01")
+        deliver(players)
+        check("two rejects: still open", 2 in fecampaign._VOTES)
+        for p in (vs[3], vs[4], extra[0]):
+            p.send(fecampaign.F_REPLY_KEEP, b"\x02")
+            deliver(players)
+        row = fecampaign.state_of(2)
+        check("...4 accepts (builder + 3, one of them rotated in) declare; "
+              "everyone who held a slot gets 0xF503",
+              row["phase"] == fecampaign.PREP and len(row["members"]) == 4
+              and all(len(got(c, 0xF503)) == 1 for c in (30, 31, 33, 34, 40, 41)),
+              repr([(c, m) for c, m, b in SENT if m in (0xF503, 0xF504)]))
+        with fecampaign._LOCK:
+            fecampaign._STATE.pop(2, None)
+        del SENT[:]
+        vs[0].send(fecampaign.F_BUILD_KEEP, keep_body(16, g2[0], g2[1]))
+        for p in (vs[1], vs[2], vs[3]):
+            p.send(fecampaign.F_REPLY_KEEP, b"\x01")
+            deliver(players)
+        check("rotate: the THIRD reject still cancels (code 4)",
+              [parse_err(b)[0] for b in got(30, 0xF504)] == [4]
+              and 2 not in fecampaign._VOTES)
+        args.declare_voters = "slots"
+        for p in extra:
+            p.leave()
+            players.remove(p)
         del SENT[:]
         vs[0].send(fecampaign.F_BUILD_KEEP, keep_body(16, g2[0], g2[1]))
         with fecampaign._LOCK:
@@ -405,6 +458,65 @@ def main():
             fecampaign._STATE.pop(2, None)
         hugo.goto(17)
 
+        say("--king-gate: no war before the King's message (manual p.30)")
+        staff = sys.modules["world.staff"]
+        had = getattr(staff, "king_message_heard", None)
+        heard = set()
+        staff.king_message_heard = lambda cid: int(cid) in heard
+        ivan = Player("Ivan", 19, 1, 17, args)          # the holder's nation
+        players.append(ivan)
+        try:
+            args.king_gate = "on"
+            del SENT[:]
+            ivan.send(0x2018, struct.pack(">I", 0))
+            check("not heard: 0x1021 code 20 'Can't join defenders', no sign-up",
+                  [(m, b) for c, m, b in SENT if c == 19]
+                  == [(0x1021, struct.pack(">I", 20))]
+                  and "acct-Ivan|19" not in fecampaign.state_of(17)["members"],
+                  repr(SENT))
+            heard.add(19)
+            del SENT[:]
+            ivan.send(0x2018, struct.pack(">I", 0))
+            check("...heard: joins the defence (0x1020)",
+                  [m for c, m, b in SENT if c == 19] == [0x1020]
+                  and fecampaign.state_of(17)["members"]["acct-Ivan|19"]["side"]
+                  == "def")
+            del staff.king_message_heard
+            check("no king_message_heard in world/staff: the gate allows",
+                  fecampaign.king_heard(args, 99) is True)
+            args.king_gate = "off"
+            staff.king_message_heard = lambda cid: False
+            check("--king-gate off: allowed", fecampaign.king_heard(args, 99) is True)
+        finally:
+            args.king_gate = "off"
+            if had is None:
+                if hasattr(staff, "king_message_heard"):
+                    del staff.king_message_heard
+            else:
+                staff.king_message_heard = had
+
+        say("the war window's side keys (0x1018 / 0x101F, both knobs off by default)")
+        check("war_keys: (holder, attacker) of a war in prep/war",
+              fecampaign.war_keys(args, 17) == (1, 3), repr(fecampaign.war_keys(args, 17)))
+        ivan.session["war_notify_deferred"] = False
+        args.war_notify_keys, args.war_army_keys = "on", "on"
+        try:
+            del SENT[:]
+            ivan.act(lambda ctx: feworld.war_notify(None, None, "ecb", False, args))
+            n18 = got(19, 0x1018)
+            n1f = got(19, 0x101F)
+            check("--war-notify-keys: 0x1018 u32_1/u32_2 = defender 1, attacker 3",
+                  n18 and struct.unpack_from(">II", n18[0], 0) == (1, 3), repr(SENT))
+            check("--war-army-keys: then 0x101F [0][0][1][3]",
+                  n1f == [struct.pack(">IIII", 0, 0, 1, 3)], repr(n1f))
+        finally:
+            args.war_notify_keys, args.war_army_keys = "off", "off"
+        del SENT[:]
+        ivan.act(lambda ctx: feworld.war_notify(None, None, "ecb", False, args))
+        check("...off (the default): keys 0, no 0x101F",
+              struct.unpack_from(">II", got(19, 0x1018)[0], 0) == (0, 0)
+              and not got(19, 0x101F))
+
         say("after the war: rank, Rings, the nations' tally")
         alice.act(lambda ctx: fecampaign.keep_damage(args, 17, "def", 2500))
         check("keep damage is credited to the hitter's member row",
@@ -435,6 +547,110 @@ def main():
         check("...carrying the stored total", ring_off == a["ring"], "%d" % ring_off)
         fecampaign.settle(args, 17, "atk", 1)
         check("a war pays out ONCE", CHARS[("acct-Alice", 11)]["ring"] == a["ring"])
+        check("the war score went into Total Score (manual p.47): the RoD "
+              "formula's earned EXP -- Lv1 base 50 x 100% present x 100% of "
+              "the castle down + 5% for a D in building damage = 52",
+              a.get("total_score") == 52 == fecampaign.war_reward(
+                  1, True, 1.0, 1.0, {"pc_dmg": 0, "kills": 0, "bld_dmg": 3000,
+                                      "crystals": 0}, 1)["exp"],
+              repr(a.get("total_score")))
+        check("...a loser who scored nothing adds nothing",
+              not e.get("total_score"), repr(e.get("total_score")))
+        h = CHARS[("acct-Hugo", 18)]
+        h0 = int(h.get("total_score") or 0)
+        with fecampaign._LOCK:
+            fecampaign._STATE[6] = fecampaign._row_from(
+                {"phase": fecampaign.WAR, "atk": 4,
+                 "members": {"acct-Hugo|18": {"a": "acct-Hugo", "c": 18, "n": 2,
+                                              "side": "def", "dmg": 0,
+                                              "pc_dmg": 2000}}})
+        fecampaign.settle(args, 6, "def", 5)    # nations 4 v 5: 3's tally stays
+        check("...and a volunteer from ANOTHER nation is credited too (manual "
+              "p.57: rewards and fame): 50 + D in PC damage = 52",
+              int(h.get("total_score") or 0) - h0 == 52, repr(h))
+        args.war_score = "off"
+        with fecampaign._LOCK:
+            fecampaign._STATE[6] = fecampaign._row_from(
+                {"phase": fecampaign.WAR, "atk": 4,
+                 "members": {"acct-Hugo|18": {"a": "acct-Hugo", "c": 18, "n": 2,
+                                              "side": "def", "dmg": 0,
+                                              "pc_dmg": 2000}}})
+        fecampaign.settle(args, 6, "def", 5)    # nations 4 v 5: 3's tally stays
+        args.war_score = "on"
+        check("--war-score off: Total Score untouched",
+              int(h.get("total_score") or 0) - h0 == 52)
+        with fecampaign._LOCK:
+            fecampaign._STATE.pop(6, None)
+
+        say("--war-presence: time in the field, not 'present to the end'")
+        r45 = {"war_at": 1000.0, "presence": True}
+        end = 1000.0 + 45 * 60
+        check("38 of 45 minutes (7 away mid-war) = 38/45 -- the manual's 85%",
+              abs(fecampaign._member_frac(r45, {"t": 0, "absent": 420.0,
+                                                "seen": end}, end) - 38 / 45.0) < 1e-9)
+        check("...left 7 minutes before the end: the same share",
+              abs(fecampaign._member_frac(r45, {"t": 0, "seen": end - 420},
+                                          end) - 38 / 45.0) < 1e-9)
+        check("...never in the field during the war: 0",
+              fecampaign._member_frac(r45, {"t": 0}, end) == 0.0)
+        check("...a war without presence tracking keeps the old 'to the end'",
+              fecampaign._member_frac({"war_at": 1000.0}, {"t": 0}, end) == 1.0)
+        with fecampaign._LOCK:
+            fecampaign._STATE[7] = fecampaign._row_from(
+                {"phase": fecampaign.WAR, "atk": 3, "war_at": 1000.0,
+                 "presence": True,
+                 "members": {"acct-Bob|12": {"a": "acct-Bob", "c": 12,
+                                             "side": "atk", "t": 1000.0}}})
+        bob.act(lambda ctx: fecampaign._presence_tick(args, 7, 1005.0))
+        bob.act(lambda ctx: fecampaign._presence_tick(args, 7, 1010.0))
+        bob.act(lambda ctx: fecampaign._presence_tick(args, 7, 1110.0))
+        m7 = fecampaign.state_of(7)["members"]["acct-Bob|12"]
+        check("_presence_tick books a 100 s gap as absence, a 5 s one not",
+              m7.get("absent") == 100.0 and m7.get("seen") == 1110.0, repr(m7))
+        with fecampaign._LOCK:
+            fecampaign._STATE.pop(7, None)
+
+        say("--war-ticker: battle reports to the field (0x1129)")
+        args.war_ticker = "on"
+        try:
+            del SENT[:]
+            alice.act(lambda ctx: fecampaign.war_ticker(args, 17, "Alice", "Eve", 1))
+            deliver(players)
+            rep = got(15, 0x1129)
+            check("everyone in the field gets '%s defeated %s' (cstr, u8 side, "
+                  "cstr, u8 kind<<4); Frank in another field does not",
+                  rep == [b"Alice\x00\x03Eve\x00\x10"] and got(11, 0x1129)
+                  and not got(16, 0x1129), repr(rep))
+        finally:
+            args.war_ticker = "off"
+        del SENT[:]
+        alice.act(lambda ctx: fecampaign.war_ticker(args, 17, "Alice", "Eve", 1))
+        deliver(players)
+        check("...off by default: nothing", not [m for c, m, b in SENT if m == 0x1129])
+
+        say("the result window (0x1100) from the settlement")
+        from world import warresult
+        F = warresult.WAR_RESULT_FIELDS
+
+        def vals_with(w, **kw):
+            saved_tls = getattr(feworld._TLS, "session", None)
+            feworld._TLS.session = {"war_result": w, "battle": {"destroyed": 2}}
+            try:
+                a2 = _args(war_result_values="session", crystal=None, **kw)
+                return dict(zip(F, warresult.war_result_values(a2)))
+            finally:
+                feworld._TLS.session = saved_tls
+        w = {"won": True, "rings": 9, "exp": 70, "score": 123,
+             "players": {"atk": 4, "def": 3}, "scores": {"crystals": 6},
+             "destroyed": 0.85, "frac": 38 / 45.0}
+        v = vals_with(w)
+        check("Score = the war score settle credited; Destroyed stays the "
+              "COUNT this build's label (建物破壊数) names",
+              v["score"] == 123 and v["destroyed"] == 2 and v["exp"] == 70
+              and v["crystal"] == 6 and v["rewards"] == 9, repr(v))
+        v = vals_with(w, war_result_destroyed="castle")
+        check("--war-result-destroyed castle: the enemy base's % (the "
+              "manual's 敵城破壊率) in that slot", v["destroyed"] == 85, repr(v))
         # the second straight win
         with fecampaign._LOCK:
             fecampaign._STATE[5] = fecampaign._row_from(

@@ -222,6 +222,12 @@ def selling():
               (STORE.get("gold"), STORE["items"]))
         check("the value the window is shown is the value paid",
               feworld.sell_value_rows(a) == [(7002, 4)])
+        # audit C24 said the Goblin Book sold for 0; its row carries 10 G
+        STORE.update({"items": [[7003, 1836, 1]], "gold": 0})
+        U._dispatch(a, struct.pack(">HIIH", 0x204C, 502, 7003, 1))
+        check("a Goblin Book (1836, table 10 G) sells for 5 gold, not 0",
+              STORE["gold"] == 5 and STORE["items"] == [],
+              (STORE.get("gold"), STORE["items"]))
     finally:
         feworld.send = real
 
@@ -286,6 +292,7 @@ def inn():
         check("level 12 (in the character's OWN class) pays 12 x 10 = 120",
               feworld.inn_fee(a) == 120)
         S["player_hp"] = 1
+        S["pw"] = 3
         S["event"] = {"npc": 601, "script": 3105, "pc": 0, "name": "Inn_Master",
                       "steps": feworld.event_script_for(a, row)}
         out.clear()
@@ -293,6 +300,12 @@ def inn():
         check("the rest takes 120 of 500 gold and heals",
               STORE["gold"] == 380 and S["player_hp"] == feworld.player_hp_max(a),
               (STORE.get("gold"), S.get("player_hp")))
+        pw = [b for m, _u, b in out.box if m == 0x2024
+              and struct.unpack_from(">I", b, 0)[0] == feworld.U2024_PW]
+        check("...and Pw too, pushed to the gauge (manual p.30, audit C18)",
+              S["pw"] == feworld.pw_max(a) and pw
+              and struct.unpack_from(">h", pw[-1], 8)[0] == feworld.pw_max(a),
+              (S.get("pw"), pw))
         STORE["gold"] = 50
         steps = feworld.event_script_for(a, row)
         check("with 50 gold the innkeeper REFUSES and nothing is charged",
@@ -302,6 +315,7 @@ def inn():
         feworld.send, feworld.self_class_id = real
         S.pop("event", None)
         S.pop("player_hp", None)
+        S.pop("pw", None)
 
 
 def rings_and_clerk():

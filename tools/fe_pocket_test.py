@@ -72,17 +72,18 @@ class _Conn:
         return ("127.0.0.1", 1)
 
 
-def _args():
+def _args(**kw):
     a = dict(unit_id="auto", seq_mode="count", world_prefix=4, monster_base=400,
              presence="off", ui_auto="ok", item_heal=0, monster_attack="off",
              bag_organize="on", gmcmd=None, gmcmd_file=None, chat_relay="off",
              move_authority="off", unit_speed_repeat="off", npc=[], npc_walk=None,
              npc_base=1000, read_window=1.0, probe_on_auth=False,
              capture_only=False, idle_tick_ms=0)
+    a.update(kw)
     return types.SimpleNamespace(**a)
 
 
-def use(uid, count=1):
+def use(uid, count=1, **kw):
     frames = [(0x30, struct.pack(">H", 0x2051) + struct.pack(">II", uid, count))]
     saved = (fenet.recv_frame, fenet.bf_decrypt, fenet.traffic_unwrap)
     fenet.recv_frame = lambda c: frames.pop(0) if frames else None
@@ -95,7 +96,7 @@ def use(uid, count=1):
     s["field_ready"] = True
     err = None
     try:
-        feworld._serve_loop(_Conn(), _args(), None, None, "ecb", False)
+        feworld._serve_loop(_Conn(), _args(**kw), None, None, "ecb", False)
     except Exception as e:                              # noqa: BLE001
         import traceback
         traceback.print_exc()
@@ -138,7 +139,64 @@ _reset()
 err = use(9999)
 check("an unknown uid is refused", err is None and 0x108A in ids(), ids())
 
+print("\npocket refill (manual p.45, audit B17): the next of the same item "
+      "moves in")
+
+
+def adds(uid):
+    """0x107A ADD bodies for `uid`: [u8 1][u8][u32 slot][u32 uid]..."""
+    return [b for m, b in SENT if m == 0x107A and b[:1] == b"\x01"
+            and struct.unpack_from(">I", b, 6)[0] == uid]
+
+
+def removes():
+    return [b for m, b in SENT if m == 0x107A and b[:1] == b"\x00"]
+
+
+_reset()
+STORE["items"].append([1020, 7, 1, 1])                # a second cheese, unworn
+err = use(1011, pocket_refill="on", equip_reflect="request")
+check("--pocket-refill on: the next cheese (1020) takes the used one's entry "
+      "IN PLACE (pocket 1 stays pocket 1)",
+      err is None and STORE["equip"][0] == [11, 1020]
+      and [11, 1009] in STORE["equip"] and [11, 1011] not in STORE["equip"],
+      STORE["equip"])
+rows = feworld.stored_equip_rows(_args())
+check("...worn_layout puts it in worn 11 and keeps 1009 in 12",
+      {r[0]: r[3] for r in rows if r[0] in (1020, 1009)} == {1020: 11, 1009: 12},
+      rows)
+sent_ids = ids()
+check("...the client is told: the used one REMOVED, then 1020 re-sent with "
+      "its worn marker (0x107A add, after the remove)",
+      removes() and adds(1020)
+      and max(k for k, (m, b) in enumerate(SENT) if m == 0x107A and b[:1] == b"\x00")
+      < max(k for k, (m, b) in enumerate(SENT) if b in adds(1020)), sent_ids)
+n_on = len(adds(1020))
+
+_reset()
+STORE["items"].append([1020, 7, 1, 1])
+err = use(1011)
+# the bag shift re-sends 1020 (unworn) either way; on adds ONE more, the
+# worn-marker reflection
+check("--pocket-refill off (default): the pocket just empties, as before",
+      err is None and [11, 1011] not in STORE["equip"]
+      and not any(int(u) == 1020 for _s, u in STORE["equip"])
+      and len(adds(1020)) == n_on - 1, (STORE["equip"], len(adds(1020)), n_on))
+
+_reset()
+err = use(1011, pocket_refill="on", equip_reflect="request")
+check("--pocket-refill on with no other cheese: the pocket empties",
+      err is None and [11, 1011] not in STORE["equip"]
+      and len(STORE["equip"]) == 3, STORE["equip"])
+
+_reset()
+STORE["items"].append([1021, 19, 1, 1])               # same item as pocket 2
+STORE["equip"].append([11, 1021])                      # ...already worn
+err = use(1011, pocket_refill="on", equip_reflect="request")
+check("an item already worn elsewhere is never pulled in twice",
+      [11, 1021] in STORE["equip"] and len(STORE["equip"]) == 4, STORE["equip"])
+
 if FAILS:
     print("[fe_pocket_test] %d FAILED: %s" % (len(FAILS), FAILS))
     sys.exit(1)
-print("[fe_pocket_test] OK -- %d checks" % 7)
+print("[fe_pocket_test] OK -- %d checks" % 12)

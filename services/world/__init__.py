@@ -26,6 +26,7 @@
     monsters.py        Shared monsters: one copy per field, relayed between sessions, and their AI.
     combat.py          Combat: registering a target, hit and kill pushes, the battle tally.
     damage.py          Damage numbers both ways, resistance, item use effects.
+    status.py          Timed status effects (poison, stun, root, slow, hide...) on players and monsters.
     drops.py           Kill rewards: EXP and gold per kill, treasure chests on the ground.
     progression.py     EXP, class level, skill points and Pw, and the pushes that show them.
     death.py           Player HP, death, the return to base, respawn waits and spawn protection.

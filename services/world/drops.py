@@ -52,9 +52,11 @@ def kill_gold(args, m):
         return 0
 
 
-def kill_gold_credit(conn, outbound, mode, be, args, m):
-    """Pay the kill (see kill_gold) into the stored wallet and push it."""
-    n = kill_gold(args, m)
+def kill_gold_credit(conn, outbound, mode, be, args, m, amount=None):
+    """Pay the kill (see kill_gold) into the stored wallet and push it.
+    `amount` is this player's SHARE when the kill is split by damage
+    (combat.kill_rewards, manual p.38); None = the whole kill_gold."""
+    n = kill_gold(args, m) if amount is None else int(amount)
     if n > 0:
         return wallet.wallet_credit(conn, outbound, mode, be, args, n, 0,
                              "killed %s" % (m.get("name") or "a monster"))
@@ -213,12 +215,16 @@ def _chest_here(s, c):
             and s.get("room", -1) == c["room"])
 
 
-def drop_on_kill(conn, outbound, mode, be, args, m):
+def drop_on_kill(conn, outbound, mode, be, args, m, owner=None):
     """Roll monster `m`'s drop and, on a hit, put a chest on the ground where
-    it died -- for the killer, and relayed to their party in this field."""
+    it died -- for the LOOT OWNER (combat.loot_winner: most damage, by party;
+    this session's own player unless `owner` names another), and relayed to
+    the owner's party in this field. A chest placed for another owner is
+    only drawn here when this player is in that party."""
     if str(getattr(args, "drops", "on") or "on") != "on":
         return None
-    cid = sess._SESSION.get("charid")
+    me = sess._SESSION.get("charid")
+    cid = me if owner is None else owner
     if not sess._SESSION.get("in_field") or cid is None:
         return None
     row = drop_roll(args, m, char_sex(args))
@@ -241,13 +247,17 @@ def drop_on_kill(conn, outbound, mode, be, args, m):
                  "field": sess._SESSION.get("field"), "room": sess._SESSION.get("room", -1),
                  "owner": int(cid), "party": party_charids(cid),
                  "expires": time.monotonic() + life, "taken": False,
-                 "shown": {int(cid)}, "from": m.get("name"), "ppm": row["ppm"]}
+                 "shown": set(), "from": m.get("name"), "ppm": row["ppm"]}
         _CHESTS[obj] = chest
-    wire.send(conn, outbound, wire.inner_msg(0x1006, drop_chest_record(obj, name, item,
-                                                             chest["pos"]), obj),
-         mode, be, args.seq_mode == "echo", args.world_prefix)
+    here = me is not None and int(me) in chest["party"]
+    if here:
+        wire.send(conn, outbound, wire.inner_msg(0x1006, drop_chest_record(obj, name, item,
+                                                                 chest["pos"]), obj),
+             mode, be, args.seq_mode == "echo", args.world_prefix)
+        with _DROP_LOCK:
+            chest["shown"].add(int(me))
     combat.battle_tally("drops", 1)
-    others = chest["party"] - {int(cid)}
+    others = chest["party"] - ({int(me)} if here else set())
     sent_to = 0
     if others:
         sent_to = extrun.ext_post("drop_chest", {"obj": obj}, to=lambda s, _n: (

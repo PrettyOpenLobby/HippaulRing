@@ -471,24 +471,98 @@ def _f(v, default=0.0):
 #: as the 0x2028 regen ask's mask: 0x4 HP, 0x10 Pw).
 EFFECT_HP, EFFECT_PW = 0x4, 0x10
 
+#: EFFECT_DATA bitsE (+0x54) and bitsF, by effect id range: (first, last,
+#: bitsE, bitsF). READ 2026-10-01 off dat.jp.dec with fefet.effect_record
+#: (the shipped fe-fet-effect.tsv does not carry these two columns yet; a
+#: regenerated TSV with `bitsE`/`bitsF` columns wins over this table).
+#:
+#: WHAT bitsE IS (static, 2026-10-01): the CONDITION [unit+0x2b4] bits an
+#: effect puts on its target. The client's skill tooltip (0x050C5927) walks
+#: bitsE bit by bit and names each one from the label table at 0x052E1D30,
+#: which is indexed by BIT NUMBER: bit 0 "毒効果", 4/5 "Stunned", 6 "No atk",
+#: 12 "無敵", 13 "Invisible", 14 "No flinch", 15 "Blinded", 23 "死亡", 24
+#: "幽霊状態". The client's own debug dump of [unit+0x2b4] (0x050CD340) tests
+#: the same bits by name (POISON 0x1 ... STUN0 0x10, STUN1 0x20, ATTACK_OFF
+#: 0x40, INVISI 0x2000, BLIND 0x8000, DEAD 0x800000, GHOST 0x1000000), and the
+#: three bits already named in feunit (DEAD, GHOST, INVINCIBLE) land on the
+#: same indices. The rows agree with their own status text (+0x72): 0x10
+#: "Stunned!!", 0x20 "Rooted!!", 0x40 "Disarmed!!", 0x8000 "Blind!!", 0x1
+#: "Poisoning!!"/"Burning!!". bitsF on the Antidote (1133) is 0x1 = the bit
+#: it CURES. Chant (詠唱, skills 275-279) carries 0x2000000, which is exactly
+#: the bit the chant-only spells require in SKILL_DATA +0xd0 (0x02000000).
+EFFECT_COND_RANGES = (
+    (1, 5, 0x4000, 0x0), (81, 85, 0x20, 0x0), (111, 115, 0x40, 0x0),
+    (123, 127, 0x2000, 0x0), (133, 137, 0x1, 0x0), (193, 197, 0x1, 0x0),
+    (253, 257, 0x1, 0x0), (273, 277, 0x40, 0x0), (303, 307, 0x8000, 0x0),
+    (314, 318, 0x2000000, 0x0), (384, 388, 0x1, 0x0), (404, 408, 0x1, 0x0),
+    (424, 428, 0x1, 0x0), (464, 468, 0x20, 0x0), (484, 488, 0x20, 0x0),
+    (519, 519, 0x30, 0x0), (529, 533, 0x10, 0x0), (539, 539, 0x10, 0x0),
+    (549, 549, 0x20, 0x0), (554, 554, 0x1000, 0x0), (620, 620, 0x1, 0x0),
+    (1132, 1132, 0x2000, 0x0), (1133, 1133, 0x2000, 0x1),
+    (1152, 1152, 0x1, 0x0), (1157, 1157, 0x1, 0x0), (1163, 1163, 0x20, 0x0),
+    (1168, 1172, 0x4000, 0x0),
+)
+
+
+def effect_cond(effect_id):
+    """(bitsE, bitsF) for one EFFECT_DATA id from EFFECT_COND_RANGES."""
+    e = int(effect_id)
+    for lo, hi, be, bf in EFFECT_COND_RANGES:
+        if lo <= e <= hi:
+            return be, bf
+    return 0, 0
+
 
 def effects():
     """EFFECT_DATA (fedata/fe-fet-effect.tsv, fefet.effect_rows) by id:
-    {"name", "total_ms", "tick_ms", "a", "b", "c", "vals", "tier"}. See
-    fefet.effect_record for what each field is and how it was read."""
+    {"name", "total_ms", "x28", "x2c", "tick_ms", "a", "b", "c", "vals",
+    "tier", "cond", "cure"}. See fefet.effect_record for what each field is
+    and how it was read; cond/cure are bitsE/bitsF (EFFECT_COND_RANGES)."""
     if "effects" not in _cache:
         d = {}
         for r in _rows("effect"):
-            d[_int(r["effect_id"])] = {
+            eid = _int(r["effect_id"])
+            if "bitsE" in r:
+                cond, cure = _int(r.get("bitsE", "0")), _int(r.get("bitsF", "0"))
+            else:
+                cond, cure = effect_cond(eid)
+            d[eid] = {
                 "name": r.get("name", ""),
                 "total_ms": _int(r.get("total_ms", "0")),
+                "x28": _int(r.get("x28", "0")),
+                "x2c": _int(r.get("x2c", "0")),
                 "tick_ms": _int(r.get("tick_ms", "0")),
                 "a": _int(r.get("bitsA", "0")), "b": _int(r.get("bitsB", "0")),
                 "c": _int(r.get("bitsC", "0")),
                 "vals": [_f(v) for v in r.get("vals", "").split()],
-                "tier": _int(r.get("tier", "0"))}
+                "tier": _int(r.get("tier", "0")),
+                "cond": cond, "cure": cure}
         _cache["effects"] = d
     return _cache["effects"]
+
+
+def skill_effect_ids(skill_id, _depth=0):
+    """Every EFFECT_DATA id a skill applies: its own +0x108 list, then its
+    child's (+0x104, the `_ダメージ`/`_爆発` record), the way skill_power
+    follows the child."""
+    c = skill_combat(skill_id)
+    out = list(c.get("effects", []))
+    child = c.get("child", 0xFFFF)
+    if _depth < 3 and child not in (0xFFFF, int(skill_id)):
+        out += [e for e in skill_effect_ids(child, _depth + 1) if e not in out]
+    return out
+
+
+def skill_radius(skill_id, _depth=0):
+    """(range, radius) of a skill: SKILL_DATA +0xF8 and +0x134, the radius
+    taken as the larger of the skill's own and its child's (an explosion's
+    area lives on the child record)."""
+    c = skill_combat(skill_id)
+    rng, rad = float(c.get("range") or 0.0), float(c.get("radius") or 0.0)
+    child = c.get("child", 0xFFFF)
+    if _depth < 3 and child not in (0xFFFF, int(skill_id)):
+        rad = max(rad, skill_radius(child, _depth + 1)[1])
+    return rng, rad
 
 
 def skill_combat(skill_id):

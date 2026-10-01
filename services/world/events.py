@@ -2,7 +2,7 @@
 import struct
 import time
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import bank, campaignview, character, death, inventory, itemrecords, movement, sess, shops, spawns, staff, wallet, wire, zones
+from . import bank, campaignview, character, death, inventory, itemrecords, movement, progression, sess, shops, spawns, staff, wallet, wire, zones
 
 EV_TEXT, EV_TEXT2, EV_WINDOW, EV_MENU, EV_U32, EV_FADE = 3, 6, 8, 0x107, 9, 0x109
 EV_WIN_END, EV_WIN_DIALOG, EV_WIN_BANK = 0x13, 0x14, 0x18
@@ -381,9 +381,18 @@ def event_script_for(args, row):
                 ("window", EV_WIN_END, 0)]
     slot = staff.role_slot(row)
     if slot in staff.ROLE_MANAGERS:
-        return [("text", greet or ("A message from the King. "
-                                   + campaignview.campaign_report(args))),
-                ("window", EV_WIN_END, 0)]
+        # 2026-10-01 (audit B10): the talk is RECORDED (king_heard, after the
+        # balloon went out) -- the war join reads it -- and a new character
+        # gets the two starter books once (manual p.30; staff.STARTER_BOOKS).
+        books = staff.starter_books_due(args)
+        line = greet or ("A message from the King. "
+                         + campaignview.campaign_report(args))
+        if books and not greet:
+            line += " And take these two books -- read them before you fight."
+        # the balloon stays FIRST (every caller reads steps[0] as the line)
+        return ([("text", line), ("king_heard",)]
+                + ([("starter_books",)] if books else [])
+                + [("window", EV_WIN_END, 0)])
     if slot == staff.ROLE_PRIZE_CLERK:
         return [("text", greet or staff.prize_clerk_line(args)),
                 ("window", EV_WIN_END, 0)]
@@ -429,6 +438,12 @@ def event_step(conn, outbound, mode, be, args):
     # attempts; the window's own u32 argument never reached +0x84 at all
     # (the ack still said 2102 after it carried 500).
     evt = ev["npc"]
+    if step[0] == "king_heard":
+        staff.king_message_record(args)
+        return event_step(conn, outbound, mode, be, args)
+    if step[0] == "starter_books":
+        staff.starter_books_give(conn, outbound, mode, be, args)
+        return event_step(conn, outbound, mode, be, args)
     if step[0] == "give":
         # the free weapon: into the bag, pushed, then straight on to the line
         old = itemrecords.item_rows(args)
@@ -454,6 +469,11 @@ def event_step(conn, outbound, mode, be, args):
         sess._SESSION["player_hp"] = hp
         death.player_hp_push(conn, outbound, mode, be, args, hp)
         print("[feworld]    the inn: HP %d/%d" % (hp, hp), flush=True)
+        # Pw too: manual p.30, the inn fully restores HP and Power (audit
+        # C18). Skipped under --pw-cost off, where nothing ever lowers it.
+        if str(getattr(args, "pw_cost", progression.DEFAULT_PW_COST)) != "off":
+            progression.pw_push(conn, outbound, mode, be, args,
+                                progression.pw_max(args), "the inn: Pw to full")
         return event_step(conn, outbound, mode, be, args)
     if step[0] == "goto":
         # end the conversation first (0x1175 releases event mode), then move

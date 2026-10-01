@@ -2,6 +2,7 @@
 import queue
 import socket
 import threading
+import time
 from . import character, messages, sess, territory, wire
 
 # ---- THE CHAT ROOM: how one session's line reaches the OTHER sessions. -----
@@ -86,12 +87,66 @@ def _chat_room_name(name):
             me["name"] = name
 
 
+def _fill_stored_name(args):
+    """Give this session's chat-room entry the STORED character name if its
+    client has not chatted yet.
+
+    /tell routes on the entry's name, and until 2026-10-01 that was only ever
+    set by the player's own first chat line (_chat_room_name), so a player
+    who had not spoken could not receive a tell at all. The stored name is
+    the same string the client signs with ([unit+0x389] is filled from the
+    0x302A/0x1000 record we serve out of the store). A name the client signs
+    with later still overwrites it."""
+    with _CHAT_ROOM_LOCK:
+        me = _CHAT_ROOM.get(threading.get_ident())
+    if me is None or me["name"]:
+        return
+    cid = sess._SESSION.get("charid")
+    now = time.monotonic()
+    if cid is None or now < me.get("name_retry", 0.0):
+        return
+    # a miss (no stored name, a store fault) is retried every 5 s, CHOSEN,
+    # rather than on every message
+    me["name_retry"] = now + 5.0
+    name = character._load_char_field(args, "name", None)
+    if name:
+        with _CHAT_ROOM_LOCK:
+            if not me["name"]:
+                me["name"] = str(name)
+        print("[feworld]    chat room: name %r from the store (for /tell "
+              "routing before this player has spoken)" % name, flush=True)
+
+
 #: 2006 channel scope (SE's guide, flow09): 範囲 /say = those around you,
 #: 全体 /all = the whole FIELD, 軍団 /army = your own nation in that field,
 #: 個人 /tell = one person anywhere, パーティ /party = your party (feparty).
-#: "Around you" has no measured range, so /say is the field too.
+#: "Around you" has no measured range: /say is the field, cut down to
+#: --say-range units (CHOSEN, see _say_in_range) when both ends have a
+#: reported position.
 CHAT_SAME_FIELD = {0x201A, 0x201B, 0x2065, 0x2066, 0x208A}
 CHAT_SAME_NATION = {0x2065, 0x2066}
+#: CHOSEN default for --say-range, in world units (the 0x2023 i16 x 0.1
+#: scale). No retail number is known; 60 u is about three quarters of a
+#: minimap square (an obelisk's 95 u radius is ~1.2), i.e. "on screen".
+SAY_RANGE_DEFAULT = 60.0
+#: --say-range as last read by chat_pump (chat_relay is called without args;
+#: the flag is process-wide anyway). 0 = the whole field, the old behaviour.
+_SAY_RANGE = [SAY_RANGE_DEFAULT]
+
+
+def _say_in_range(sender, receiver, limit):
+    """/say reach: True unless both sessions report a position and they are
+    further apart than `limit`, or stand in different rooms. A missing
+    position delivers (an unknown distance must not eat a line)."""
+    if limit <= 0:
+        return True
+    if sender.get("room", -1) != receiver.get("room", -1):
+        return False
+    a, b = sender.get("cpos"), receiver.get("cpos")
+    if not a or not b:
+        return True
+    dx, dz = float(a[0]) - float(b[0]), float(a[2]) - float(b[2])
+    return dx * dx + dz * dz <= limit * limit
 
 
 def chat_relay(mid, parts, field=None, nation=None):
@@ -115,12 +170,16 @@ def chat_relay(mid, parts, field=None, nation=None):
     # which is the id fepresence draws that player under on everyone else's
     # screen, so it is what puts a speech bubble over them (bubble_speaker)
     cid = int(sess._SESSION.get("charid") or 0)
+    say_range = _SAY_RANGE[0] if mid == 0x201A else 0.0
     n = 0
     with _CHAT_ROOM_LOCK:
         for key, ent in _CHAT_ROOM.items():
             if key == me or not ent["session"].get("in_field"):
                 continue
             if mid in CHAT_SAME_FIELD and field is not None                     and ent["session"].get("field") != field:
+                continue
+            if say_range and not _say_in_range(sess._SESSION, ent["session"],
+                                               say_range):
                 continue
             if mid in CHAT_SAME_NATION and (nation is None
                                             or ent.get("nation") != nation):
@@ -179,6 +238,13 @@ def chat_pump(conn, outbound, mode, be, args):
     list (blacklist_rows), so a hit is dropped HERE instead, with a log line,
     rather than shipped to be silently thrown away.
     """
+    try:
+        _SAY_RANGE[0] = max(0.0, float(getattr(args, "say_range",
+                                               SAY_RANGE_DEFAULT)))
+    except (TypeError, ValueError):
+        _SAY_RANGE[0] = SAY_RANGE_DEFAULT
+    if sess._SESSION.get("in_field"):
+        _fill_stored_name(args)
     if getattr(args, "chat_relay", "on") != "on":
         return
     with _CHAT_ROOM_LOCK:
@@ -188,7 +254,7 @@ def chat_pump(conn, outbound, mode, be, args):
     if "nation" not in me:
         # what /army filters on; a character's nation never changes mid-session
         me["nation"] = territory.nation_of(args)
-    blocked = None
+    rows = None
     while True:
         try:
             item = me["q"].get_nowait()
@@ -197,9 +263,12 @@ def chat_pump(conn, outbound, mode, be, args):
         mid, parts = item[0], item[1]
         cid = item[2] if len(item) > 2 else 0
         speaker_name = parts[1] if mid == 0x2067 else parts[0]
-        if blocked is None:
-            blocked = set(r["name"] for r in character.blacklist_rows(args))
-        if speaker_name in blocked:
+        if rows is None:
+            rows = character.blacklist_rows(args)
+        # by the speaker's real charid or its name CASE-FOLDED: the client
+        # stores the name upper-cased (0x20A0), the speaker signs in its own
+        # case. Until 2026-10-01 this was an exact compare and missed.
+        if character.blacklist_hit(rows, cid or None, speaker_name):
             print("[feworld]    chat relay: %r is on this player's blacklist "
                   "-- 0x05170e10 would drop it silently, so it is dropped "
                   "here instead" % speaker_name, flush=True)

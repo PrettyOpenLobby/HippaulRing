@@ -224,6 +224,47 @@ def main():
         steps = feworld.quest_script_for(args, {"name": "Bakin", "script": 340})
         check("Bakin offers the Goblin Book quest",
               steps and "Goblin Book" in steps[0][1] and steps[1][0] == "menu")
+
+        say("the Manager: the King's message is recorded, two books once "
+            "(audit B10, manual p.30)")
+        from world import staff
+        mgr = {"name": "Manager", "script": 3101}
+        store.clear()
+        store.update({"items": [[1002, 1666, 0, 1]], "quests": {}})
+        del pushes[:]
+        steps = talk(args, mgr)
+        check("a new character's talk: the message first, then the books",
+              [s[0] for s in steps]
+              == ["text", "king_heard", "starter_books", "window"]
+              and "two books" in steps[0][1], repr(steps))
+        check("...the King's message is NOT recorded before the balloon",
+              not store.get("king_message") and pushes == [])
+        ack(NPC, 6, 0, args)
+        check("...and IS once it was acked", store.get("king_message") == 1)
+        check("...the books go in the bag with it, in one push",
+              sorted(r[1] for r in store["items"]) == [1666, 1841, 1850]
+              and len(pushes) == 1, repr((store["items"], pushes)))
+        check("...the uids are fresh", len({r[0] for r in store["items"]}) == 3)
+        check("...recorded as given", store.get("starter_books") == [1850, 1841])
+        ack(NPC, 6, 0, args)
+        close(args)
+        steps = talk(args, mgr)
+        check("the second talk gives no books", [s[0] for s in steps]
+              == ["text", "king_heard", "window"]
+              and len(store["items"]) == 3, repr(steps))
+        close(args)
+        store.pop("starter_books")
+        store["items"] = [[5000 + i, 4, 0, 1] for i in range(95)]
+        del pushes[:]
+        talk(args, mgr)
+        check("a bag without room for both: nothing given, nothing recorded",
+              len(store["items"]) == 95 and pushes == []
+              and "starter_books" not in store)
+        close(args)
+        check("--starter-books off: no books",
+              staff.starter_books_due(_args(starter_books="off")) == [])
+        check("king_message_heard() reads an unknown charid as False",
+              staff.king_message_heard(987654321) is False)
     finally:
         for n, f in saved.items():
             setattr(feworld, n, f)

@@ -285,12 +285,13 @@ def add_args(ap):
                          "fewiki) state too. The old default was '4=1'")
     ap.add_argument("--build-hp", default="2006", metavar="2006|shipped|off|TYPE=HP,...",
                     help="hit points a BUILT war building is served with "
-                         "(+0x778/+0x774). 2006 (default) = the Hordaine "
-                         "wiki's 建築物 table (2006-05): Obelisk 9,500, Arrow "
-                         "Tower 8,000, War Craft 18,000, Gate of Hades 4,000 "
-                         "(after 4/25). shipped = FE_BUILDING_DATA +0xb0: the "
-                         "same except Obelisk 12,000 and Gate 18,000 (the "
-                         "4/14 value -- this client predates 4/25). off = "
+                         "(+0x778/+0x774). 2006 (default) = Obelisk 12,000 "
+                         "(the client's +0xb0; the Hordaine wiki said 9,500), "
+                         "and the wiki's 建築物 table (2006-05) for the rest: "
+                         "Arrow Tower 8,000, War Craft 18,000, Gate of Hades "
+                         "4,000 (after 4/25). shipped = FE_BUILDING_DATA "
+                         "+0xb0: the same except Gate 18,000 (the 4/14 value "
+                         "-- this client predates 4/25). off = "
                          "--building-hp for everything (the old 100:100)")
     ap.add_argument("--destroy", choices=("on", "off"), default="on",
                     help="answer 0x208C sub 7 (GM 'break building objID') "
@@ -339,10 +340,17 @@ def _next_obj(ctx):
 COSTS_2006 = "0=18,19=18,5=20,6=15,29=15,4=20"
 
 #: HP a built war building is served with, `--build-hp 2006`: the Hordaine
-#: wiki 建築物 (2006-05): Obelisk 9,500, Arrow Tower 8,000, War Craft 18,000
-#: (cut to 8,000 only in 2008), Gate of Hades 4,000 (18,000 at 4/14, 4,000
-#: after 4/25).
-BUILD_HP_2006 = {0: 8000, 19: 8000, 6: 9500, 29: 9500, 5: 18000, 4: 4000}
+#: wiki 建築物 (2006-05): Arrow Tower 8,000, War Craft 18,000 (cut to 8,000
+#: only in 2008), Gate of Hades 4,000 (18,000 at 4/14, 4,000 after 4/25).
+#: The OBELISK is the client's own 12,000 (FE_BUILDING_DATA +0xb0), not the
+#: wiki's 9,500 (audit item 23, 2026-10-01). Nothing dates the 9,500: SE
+#: published no Obelisk HP change, and the only patch the wiki's table
+#: documents is the Gate's 4/25 cut, which SE announced itself. The client
+#: is not a LATER build than the wiki either (its Gate row still carries the
+#: 4/14 18,000), so there is no reason to prefer a fan table over the
+#: shipped number. The Gate keeps its wiki 4,000 because that change IS
+#: SE's own (4/25). `--build-hp 6=9500,29=9500,...` restores the old value.
+BUILD_HP_2006 = {0: 8000, 19: 8000, 6: 12000, 29: 12000, 5: 18000, 4: 4000}
 #: `--build-hp shipped`: FE_BUILDING_DATA +0xb0, the client's max-HP field
 #: (decoded 2026-09-11): it agrees on Arrow Tower 8,000 and War Craft 18,000
 #: and differs on Obelisk (12,000) and Gate of Hades (18,000, the 4/14 value).
@@ -703,7 +711,7 @@ def on_hit_notify(ctx, inner):
     # a swing on a KEEP (2026-09-11): the campaign's buildings take it
     if getattr(ctx.args, "combat", "off") == "on" and hasattr(fw, "keep_hit"):
         fw.keep_hit(ctx.conn, ctx.outbound, ctx.mode, ctx.be, ctx.args, target,
-                    why="(0x2010)")
+                    why="(0x2010)", skill=skill)
 
 
 def on_building_hit(ctx, inner):
@@ -739,7 +747,7 @@ def on_building_hit(ctx, inner):
         return
     if hasattr(fw, "keep_hit") and fw.keep_hit(ctx.conn, ctx.outbound, ctx.mode,
                                                ctx.be, ctx.args, target,
-                                               why="(0x2019)"):
+                                               why="(0x2019)", skill=skill):
         return
     _log("   building %d is not one of this session's keeps -- nothing takes "
          "damage (a giant crystal is DRAWN by crouching within 10 u during a "

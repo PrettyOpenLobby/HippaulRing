@@ -995,6 +995,40 @@ def serve_loop(a):
           (feworld._SESSION.get("telemetry"), feworld._SESSION.get("cpos")))
 
 
+def hide():
+    """--hide-presence (2026-10-01): a HIDDEN peer leaves enemy screens only,
+    and only with the flag on (world/status.py hidden_from)."""
+    from world import status
+    print("\nHide: a hidden peer is dropped from ENEMY screens (--hide-presence)",
+          file=REPORT)
+    now = time.monotonic()
+    mv = hb(1, 2, (1000, 0), (1.0, 2.0, 3.0))
+    me = {"in_field": True, "field_ready": True, "charid": 7, "field": 11,
+          "room": -1, "pres_card": {"force": 1}}
+    peer = {"in_field": True, "field_ready": True, "charid": 8, "field": 11,
+            "room": -1, "pres_card": {"force": 2, "key": (11, -1)},
+            "pres_mv": mv, "pres_mv_t": now, "pres_alive_t": now}
+    ally = dict(peer, charid=9, pres_card={"force": 1, "key": (11, -1)})
+    real = feworld.ext_sessions
+    feworld.ext_sessions = lambda: [{"key": -1, "session": peer, "name": "p"},
+                                    {"key": -2, "session": ally, "name": "a"}]
+    try:
+        on = _args(hide_presence="on")
+        status.apply(peer, status.good_specs(140))
+        status.apply(ally, status.good_specs(140))
+        got = fepresence.visible_peers(me, (11, -1), now, on)
+        check("--hide-presence on: the hidden ENEMY (8) is not drawn, the "
+              "hidden ALLY (9) still is", sorted(got) == [9], sorted(got))
+        got = fepresence.visible_peers(me, (11, -1), now, _args())
+        check("--hide-presence off (the default): both drawn, as before",
+              sorted(got) == [8, 9], sorted(got))
+        status.clear(peer)
+        got = fepresence.visible_peers(me, (11, -1), now, on)
+        check("Hide over: the enemy is back", sorted(got) == [8, 9], sorted(got))
+    finally:
+        feworld.ext_sessions = real
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -1024,6 +1058,7 @@ if __name__ == "__main__":
         minimap(a)
         raw_relay(a)
         serve_loop(a)
+        hide()
     finally:
         if quiet:
             sys.stdout = _saved_out

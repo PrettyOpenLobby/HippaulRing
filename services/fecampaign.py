@@ -96,10 +96,17 @@ Refusals (can_declare): a capital or an unknown area (11), your own land (7),
 a truce (1), a field already preparing/at war or with a vote open (10), a
 BEGINNER field -- one touching a capital, never conquerable from SE's 2nd
 beta -- (8, CHOSEN code: the nearest text the table has), a field not
-adjacent to your nation's land (2), a holder nation already at war (11, SE:
-"隣接している国が戦争中の場合"), a keep closer than --keep-min-cells to the
-castle (6; the book's own rule "砦から一定の距離をとり", distance CHOSEN), too
-few voters present (3), a builder already in another war (11).
+adjacent to your nation's land (2), a holder nation already at war (10,
+"over the keep limit", the nearest row; SE: "隣接している国が戦争中の場合"), a
+keep closer than --keep-min-cells to the castle (6; the book's own rule
+"砦から一定の距離をとり", distance CHOSEN), too few voters present (3), a
+builder already in another war (10).
+
+THE VOTE (2026-10-01): SE's rule is the whole rule -- 3 rejects or 60 s
+cancel, nothing else. Until today a vote was also cancelled the moment the
+undecided could no longer reach the target, so with 4 needed among 5 slots
+the SECOND reject ended it. --declare-voters rotate lets every countryman in
+the field have a say, five at a time (see _vote_refill).
 
 PARTIAL: BUILT 2026-09-11 off the static dump only. NOTHING of the 0xF5xx family has
 been on a screen; the first live keep build is the proof.
@@ -107,6 +114,7 @@ been on a screen; the first live keep build is the proof.
 import json
 import math
 import struct
+import sys
 import threading
 import time
 
@@ -225,6 +233,11 @@ def _row_from(v):
             # when PREP turned into WAR (time.time()): the start of the
             # war-time every member's participation is measured against
             "war_at": float(v.get("war_at", 0) or 0),
+            # --war-presence: this war counts each member's time in the field
+            # (member "seen"/"absent", _presence_tick) instead of assuming
+            # everyone stayed to the end. Set when PREP turns into WAR, so a
+            # war already running when the knob arrived keeps the old rule.
+            "presence": bool(v.get("presence", False)),
             "settled": bool(v.get("settled", False))}
 
 
@@ -563,7 +576,10 @@ def can_declare(args, area, attacker, grid=None):
         return 2, ("area %d does not touch any field nation %d holds"
                    % (area, attacker))
     if _at_war(holder):
-        return 11, "the holder, nation %d, is already at war" % holder
+        # 10 "over the keep limit" (2026-10-01; was 11 "undefined error"):
+        # the table has no "that nation is busy" row, and one war per nation
+        # at a time IS a limit on keeps -- the nearest text the client has
+        return 10, "the holder, nation %d, is already at war" % holder
     if grid is not None:
         try:
             cg = (fw.keep_grids(area) or {}).get("def")
@@ -672,6 +688,33 @@ def sign_up(args, area, side, who=None):
     return n
 
 
+def king_heard(args, charid=None):
+    """--king-gate: has this character heard the King's message from the
+    capital Manager? world/staff.py stores that when the Manager delivers it
+    (king_message_heard). The gate DEGRADES TO ALLOWED when staff has no such
+    function (an older build) or it fails -- a missing feature must not lock
+    every player out of every war.
+
+    The getattr default is "off" on purpose: the parser's default is "on"
+    (add_args), so a deployed server gates, while a test's hand-built args
+    namespace without the knob does not."""
+    if str(getattr(args, "king_gate", "off") or "off") != "on":
+        return True
+    cid = charid if charid is not None else _me()[2]
+    if cid is None:
+        return True
+    staff = sys.modules.get("world.staff")
+    fn = getattr(staff, "king_message_heard", None)
+    if fn is None:
+        return True
+    try:
+        return bool(fn(int(cid)))
+    except Exception as e:                             # noqa: BLE001
+        print("[fecampaign] king_message_heard(%s) failed (%r) -- allowed"
+              % (cid, e), flush=True)
+        return True
+
+
 def join_side(args, area, army=None):
     """(side, None) for this session's character in `area`'s war, or
     (None, 0x1021 code). The 2006 join rules:
@@ -705,6 +748,22 @@ def join_side(args, area, army=None):
         if wanted and smaller and wanted != smaller:
             return None, DC_NG_NO_ATK if wanted == "atk" else DC_NG_NO_DEF
         side = wanted or smaller or "def"
+    if not king_heard(args):
+        # The retail manual, p.30: talk to the capital's Manager for the
+        # King's message; until you have it you cannot join a war. The 0x1021
+        # table has no row for it; "Can't join attackers/defenders" (21/20)
+        # is the nearest text it has.
+        # WARNING: what any 0x1021 does at the START (static, 2026-10-01):
+        # the arm (0x05117f7c) retries with the other Join widget once each
+        # ([screen+0x63]/[+0x64]), then calls 0x4ff7f90, which sets
+        # [scene+0x69] = 1 -- FIELD OUT ("現在の状態ではフィールドから出れません"
+        # is its refusal line). A refused player in the field at the start is
+        # sent out of it, after at most two more 0x2018s -- retail's
+        # "non-joiners are expelled", and the same for a full side.
+        print("[fecampaign] area %s: charid %s has not heard the King's message "
+              "from the capital Manager -- may not join (--king-gate)"
+              % (area, _me()[2]), flush=True)
+        return None, DC_NG_NO_ATK if side == "atk" else DC_NG_NO_DEF
     if (a if side == "atk" else d) >= war_cap(args):
         return None, DC_NG_ATK_FULL if side == "atk" else DC_NG_DEF_FULL
     # ...and the rank budget, SE's own limiter. The client has no "your rank
@@ -724,12 +783,19 @@ def join_side(args, area, army=None):
     return side, None
 
 
-def keep_damage(args, area, side, dmg):
+def keep_damage(args, area, side, dmg, of=None):
     """Take `dmg` off `side`'s keep in `area`. Returns the new hp, or None
     when there is no war on there (peace/prep/truce) or no such keep. The
     damage is credited to the hitting session's member row -- the one score
     this server can measure (the result screen's 建築物与ダメージ, SE
-    warsystem04), used for the winners' Ring bonus."""
+    warsystem04), used for the winners' Ring bonus.
+
+    `of` (audit A2, 2026-10-01): `dmg` is in the units of a keep whose max HP
+    is `of` -- the shipped 12,000,000 (feworld.KEEP_HP_SHIPPED) -- and is
+    scaled onto this keep's --keep-hp. The fraction under one point is
+    carried per side (r["keep_carry"]), so a swing worth 0.05 of a point
+    still counts once twenty of them have landed. The member is credited the
+    UNSCALED damage then, the same units building_damage credits."""
     key = _me()[0]
     with _LOCK:
         r = _STATE.get(int(area))
@@ -739,16 +805,26 @@ def keep_damage(args, area, side, dmg):
         if not k:
             return None
         before = int(k[0])
-        k[0] = max(0, before - int(dmg))
+        if of:
+            carry = r.setdefault("keep_carry", {})
+            total = (max(0.0, float(dmg)) * int(k[1]) / float(of)
+                     + float(carry.get(side, 0.0)))
+            whole = int(total)
+            carry[side] = total - whole
+            k[0] = max(0, before - whole)
+            credit = int(round(max(0.0, float(dmg)))) if before > 0 else 0
+        else:
+            k[0] = max(0, before - int(dmg))
+            credit = before - k[0]
         new = k[0]
         m = (r.get("members") or {}).get(key)
         if m is not None:
-            m["dmg"] = int(m.get("dmg", 0)) + (before - new)
+            m["dmg"] = int(m.get("dmg", 0)) + credit
     save(args)
     return new
 
 
-def pc_damage(args, area, dmg, kill=False):
+def pc_damage(args, area, dmg, kill=False, victim=None):
     """Credit THIS session's member row with damage dealt to an enemy PLAYER,
     and optionally the kill that ended them.
 
@@ -757,10 +833,16 @@ def pc_damage(args, area, dmg, kill=False):
     first two hardcoded to 0 with the comment "no PvP on this server". PvP
     landed 2026-09-12 (fepvp settles a cast against every enemy peer in
     range), so the two grades that decide a third of the Ring bonus are
-    measurable now. Returns (pc_dmg, kills) after the credit, or None."""
+    measurable now. Returns (pc_dmg, kills) after the credit, or None.
+
+    `victim` (charid) names the fallen player in the battle report
+    (--war-ticker); without it the report finds them (_fallen_peer)."""
     key = _me()[0]
     if key is None or area is None:
         return None
+    if kill and phase_of(area) == WAR:
+        war_ticker(args, area, _my_name(), _peer_name(victim)
+                   if victim is not None else _fallen_peer(area), kind=1)
     with _LOCK:
         r = _STATE.get(int(area))
         if not r or r["phase"] != WAR:
@@ -774,6 +856,100 @@ def pc_damage(args, area, dmg, kill=False):
         out = (m["pc_dmg"], int(m.get("kills", 0) or 0))
     save(args)
     return out
+
+
+# ---------------------------------------------------------------------------
+# KEY: BATTLE REPORTS -- the kill ticker, from the war itself (2026-10-01)
+#
+# The retail manual (p.41) has a chat tab for 戦況報告, war status reports
+# during a war. This client's report line is 0x1129 (fegm.notice_push, arm
+# 0x05058371): [cstr a][u8 side][cstr b][u8 kind<<4] -> "%s defeated %s" /
+# "%s destroyed %s" in the message window, coloured by comparing `side & 0xf`
+# with the viewer's own side byte (0x504a480). Until today only `!notice`
+# sent one. Now a player kill and a building felled in a war field are
+# reported to everyone standing in that field.
+# PARTIAL: 0x1129 has never been on a screen (fegm's layout is static), and
+# the side byte's meaning is a reading (we send the actor's NATION) -- so
+# --war-ticker is off by default. The live check: two players in a war
+# field, one kills the other, both message windows print "A defeated B".
+# ---------------------------------------------------------------------------
+def _my_name():
+    """This session's character name (its presence card), else 'charid N'."""
+    s = fw._SESSION
+    name = (s.get("pres_card") or {}).get("name")
+    if name:
+        return str(name)
+    return "charid %s" % s.get("charid")
+
+
+def _peer_name(cid):
+    """The name of the live session playing charid `cid`, else 'charid N'."""
+    for ent in fw.ext_sessions():
+        ps = ent["session"]
+        try:
+            if int(ps.get("charid") or 0) == int(cid):
+                name = (ps.get("pres_card") or {}).get("name")
+                if name:
+                    return str(name)
+        except (TypeError, ValueError):
+            continue
+    return "charid %s" % cid
+
+
+def _fallen_peer(area):
+    """Who a kill credited without a victim id just felled: the player in
+    `area` who went down LAST (fepvp sets player_dead and revive_at on the
+    victim's thread before it reports the kill back). A guess when two die in
+    the same instant, which only ever swaps a name in a report line."""
+    best, at = None, -1.0
+    me = fw._SESSION.get("charid")
+    for ent in fw.ext_sessions():
+        ps = ent["session"]
+        if ps.get("charid") is None or ps.get("charid") == me:
+            continue
+        if not ps.get("player_dead") or ps.get("field") != area:
+            continue
+        t = float(ps.get("revive_at") or 0.0)
+        if t > at:
+            best, at = ps, t
+    if best is None:
+        return "an enemy"
+    return (best.get("pres_card") or {}).get("name") \
+        or "charid %s" % best.get("charid")
+
+
+def war_ticker(args, area, actor, target, kind=1):
+    """Report `actor` defeated (kind 1) / destroyed (kind 4) `target` to every
+    session standing in `area`, this one included (--war-ticker on)."""
+    if str(getattr(args, "war_ticker", "off") or "off") != "on" or area is None:
+        return False
+    side = int(_nation(args) or 0xFF)
+    print("[fecampaign] area %s: battle report -- %s %s %s"
+          % (area, actor, "destroyed" if kind == 4 else "defeated", target),
+          flush=True)
+    fw.ext_post("campaign.ticker",
+                {"area": int(area), "a": str(actor), "b": str(target),
+                 "kind": int(kind), "side": side},
+                to=lambda s, _n: s.get("in_field") and s.get("field") == int(area)
+                and s.get("room", -1) == -1, include_me=True)
+    return True
+
+
+def on_ticker_relay(ctx, payload):
+    """A battle report for the field this session stands in: 0x1129."""
+    s = fw._SESSION
+    try:
+        area = int(payload["area"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if s.get("field") != area or not s.get("in_field"):
+        return
+    gm = sys.modules.get("fegm")
+    push = getattr(gm, "notice_push", None)
+    if push is None:
+        return
+    push(ctx, payload.get("a", "?"), payload.get("b", "?"),
+         kind=int(payload.get("kind") or 1), side=int(payload.get("side") or 0xFF))
 
 
 def base_dots(args, cause):
@@ -1027,6 +1203,18 @@ def war_reward(level, won, frac, destroyed, scores, rank=1):
             "rings": rings, "grades": grades}
 
 
+def war_score(args, rw):
+    """The score one war adds to a member's stored TOTAL SCORE: the EXP the
+    RoD formula earned (`rw` = war_reward's result), uncapped. 0 with
+    --war-score off. CHOSEN -- see settle()."""
+    if str(getattr(args, "war_score", "on") or "off") != "on":
+        return 0
+    try:
+        return max(0, int(rw.get("exp") or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def apply_war_exp(args, c, gained):
     """Credit `gained` war EXP to one STORED character dict `c` (its own
     class, look1): at most ONE level per war (fewiki: 「戦争で上がるレベルは
@@ -1070,15 +1258,60 @@ def apply_war_exp(args, c, gained):
     return credited, lv, new_lv
 
 
+#: --war-presence: a member's session that has not pumped in its war field
+#: for longer than this was ABSENT for the whole gap (logged off, walked out,
+#: back in the capital). Pumps run on every inbound frame and on the read
+#: loop's idle tick, so a connected player standing in the field is seen
+#: several times a second. 15 s is CHOSEN: longer than a field reload, short
+#: next to the 60-minute war it is a share of.
+PRESENCE_GAP_S = 15.0
+
+
+def _presence_tick(args, area, now):
+    """Mark THIS session's member row present in `area`'s war at `now`, and
+    book any gap since it was last seen as absence. In memory only (saved
+    with the row's next save): it runs on every pump."""
+    key = _me()[0]
+    if key is None:
+        return
+    with _LOCK:
+        r = _STATE.get(int(area))
+        if not r or r["phase"] != WAR or not r.get("presence"):
+            return
+        m = (r.get("members") or {}).get(key)
+        if m is None:
+            return
+        start = max(float(r.get("war_at") or now), float(m.get("t") or 0))
+        last = max(start, float(m.get("seen") or start))
+        if now - last > PRESENCE_GAP_S:
+            m["absent"] = float(m.get("absent") or 0.0) + (now - last)
+        m["seen"] = now
+
+
 def _member_frac(r, m, end):
-    """Share of the war this member was present: from sign-up (member "t")
-    or the war's start, whichever is later, to its end. WARNING: ASSUMED: leaving
-    the field is not tracked, so a member counts as present to the end."""
+    """Share of the war this member was present (0..1): from sign-up (member
+    "t") or the war's start, whichever is later, to its end -- minus the time
+    _presence_tick booked as absent, and minus the tail since the member was
+    last seen. The retail manual's own example (p.53): 38 minutes of a
+    45-minute war = 85%.
+
+    A row without `presence` (a war that started before --war-presence, or
+    with it off) keeps the old ASSUMPTION: present from joining to the end."""
     start = float(r.get("war_at") or 0)
     if not start or end <= start:
         return 1.0
     joined = max(start, float(m.get("t") or start))
-    return max(0.0, min(1.0, (end - joined) / (end - start)))
+    span = end - start
+    here = end - joined
+    if r.get("presence"):
+        seen = m.get("seen")
+        if seen is None:
+            return 0.0                  # never stood in the field during the war
+        here -= float(m.get("absent") or 0.0)
+        tail = end - max(joined, float(seen))
+        if tail > PRESENCE_GAP_S:
+            here -= tail
+    return max(0.0, min(1.0, here / span))
 
 
 def _enemy_destroyed(r, side, won):
@@ -1127,7 +1360,7 @@ def settle(args, area, winner, defender):
         members = {k: dict(m) for k, m in (r.get("members") or {}).items()}
         drawers = [k for k in (r.get("drawn") or {}) if k not in members]
         drawn = {k: int(n) for k, n in (r.get("drawn") or {}).items()}
-        war = {"war_at": r.get("war_at"),
+        war = {"war_at": r.get("war_at"), "presence": r.get("presence"),
                "keeps": {s: list(k) for s, k in (r.get("keeps") or {}).items()}}
         atk = int(r["atk"])
         signups = dict(r.get("signups") or {})
@@ -1162,17 +1395,41 @@ def settle(args, area, winner, defender):
                    destroyed=destroyed):
             before = int(c.get("war_rank") or 1)
             rank, streak = rank_step(before, c.get("war_streak"), won)
+            cls = int(c.get("look1", 0) or 0) & 0xFF
+            lv_tab = c.get("class_levels") if isinstance(
+                c.get("class_levels"), dict) else {}
+            try:
+                lv = int(lv_tab.get(str(cls), lv_tab.get(cls, 1)) or 1)
+            except (TypeError, ValueError):
+                lv = 1
+            rw = war_reward(lv, won, frac, destroyed, scores, before)
+            # KEY: THE WAR'S SCORE GOES INTO TOTAL SCORE (2026-10-01). The
+            # Status window's Total Score is "the sum of scores earned in
+            # wars" (retail manual p.47) and the fame title is read off it
+            # (fet_fame_rank), yet only monster kills ever added to it
+            # (progression.combat_score_push). The result screen's 総合経験値
+            # is "experience from all the scores combined" (p.53), so the war
+            # score credited is what the RoD formula EARNED -- before the
+            # one-level cap and the Lv40 stop, which limit EXP, not score.
+            # CHOSEN: no source gives the war score as its own number. Every
+            # member is credited, other nations' volunteers too (manual p.57:
+            # they get rewards and fame).
+            score = war_score(args, rw)
+            if score > 0:
+                # a MISSING total falls back to the --total-score seed, the
+                # same _seeded_value rule as the Rings below
+                tot = c.get("total_score")
+                if tot is None:
+                    tot = getattr(args, "total_score", 0) or 0
+                try:
+                    tot = int(tot)
+                except (TypeError, ValueError):
+                    tot = 0
+                c["total_score"] = tot + score
+            got.update(score=score, total=c.get("total_score"))
             if mode == "ours":
                 rings = rings_for(args, before, won, m.get("dmg"))
             else:
-                cls = int(c.get("look1", 0) or 0) & 0xFF
-                lv_tab = c.get("class_levels") if isinstance(
-                    c.get("class_levels"), dict) else {}
-                try:
-                    lv = int(lv_tab.get(str(cls), lv_tab.get(cls, 1)) or 1)
-                except (TypeError, ValueError):
-                    lv = 1
-                rw = war_reward(lv, won, frac, destroyed, scores, before)
                 rings = rw["rings"]
                 credited, lv0, lv1 = apply_war_exp(args, c, rw["exp"])
                 got.update(exp=credited, earned=rw["exp"], level=(lv0, lv1),
@@ -1200,9 +1457,11 @@ def settle(args, area, winner, defender):
                   "no reward" % (area, key), flush=True)
             continue
         out.append((key, won, got["rank"], got["rings"]))
-        print("[fecampaign] area %s: %s %s -- rank %d -> %d, +%d Rings (now %d)%s"
+        print("[fecampaign] area %s: %s %s -- rank %d -> %d, +%d Rings (now %d), "
+              "war score +%d (total %s), present %.0f%%%s"
               % (area, key, "WON" if won else "lost", got["before"], got["rank"],
-                 got["rings"], got["ring"],
+                 got["rings"], got["ring"], got.get("score", 0), got.get("total"),
+                 frac * 100,
                  "" if "exp" not in got else
                  "; war EXP +%d of %d (present %.0f%%, enemy base %.0f%% down, "
                  "grades %s; Lv%d -> Lv%d, one level at most)"
@@ -1219,11 +1478,15 @@ def settle(args, area, winner, defender):
                         {"charid": cid, "won": won, "area": int(area),
                          "rank": got["rank"], "rings": got["rings"],
                          "exp": got.get("exp", 0),
+                         "score": got.get("score", 0),
                          "side": m.get("side"),
                          "players": {"atk": int(signups.get("atk", 0)),
                                      "def": int(signups.get("def", 0))},
                          "scores": dict(scores),
-                         "destroyed": destroyed},
+                         "destroyed": destroyed,
+                         # share of the war this member was present, 0..1
+                         # (--war-presence); the manual's 参加時間
+                         "frac": frac},
                         to=lambda s, _n, cid=cid: s.get("charid") is not None
                         and int(s["charid"]) == cid, include_me=True)
     win_nation = atk if winner == "atk" else holder
@@ -1256,10 +1519,19 @@ def on_reward_relay(ctx, payload):
             "players": dict(payload.get("players") or {}),
             "scores": dict(payload.get("scores") or {}),
             "destroyed": float(payload.get("destroyed") or 0.0),
+            "score": int(payload.get("score") or 0),
+            "frac": float(payload.get("frac") if payload.get("frac") is not None
+                          else 1.0),
             "t": time.time(),
         }
     except Exception as e:                             # noqa: BLE001
         print("[fecampaign]    war result stash failed: %s" % e, flush=True)
+    if int(payload.get("score") or 0) > 0:
+        # settle() added the war score to the STORED total from another
+        # thread: drop this session's cached total so the next monster kill
+        # adds to the new one (progression.score_seed re-reads it), and let
+        # wallet_push below re-serve it (0x2024 maskB 0x1, +0x500)
+        fw._SESSION.pop("score", None)
     try:
         fw.wallet_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, ctx.args)
     except Exception as e:                             # noqa: BLE001
@@ -1276,9 +1548,11 @@ def on_reward_relay(ctx, payload):
                                 ctx.args, "war EXP +%s" % payload.get("exp"))
         except Exception as e:                         # noqa: BLE001
             print("[fecampaign]    level re-serve failed: %s" % e, flush=True)
-    print("[fecampaign]    war over: %s -- rank %s, +%s Rings, +%s war EXP"
+    print("[fecampaign]    war over: %s -- rank %s, +%s Rings, +%s war EXP, "
+          "+%s war score"
           % ("won" if payload.get("won") else "lost", payload.get("rank"),
-             payload.get("rings"), payload.get("exp", 0)), flush=True)
+             payload.get("rings"), payload.get("exp", 0),
+             payload.get("score", 0)), flush=True)
 
 
 def nation_stats(nation):
@@ -1434,6 +1708,7 @@ def _present_here(ctx, args, now):
         _crystal_expire(ctx, args, None)  # crystals outlive no war
         return
     _nation(args)                         # cached for the voters' scan
+    _presence_tick(args, area, now)       # time in the war (--war-presence)
     r = state_of(area)
     if r["phase"] == PEACE and getattr(args, "campaign_auto", None) == "on":
         mine = _nation(args)
@@ -2553,6 +2828,10 @@ def building_fell(args, area, obj, conn=None, outbound=None, mode=None,
     if not b:
         return None
     btype = int(b.get("t", -1))
+    if phase_of(area) == WAR:
+        # the battle report (--war-ticker): "<who> destroyed <building>"
+        war_ticker(args, area, _my_name(),
+                   fw.BUILDING_TYPES.get(btype, "building %d" % btype), kind=4)
     if btype in OBELISK_TYPES:
         obelisk_gone(args, area, (b["gx"], b["gz"]))
     if b.get("side") in ("atk", "def"):
@@ -2580,7 +2859,20 @@ def building_damage(args, area, obj, dmg, from_grid=None, by_side=None):
     KEY: book 59: 「建設のみならず敵の建物への攻撃も勢力範囲内のみとなっておる」 --
     attacking an enemy building, like building one, only works inside YOUR OWN
     sphere of influence. Pass `from_grid` (the attacker's cell) and `by_side`
-    to enforce it; without them the swing lands as it did before."""
+    to enforce it; without them the swing lands as it did before.
+
+    KEY: NO FRIENDLY FIRE (audit A1, 2026-10-01): with `by_side`, a swing on
+    a building of that same side returns "own side" and lands on nothing
+    (--friendly-fire on lets it). It is checked first, since your own
+    building always stands inside your own sphere."""
+    if by_side in ("atk", "def") \
+            and getattr(args, "friendly_fire", "off") != "on":
+        with _LOCK:
+            r = _STATE.get(int(area)) if area is not None else None
+            b = ((r or {}).get("buildings") or {}).get(str(int(obj)))
+            own = bool(b) and b.get("side") == by_side
+        if own:
+            return "own side"
     if from_grid is not None and by_side in ("atk", "def") \
             and not in_influence(args, area, by_side, from_grid):
         return "out of influence"
@@ -2730,14 +3022,20 @@ def _accepts_needed(args):
         return 4
 
 
-def _voters(args, area, nation, me_cid):
-    """The builder, then every other live session of the builder's nation
-    standing in `area` (not in a room), up to the dialog's five slots."""
-    out = [me_cid]
+#: the keep dialog's member slots: 0xF502 carries exactly five (reader
+#: 0x0517c6c0), and only a player whose id is among them gets live buttons
+#: and may send 0xF500 (0x050335d0)
+VOTE_SLOTS = 5
+
+
+def _countrymen(area, nation, exclude=()):
+    """Every live session of `nation` standing in `area` (not in a room),
+    by charid, minus `exclude`."""
+    out = []
     for ent in fw.ext_sessions():
         s = ent["session"]
         cid = s.get("charid")
-        if cid is None or int(cid) in out:
+        if cid is None or int(cid) in out or int(cid) in exclude:
             continue
         if not s.get("in_field") or s.get("field") != area \
                 or s.get("room", -1) != -1:
@@ -2745,9 +3043,62 @@ def _voters(args, area, nation, me_cid):
         if int(s.get("campaign_nation") or 0) != int(nation):
             continue
         out.append(int(cid))
-        if len(out) >= 5:
-            break
     return out
+
+
+def _voters(args, area, nation, me_cid):
+    """The builder, then every other live session of the builder's nation
+    standing in `area` (not in a room), up to the dialog's five slots."""
+    return ([me_cid] + _countrymen(area, nation, (me_cid,)))[:VOTE_SLOTS]
+
+
+def _rotating(args):
+    """--declare-voters rotate: the vote is the whole nation in the field."""
+    return str(getattr(args, "declare_voters", "slots") or "slots") == "rotate"
+
+
+def _vote_refill(args, vote):
+    """--declare-voters rotate ONLY: give an answered slot (never the
+    builder's) to a countryman who has not had one yet, and fill empty slots
+    with new arrivals. The retail manual (p.49) puts the approval dialog in
+    front of everyone of the builder's nation; this client's dialog has five
+    slots, so the nation votes five at a time. An answer
+    already given stays counted after its slot moves on (vote["status"] is
+    keyed by charid, the tally runs over vote["seen"]).
+
+    PARTIAL: a member list that CHANGES under an open dialog is unproven on a
+    client. Static reading (0x050334a0): each frame the dialog looks for the
+    viewer's own id among the five and does nothing when it is absent, so a
+    voter whose slot moved on keeps the dialog as their answer left it.
+    Returns True when the slots changed. Call under _LOCK."""
+    if not _rotating(args):
+        return False
+    waiting = _countrymen(vote["area"], vote["atk"], vote["seen"])
+    if not waiting:
+        return False
+    members = list(vote["members"])
+    changed = False
+    for i, c in enumerate(members):
+        if not waiting:
+            break
+        if c != vote["builder"] and vote["status"].get(c, VOTE_PENDING) != VOTE_PENDING:
+            members[i] = waiting.pop(0)
+            changed = True
+    while waiting and len(members) < VOTE_SLOTS:
+        members.append(waiting.pop(0))
+        changed = True
+    if changed:
+        for c in members:
+            if c not in vote["seen"]:
+                vote["seen"].append(c)
+        vote["members"] = members
+        for ent in fw.ext_sessions():
+            s = ent["session"]
+            if s.get("charid") is not None and int(s["charid"]) in members:
+                c = int(s["charid"])
+                vote["keys"].setdefault(c, ("%s|%d" % (s.get("account"), c),
+                                            s.get("account")))
+    return changed
 
 
 def _vote_send(ctx, members, mid, body, why, area):
@@ -2807,22 +3158,32 @@ def on_build_keep(ctx, inner):
     nation = _nation(args)
     code, why = can_declare(args, area, nation, grid=(gx, gz))
     if code is None and _war_of(key) is not None:
-        code, why = 11, "already fighting in area %s" % _war_of(key)
+        # 10, the same row as a holder already at war (was 11 "undefined")
+        code, why = 10, "already fighting in area %s" % _war_of(key)
     if code is not None:
         print("[fecampaign]    keep REFUSED: %s" % why, flush=True)
         _keep_err(ctx, code, why)
         return True
     need = _accepts_needed(args)
     voters = _voters(args, area, nation, cid)
-    if len(voters) < need:
+    # with --declare-voters rotate the whole nation in the field can answer,
+    # five at a time, so it is THEIR number that has to reach the target
+    present = (1 + len(_countrymen(area, nation, (cid,)))) if _rotating(args) \
+        else len(voters)
+    if present < need:
         _keep_err(ctx, 3, "%d of nation %d here, --declare-accepts %d"
-                  % (len(voters), nation, need))
+                  % (present, nation, need))
         return True
     with _LOCK:
         _VOTE_SEQ[0] += 1
+        # "members" = the five slots the dialog shows now; "seen" = everyone
+        # who has held a slot (the tally and the closing 0xF503/0xF504 go to
+        # them all -- the same list as "members" unless --declare-voters
+        # rotate moved a slot on)
         vote = {"area": area, "party": _VOTE_SEQ[0], "builder": cid,
                 "atk": nation, "type": btype, "pos": (gx, gy, gz), "dir": bdir,
-                "grid": (gx, gz), "members": voters, "need": need,
+                "grid": (gx, gz), "members": voters, "seen": list(voters),
+                "need": need,
                 "keys": {cid: (key, acct)}, "status": {cid: VOTE_ACCEPT},
                 "until": time.time() + _ms(args, "declare_timeout_ms") / 1000.0}
         for ent in fw.ext_sessions():
@@ -2833,8 +3194,10 @@ def on_build_keep(ctx, inner):
                                             s.get("account")))
         _VOTES[area] = vote
     print("[fecampaign]    keep vote OPEN in area %d: party %d, nation %d, "
-          "voters %s, %d accept(s) needed (builder counts), %d reject(s) "
-          "cancel, %.0f s" % (area, vote["party"], nation, voters, need,
+          "voters %s%s, %d accept(s) needed (builder counts), %d reject(s) "
+          "cancel, %.0f s" % (area, vote["party"], nation, voters,
+                              " (of %d here, slots rotate)" % present
+                              if _rotating(args) else "", need,
                               int(getattr(args, "declare_rejects", 3) or 3),
                               _ms(args, "declare_timeout_ms") / 1000.0),
           flush=True)
@@ -2849,7 +3212,8 @@ def on_reply_keep(ctx, inner):
     reply = f[0] if f else None
     cid = _me()[2]
     with _LOCK:
-        area = next((a for a, v in _VOTES.items() if cid in v["members"]), None)
+        area = next((a for a, v in _VOTES.items()
+                     if cid in v.get("seen", v["members"])), None)
         if area is not None and reply in (VOTE_REJECT, VOTE_ACCEPT):
             _VOTES[area]["status"][cid] = reply
     print("[fecampaign] <- 0xF500 ReplyToBuildKeep reply=%s (%s) from charid %s "
@@ -2867,15 +3231,30 @@ def _vote_tally(ctx, args, area):
         vote = _VOTES.get(area)
         if vote is None:
             return None
-        st = [vote["status"].get(c, VOTE_PENDING) for c in vote["members"]]
+        _vote_refill(args, vote)
+        # every answer given counts, including one whose slot has moved on
+        st = [vote["status"].get(c, VOTE_PENDING)
+              for c in vote.get("seen", vote["members"])]
     acc, rej = st.count(VOTE_ACCEPT), st.count(VOTE_REJECT)
     pend = st.count(VOTE_PENDING)
     rejects = max(1, int(getattr(args, "declare_rejects", 3) or 3))
     if acc >= vote["need"]:
         return _vote_pass(ctx, args, vote)
-    if rej >= rejects or acc + pend < vote["need"]:
+    # KEY: SE's two cancel rules and no third (retail manual p.49: 60 s pass,
+    # or 3 players choose Reject). A vote the slots can no longer carry stays open until
+    # --declare-timeout-ms (code 5): until 2026-10-01 it was cancelled the
+    # moment acc + undecided fell short, so the 2nd reject of 5 ended it.
+    if rej >= rejects:
         return _vote_fail(ctx, args, vote, 4, "%d rejected (%d accepted, %d "
                           "undecided, %d needed)" % (rej, acc, pend, vote["need"]))
+    if acc + pend < vote["need"] and not vote.get("short_said"):
+        vote["short_said"] = True
+        print("[fecampaign]    keep vote in area %d: %d accepted + %d undecided "
+              "can no longer reach %d%s -- it stays open until %d rejects or "
+              "the timeout (SE's rule)"
+              % (area, acc, pend, vote["need"],
+                 "" if _rotating(args) else " in these five slots",
+                 rejects), flush=True)
     _vote_send(ctx, vote["members"], F_READY_STATE, _vote_state(vote),
                "NotifyBuildToReadyState party %d: %d/%d accepted, %d rejected"
                % (vote["party"], acc, vote["need"], rej), area)
@@ -2889,7 +3268,8 @@ def _vote_fail(ctx, args, vote, code, why):
         _VOTES.pop(vote["area"], None)
     print("[fecampaign]    keep vote in area %d CANCELLED (code %d, %s): %s"
           % (vote["area"], code, KEEP_ERR.get(code), why), flush=True)
-    _vote_send(ctx, vote["members"], F_READY_ERR,
+    # to everyone who held a slot: each of them has the dialog open
+    _vote_send(ctx, vote.get("seen", vote["members"]), F_READY_ERR,
                ready_err_body(code, vote["party"], vote["members"]),
                "NotifyBuildToReadyKeepError code %d (%s)" % (code, KEEP_ERR.get(code)),
                vote["area"])
@@ -2904,7 +3284,7 @@ def _vote_pass(ctx, args, vote):
     area = vote["area"]
     # the builder and everyone who accepted are the attacking army already
     members = {}
-    for c in vote["members"]:
+    for c in vote.get("seen", vote["members"]):
         if vote["status"].get(c) != VOTE_ACCEPT:
             continue
         key, acct = vote["keys"].get(c, ("?|%d" % c, None))
@@ -2915,7 +3295,8 @@ def _vote_pass(ctx, args, vote):
                                                 grid=vote["grid"], members=members)
     if row is None:
         return _vote_fail(ctx, args, vote, code or 11, why or "declare refused")
-    _vote_send(ctx, vote["members"], F_READY_OK, ready_ok_body(vote["party"]),
+    _vote_send(ctx, vote.get("seen", vote["members"]), F_READY_OK,
+               ready_ok_body(vote["party"]),
                "NotifyBuildToReadyKeepOK party %d -- the keep goes up" % vote["party"],
                area)
     print("[fecampaign] area %d: KEEP BUILT at grid (%d,%d) -- nation %d DECLARES "
@@ -2929,8 +3310,20 @@ def _vote_pass(ctx, args, vote):
 def _votes_expire(ctx, args, now):
     with _LOCK:
         due = [v for v in _VOTES.values() if now >= v["until"]]
+        # --declare-voters rotate: a countryman who walks in mid-vote gets a
+        # free slot without waiting for somebody to answer (once a second)
+        fresh = []
+        if _rotating(args):
+            for v in _VOTES.values():
+                if v in due or now - float(v.get("refill_t") or 0) < 1.0:
+                    continue
+                v["refill_t"] = now
+                if _vote_refill(args, v):
+                    fresh.append(v["area"])
     for v in due:
         _vote_fail(ctx, args, v, 5, "60 s passed without enough accepts")
+    for area in fresh:
+        _vote_tally(ctx, args, area)
 
 
 def on_keep_relay(ctx, payload):
@@ -2977,6 +3370,18 @@ def _start(ctx, args, area, until):
     _side_notify(ctx, args, area)
 
 
+def _party_sweep(args):
+    """Drop party members now hostile to their leader (manual p.43) at war
+    start and after a sign-up, rather than on each member's next tick."""
+    mod = sys.modules.get("feparty")
+    if mod is None or not hasattr(mod, "war_sweep"):
+        return
+    try:
+        mod.war_sweep(args)
+    except Exception as e:
+        print("[fecampaign] party war sweep failed: %r" % (e,), flush=True)
+
+
 def _advance(ctx, args, area, now):
     r = state_of(area)
     if r["phase"] == PREP:
@@ -2984,12 +3389,15 @@ def _advance(ctx, args, area, now):
             _STATE[area]["phase"] = WAR
             _STATE[area]["until"] = now + _ms(args, "war_length_ms", 600000) / 1000.0
             _STATE[area]["war_at"] = now
+            _STATE[area]["presence"] = (str(getattr(args, "war_presence", "on")
+                                            or "off") == "on")
         save(args)
         print("[fecampaign] area %d: War Prep -> At war (attacker nation %d, "
               "signups atk %d / def %d)"
               % (area, r["atk"], r["signups"].get("atk", 0),
                  r["signups"].get("def", 0)), flush=True)
         drive_client(ctx, args, area, WAR, state_of(area)["until"])
+        _party_sweep(args)
     elif r["phase"] == WAR:
         if getattr(args, "war_decide", "signups") == "manual":
             # --war-decide manual promises that nothing resolves the war
@@ -3049,6 +3457,21 @@ def _my_side(args, area):
     if fw.territory_owner(area, args) == mine:
         return "def"
     return None
+
+
+def war_keys(args, area):
+    """(defender nation, attacker nation) for `area`'s war in PREP/WAR, else
+    None -- the two side keys world/war.py puts in 0x1018 (--war-notify-keys)
+    and 0x101F (--war-army-keys)."""
+    if getattr(args, "campaign", "off") != "on" or area is None:
+        return None
+    r = state_of(area)
+    if r["phase"] not in (PREP, WAR) or not r.get("atk"):
+        return None
+    holder = int(fw.territory_owner(area, args) or 0)
+    if not holder:
+        return None
+    return holder, int(r["atk"])
 
 
 #: `!campaign trace on` -- say, once per pump, what this session's field is
@@ -3203,6 +3626,10 @@ def on_proclamation(ctx, inner):
     if getattr(args, "campaign", "off") != "on":
         return False                        # let feworld's constant answer it
     a, d, am, dm = counts_of(area, args)
+    # the field this war window is about: a 0x2018 sent from OUTSIDE the
+    # field (the continent map's Join, see on_decide_country) names no area
+    # of its own, and this poll is the window's
+    fw._SESSION["proclamation_area"] = int(area)
     # WARNING: 2026-09-10: this was ctx.send(), which Ctx does not have -- with
     # --campaign on both handlers raised AttributeError into the seam's
     # catch, and the heartbeat/army choice got NOTHING (fe_world_test's fake
@@ -3216,9 +3643,31 @@ def on_proclamation(ctx, inner):
 
 
 def on_decide_country(ctx, inner):
-    """0x2018 -> 0x1020, and COUNT IT. The army choice is the sign-up: the
-    client sends it when the battle starts, so a player who is in the field
-    when a war begins is a player who joined it.
+    """0x2018 -> 0x1020, and COUNT IT. The army choice is the sign-up.
+
+    KEY: 0x2018 IS THE JOIN (参戦) BUTTON, and the client presses it itself
+    at the war's start (static, 2026-10-01, dump 0x04F90000). The war
+    window (screen vtable 0x0528c0b0) holds two army widgets at
+    [window+0x5c]/[+0x60]; clicking one raises UI event 0x80000000
+    (0x05117d10), which stores the widget's army [w+0x8c] and, on the next
+    frame (0x05117c13), calls slot +0x7c = the 0x2018 sender 0x05118940
+    with it. The 0x1015 arm (0x05118573) raises the SAME event on one of the
+    two widgets when no army has been chosen yet and [screen+0x60] is set --
+    and +0x60 is `sete` on 0x1018 (the window opened IN the field; 0x1019
+    leaves it 0, and the 0x1021 arm's log for that case reads 「フィールドに
+    入っていない状態で、荷担国選択に失敗しました」, side choice failed while
+    not in a field). So:
+      * Join clicked during War Prep -> 0x2018 then, enlisted then;
+      * still in the field at the start, no click -> the CLIENT joins you;
+      * the continent map's Join on a prep/war field (manual p.49) is the
+        0x1019 window from outside the field; its 0x2018 has no field of our
+        own to read, so the area is the one that window polls (0x2084).
+    That is SE's client, so "everyone standing in the field at the start is
+    in the war" is retail behaviour, not ours (fewiki 2006 agrees: whoever
+    did not join is expelled when prep ends). WARNING: The widgets' army ids
+    are only ever set by 0x101F (0x05117e47), which this server does not
+    send unless --war-army-keys on; without it every 0x2018 says army 0 and
+    join_side places the player by nation.
 
     Returns False while --campaign is off: the seam then falls through to
     feworld's own constant 0x1020 (a False return that was DROPPED until
@@ -3230,6 +3679,12 @@ def on_decide_country(ctx, inner):
     body = inner[2:]
     army = struct.unpack_from(">I", body, 0)[0] if len(body) >= 4 else 0
     area = _here(args)
+    if area is None and not fw._SESSION.get("in_field"):
+        # the continent map's Join: the field its war window is polling
+        pa = fw._SESSION.get("proclamation_area")
+        if pa is not None and int(pa) not in fw.CAPITAL_GROUP_IDS \
+                and phase_of(pa) in (PREP, WAR):
+            area = int(pa)
     got, side = None, None
     if area is not None and phase_of(area) in (PREP, WAR):
         key, acct, cid = _me()
@@ -3256,6 +3711,7 @@ def on_decide_country(ctx, inner):
                       why="MSG_DECIDE_COUNTRY_NG code %d (%s side full)"
                           % (code, side))
             return True
+        _party_sweep(args)
     ctx.reply(0x1020, b"", why="MSG_DECIDE_COUNTRY_OK (army=%d)%s"
               % (army, "" if got is None else
                  " -- signed up %s, now %s" % (side, got)))
@@ -3455,6 +3911,65 @@ def add_args(ap):
     ap.add_argument("--declare-timeout-ms", type=int, default=60000, metavar="MS",
                     help="a keep vote with too few accepts by then is "
                          "cancelled, 0xF504 code 5 (SE: 60秒)")
+    ap.add_argument("--declare-voters", choices=("slots", "rotate"),
+                    default="slots",
+                    help="who may answer a keep vote. slots (default) = the "
+                         "builder and the first four countrymen in the field, "
+                         "the dialog's five member slots. rotate = every "
+                         "countryman in the field (the retail manual: the "
+                         "dialog goes to everyone of that nation), five at a "
+                         "time: a slot whose holder has answered passes to "
+                         "someone who has not, and answers already given stay "
+                         "counted. PARTIAL: a slot list changing under an open "
+                         "dialog is read statically (0x050334a0), never seen")
+    ap.add_argument("--king-gate", choices=("on", "off"), default="on",
+                    help="a character who has not heard the King's message "
+                         "from the capital Manager may not join a war (retail "
+                         "manual p.30); refused as 0x1021 21/20 'Can't join "
+                         "attackers/defenders'. Allowed whenever world/staff "
+                         "has no king_message_heard to ask")
+    ap.add_argument("--war-presence", choices=("on", "off"), default="on",
+                    help="measure each member's time IN the war field "
+                         "(absence = more than 15 s without a pump there) "
+                         "for the reward's participation share -- the "
+                         "manual's 参加時間, 38 of 45 min = 85%%. off = "
+                         "present from joining to the end, as before")
+    ap.add_argument("--war-score", choices=("on", "off"), default="on",
+                    help="add each member's war score (the EXP the RoD "
+                         "formula earned, before the one-level cap -- CHOSEN) "
+                         "to their stored Total Score, the number the fame "
+                         "title is read from (manual p.47: the sum of war "
+                         "scores). Other nations' volunteers too")
+    ap.add_argument("--war-ticker", choices=("on", "off"), default="off",
+                    help="battle reports: 0x1129 '%%s defeated %%s' / '%%s "
+                         "destroyed %%s' to everyone in a war field on a "
+                         "player kill or a building felled. OFF: the message "
+                         "is read statically and has never been on a screen")
+    ap.add_argument("--war-notify-keys", choices=("on", "off"), default="off",
+                    help="put the defender's and attacker's nation ids in "
+                         "0x1018's first two u32 (the war window's side record "
+                         "keys, 0x051157ff) so it names both sides; they are "
+                         "0 otherwise (--war-fields). OFF: unproven on a client")
+    ap.add_argument("--war-army-keys", choices=("on", "off"), default="off",
+                    help="after 0x1018, send 0x101F with the two nations as "
+                         "the Join buttons' army ids (arm 0x05117e47), so a "
+                         "click comes back as 0x2018 army=<nation> instead of "
+                         "0. OFF: read statically, never sent")
+    ap.add_argument("--peace-atk-id", choices=("knob", "none", "zero"),
+                    default="knob",
+                    help="the 0x3031 group record's attacker for a field with "
+                         "no war on (read by world/readloop.py): knob "
+                         "(default) = --field-nations' constant attacker, as "
+                         "before; none = 0xFFFFFFFF, the record's own 'no "
+                         "attacker' (ID:-1); zero = 0. OFF by default: neither "
+                         "has been on the continent map under --field-nations")
+    ap.add_argument("--war-result-destroyed", choices=("count", "castle"),
+                    default="count",
+                    help="what the result window's Destroyed slot carries: "
+                         "count (default) = buildings this player felled, "
+                         "what this build's label 建物破壊数 says; castle = the "
+                         "enemy base's damage %% (the retail manual's "
+                         "敵城破壊率, a later layout) under that label")
     ap.add_argument("--beginner-fields", choices=("on", "off"), default="on",
                     help="refuse a declaration on a field touching a capital "
                          "(SE 2nd beta: never conquerable)")
@@ -3708,6 +4223,7 @@ def register(feworld):
     fw.register_relay("campaign.vote", on_vote_relay)
     fw.register_relay("campaign.reward", on_reward_relay)
     fw.register_relay("campaign.crystal", on_crystal_relay)
+    fw.register_relay("campaign.ticker", on_ticker_relay)
     for mid, name in (
             (0x1127, "MSG_GET_INFO_OF_PROCLAMATION_OF_WAR_OK [u16 atkCount]"
                      "[u16 defCount][u16 atkMax][u16 defMax] (fecampaign)"),

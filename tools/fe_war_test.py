@@ -487,8 +487,8 @@ def part_entities():
     # live 2026-09-12: 17 of them at keep 2901, 0x2010/0xA011 at zero)
     hits = []
     saved_kh = getattr(feworld, "keep_hit", None)
-    feworld.keep_hit = lambda conn, ob, mode, be, args, target, why="": (
-        hits.append((int(target), why)) or True)
+    feworld.keep_hit = lambda conn, ob, mode, be, args, target, why="", skill=None: (
+        hits.append((int(target), why, skill)) or True)
     body = (struct.pack(">IIHBII", 1, 29, 270, 1, 2901, 1001)
             + struct.pack(">fff", -175.3, 41.2, -10.7))
     ca = with_(a, combat="on") if "with_" in globals() else a
@@ -496,7 +496,9 @@ def part_entities():
         setattr(ca, "combat", "on")
         out = _dispatch(ca, struct.pack(">H", 0x2019) + body)
         check("an inbound 0x2019 [attacker][seq][skill][hits][building][weapon]"
-              "[pos] routes the building id to keep_hit", hits == [(2901, "(0x2019)")], hits)
+              "[pos] routes the building id to keep_hit, with the hit's skill "
+              "(the swing's damage is the skill's power, audit A2)",
+              hits == [(2901, "(0x2019)", 270)], hits)
         del hits[:]
         setattr(ca, "combat", "off")
         _dispatch(ca, struct.pack(">H", 0x2019) + body)

@@ -438,6 +438,16 @@ def _my_war_side(mod, args, area):
     """"atk"/"def" for this session in `area`'s war, or None (a spectator, or
     a nation that is neither). Read off the war's member row first, so a
     player who signed up keeps the side they signed up on."""
+    # fecampaign's own answer first: it reads the nation the campaign cached
+    # (campaign_nation). The fallback below looked for a session "nation"
+    # key nothing sets, so a player who had not enlisted read as None.
+    if hasattr(mod, "_my_side"):
+        try:
+            got = mod._my_side(args, area)
+            if got in ("atk", "def"):
+                return got
+        except Exception:                              # noqa: BLE001
+            pass
     try:
         me = mod._me()[0]
         m = (mod.state_of(area).get("members") or {}).get(me)
@@ -455,7 +465,86 @@ def _my_war_side(mod, args, area):
     return None
 
 
-def building_hit(conn, outbound, mode, be, args, target, why=""):
+# ---------------------------------------------------------------------------
+# KEY: WHAT ONE SWING TAKES OFF A BUILDING (audit A2, 2026-10-01).
+#
+# Every swing used to take a flat --hit-damage (400 on prod) off a keep of
+# --keep-hp 3000: eight swings ended a war, while a kill cost the base 1 of
+# its 480 dots (6 HP) and the obelisk drain at most 16 dots per 30 s. The
+# manual (p.52) has three routes to a base's HP -- direct attack, killing its
+# soldiers, territory -- and says keeps and castles have HIGH HP and are hard
+# to knock down. Now:
+#
+#   * THE SWING is the attacker's own attack x the skill's power, the same
+#     part 1 of damage.player_hit_damage uses on monsters (class base +
+#     worn weapon, x fet_skill's damage effect). A beginner swing is about
+#     127 + 56 = 183. No level gap: a building has no level. No building
+#     DEFENCE either: FE_BUILDING_DATA +0xb4 is the only candidate column and
+#     it reads 1000 on the town shops, which have no attack, so what it is
+#     stays unread.
+#   * A BUILT WAR BUILDING takes that number off its own HP unscaled, and its
+#     HP is the shipped one (fewar.BUILD_HP_2006: Arrow Tower 8,000, Obelisk
+#     12,000, War Craft 18,000), so a lone beginner needs ~66 swings on an
+#     obelisk. Both sides of that ratio are the client's own numbers.
+#   * A KEEP OR CASTLE ships 12,000,000 HP (+0xb0; FFSKY, Hordaine said 4.8M),
+#     which the u16 hit channel cannot carry, so --keep-hp is a scale model
+#     of it. The swing is scaled by the same factor (keep max / 12,000,000)
+#     and fecampaign.keep_damage carries the fraction, so 22 beginner swings
+#     move a 3,000 HP keep by one point. In the 480-dot gauge's terms: a
+#     death costs 25,000 shipped HP, one beginner swing 183, one Giant swing
+#     about 1,500. CHOSEN as a budget for an hour-long war (a swing every
+#     1.5 s): 30 soldiers swinging unopposed for 10 minutes take ~18% of a
+#     base, five Giants for 10 minutes ~24%, 150 deaths 31%, and half the
+#     field held by obelisks
+#     drains a base in about half an hour. All three routes count.
+#   * THE GIANT (feunit form 0) hits buildings for --giant-building-mult x
+#     the swing. The manual (p.51) says only "high attack against buildings";
+#     8 is CHOSEN so a Giant fells an arrow tower in about six swings and an
+#     obelisk in eight or nine, the "one summon can swing a battle" the manual
+#     describes, without the Giant also being a castle-killer on its own.
+#
+# --building-damage flat restores the old flat --hit-damage per swing, for
+# keeps and buildings alike, unscaled.
+# ---------------------------------------------------------------------------
+#: FE_BUILDING_DATA +0xb0 for the Castle and the Keep (see --keep-hp's help)
+KEEP_HP_SHIPPED = 12000000
+#: feunit METAMORPHOSIS id of the Giant (fet_metamorphosis row 0)
+GIANT_FORM = 0
+GIANT_BUILDING_MULT = 8.0
+
+
+def building_hit_damage(args, skill=None):
+    """(damage, why) for one swing of this session on a building, in the
+    building's own (shipped) HP units. Unrounded: a keep scales it down."""
+    flat = max(1, int(getattr(args, "hit_damage", 25)))
+    if str(getattr(args, "building_damage", "attack") or "attack") == "flat":
+        return float(flat), "flat --hit-damage %d (--building-damage flat)" % flat
+    from . import damage                  # late: damage pulls in half the world
+    try:
+        _kind, cbase, wpn, attack = damage.player_attack(args)
+    except Exception:                                  # noqa: BLE001
+        cbase = wpn = attack = 0
+    power = fegamedata.skill_power(skill) if skill is not None else 0.0
+    # a swing the client reported as landing on a building is an attack; a
+    # skill with no damage effect in the table (or no skill at all, 0xA011)
+    # is read as the basic attack, 100 -- CHOSEN, the table has no row for it
+    power = power if power > 0 else 100.0
+    if attack > 0:
+        base = attack * power / 100.0
+        why = ("attack %d (class %d + weapon %d) x skill %s power %g%%"
+               % (attack, cbase, wpn, skill, power))
+    else:
+        base = float(flat)
+        why = "flat --hit-damage %d (no attack known)" % flat
+    m = sess._SESSION.get("morph")
+    if m and m.get("form") == GIANT_FORM:
+        mult = float(getattr(args, "giant_building_mult", GIANT_BUILDING_MULT))
+        base *= mult
+        why += " x %g (a GIANT on a building)" % mult
+    return base, why
+
+
+def building_hit(conn, outbound, mode, be, args, target, why="", skill=None):
     """A swing landed on a PLAYER-BUILT building: damage it in the war's own
     row, show the new hp, and 0x1004 it at 0 -- the same channel and the same
     250 ms same-swing rule the keeps use (0xA011, 0x2010 and 0x2019 can all
@@ -484,7 +573,8 @@ def building_hit(conn, outbound, mode, be, args, target, why=""):
     if got is None:
         return False
     sess._SESSION["keep_hit_last"] = (int(target), now)
-    dmg = max(1, int(getattr(args, "hit_damage", 25)))
+    raw, dwhy = building_hit_damage(args, skill)
+    dmg = max(1, int(round(raw)))
     # KEY: THE SWING HAS TO COME FROM YOUR OWN 勢力範囲 (the client's own
     # tutorial book, fet_bookset_info 59: 「建設のみならず敵の建物への攻撃も
     # 勢力範囲内のみとなっておる」). Our own side and cell say whether it does.
@@ -492,6 +582,11 @@ def building_hit(conn, outbound, mode, be, args, target, why=""):
     grid = (world_to_grid(here[0]), world_to_grid(here[2])) if here else None
     got = mod.building_damage(args, area, target, dmg, from_grid=grid,
                               by_side=_my_war_side(mod, args, area))
+    if got == "own side":
+        print("[feworld]       building %d is YOUR OWN SIDE'S -- the swing "
+              "lands on nothing (--friendly-fire on lets it)" % target,
+              flush=True)
+        return True
     if got == "out of influence":
         print("[feworld]       building %d is OUTSIDE this side's own "
               "勢力範囲 -- the swing lands on nothing (the client's book 59 "
@@ -502,9 +597,10 @@ def building_hit(conn, outbound, mode, be, args, target, why=""):
     new, row = got
     building_hp_push(conn, outbound, mode, be, args, target, new)
     print("[feworld]       -> 0x2024 bit 0x4 on BUILDING %d (type %d %s, %s): "
-          "hp %d (-%d)%s"
+          "hp %d (-%d = %s)%s"
           % (target, row.get("t", -1), BUILDING_TYPES.get(row.get("t"), "?"),
-             row.get("side"), new, dmg, (" " + why) if why else ""), flush=True)
+             row.get("side"), new, dmg, dwhy, (" " + why) if why else ""),
+          flush=True)
     if new <= 0:
         combat.mob_kill_push(conn, outbound, mode, be, args, target)
         mod.building_fell(args, area, int(target), conn=conn,
@@ -517,14 +613,16 @@ def building_hit(conn, outbound, mode, be, args, target, why=""):
     return True
 
 
-def keep_hit(conn, outbound, mode, be, args, target, why=""):
+def keep_hit(conn, outbound, mode, be, args, target, why="", skill=None):
     """A swing landed on `target`: if it is one of this session's keeps,
     damage it through fecampaign and show the new hp. True when handled.
     Two notifies can describe one swing (0xA011 and 0x2010), so a second hit
-    on the same keep inside 250 ms is the same swing."""
+    on the same keep inside 250 ms is the same swing. `skill` is the skill
+    the hit message carried (None: the basic attack)."""
     k = (sess._SESSION.get("keeps") or {}).get(int(target))
     if k is None:
-        return building_hit(conn, outbound, mode, be, args, target, why)
+        return building_hit(conn, outbound, mode, be, args, target, why,
+                            skill=skill)
     last = sess._SESSION.get("keep_hit_last")
     now = time.monotonic()
     if last and last[0] == int(target) and now - last[1] < 0.25:
@@ -533,15 +631,47 @@ def keep_hit(conn, outbound, mode, be, args, target, why=""):
     mod = sys.modules.get("fecampaign")
     if mod is None or getattr(args, "campaign", "off") != "on":
         return False
-    dmg = max(1, int(getattr(args, "hit_damage", 25)))
-    new = mod.keep_damage(args, k["area"], k["side"], dmg)
+    # KEY: NO FRIENDLY FIRE (audit A1, 2026-10-01). Any swing used to land
+    # on any keep, so a player could knock down their own side's base and
+    # lose the war for it. A swing on your own side's keep lands on nothing.
+    # The client still draws its own swing; the hp it is sent never moves.
+    mine = _my_war_side(mod, args, k["area"])
+    if mine == k["side"] and getattr(args, "friendly_fire", "off") != "on":
+        print("[feworld]    hit on keep %d (%s) -- it is YOUR OWN SIDE'S base; "
+              "nothing takes damage (--friendly-fire on lets it)"
+              % (target, k["side"]), flush=True)
+        return True
+    # WARNING: THE 勢力範囲 GATE IS OFF FOR BASES BY DEFAULT. Book 59 puts
+    # attacks on enemy buildings inside your own sphere, and building_hit
+    # enforces that. Applied to the bases it makes them all but unattackable:
+    # every base claims --base-radius 38 cells around itself, nothing of yours
+    # may be built inside the enemy's sphere (build_check), and the bases
+    # stand at least 60 cells apart, so the only spot a swing could count
+    # from is the thin rim an obelisk exactly 39-40 cells out reaches -- and
+    # any enemy tower near their base closes even that. The manual (p.52)
+    # lists attacking the base directly as a route with no such condition.
+    # --keep-influence on applies the book's rule to the bases as well.
+    if getattr(args, "keep_influence", "off") == "on" and mine in ("atk", "def"):
+        here = sess._SESSION.get("cpos")
+        grid = (world_to_grid(here[0]), world_to_grid(here[2])) if here else None
+        if grid is not None and not mod.in_influence(args, k["area"], mine, grid):
+            print("[feworld]    hit on keep %d (%s) from grid %s -- OUTSIDE "
+                  "this side's own 勢力範囲 (--keep-influence on)"
+                  % (target, k["side"], grid), flush=True)
+            return True
+    raw, dwhy = building_hit_damage(args, skill)
+    if str(getattr(args, "building_damage", "attack") or "attack") == "flat":
+        new = mod.keep_damage(args, k["area"], k["side"], max(1, int(raw)))
+    else:
+        new = mod.keep_damage(args, k["area"], k["side"], raw,
+                              of=KEEP_HP_SHIPPED)
     if new is None:
         print("[feworld]    hit on keep %d (%s) -- no war on in area %d, "
               "nothing takes damage" % (target, k["side"], k["area"]), flush=True)
         return True
     building_hp_push(conn, outbound, mode, be, args, target, new)
-    print("[feworld]       -> 0x2024 bit 0x4 on KEEP %d (%s): hp %d (-%d)%s"
-          % (target, k["side"], new, dmg, (" " + why) if why else ""), flush=True)
+    print("[feworld]       -> 0x2024 bit 0x4 on KEEP %d (%s): hp %d (%s)%s"
+          % (target, k["side"], new, dwhy, (" " + why) if why else ""), flush=True)
     if new <= 0:
         combat.mob_kill_push(conn, outbound, mode, be, args, target)
         sess._SESSION["keeps"].pop(int(target), None)

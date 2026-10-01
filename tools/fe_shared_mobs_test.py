@@ -199,6 +199,100 @@ def main():
                                            if i[0] in (0x1004, 0x1006)],
               (rewards, inner_log))
 
+        say("the loot goes to the MOST DAMAGE, not the last hit (manual p.38)")
+        from world import combat as wcombat, drops as wdrops
+        real_party = wdrops.party_charids
+        try:
+            def blow(sess_, obj, dmg, by):
+                feworld._TLS.session = sess_
+                return wcombat.mob_damage(None, None, "ecb", False, args, obj,
+                                          world["mobs"][obj], dmg, by, "test")
+
+            def kill_posts():
+                return [p for p in posts if p[0] == "kill_reward"]
+            lt = objs[4]
+            lm = world["mobs"][lt]
+            lm["hp"] = lm["hpmax"] = 1000
+            gold = wdrops.kill_gold(args, lm)
+            reset()
+            rewards[:] = []
+            blow(A, lt, 300, 1)                     # A first
+            blow(B, lt, 600, 2)                     # B the most
+            died = blow(A, lt, 500, 1)              # A's killing blow lands 100
+            kp = kill_posts()
+            check("A lands the killing blow, B did 600 of 1000: B owns the loot",
+                  died and lm["ledger"] == {1: 400, 2: 600}
+                  and len(kp) == 1 and kp[0][1]["to"] == 2 and kp[0][1]["drop"],
+                  (lm.get("ledger"), kp))
+            check("...the reward relay goes to B's session only",
+                  kp and kp[0][2]({"charid": 2}, "b")
+                  and not kp[0][2]({"charid": 1}, "a"))
+            check("...gold %d split by damage: B %d, A (here) gets its 40%%"
+                  % (gold, kp[0][1]["gold"] if kp else -1),
+                  kp and kp[0][1]["gold"] == gold - gold * 400 // 1000
+                  and rewards == ["gold"], (kp, rewards))
+            check("...EXP goes to the winner alone (A's side gets none)",
+                  kp and kp[0][1]["exp"] == wdrops.mob_exp(args, lm))
+
+            # equal damage: whoever hit first
+            lt = objs[5]
+            lm = world["mobs"][lt]
+            lm["hp"] = lm["hpmax"] = 600
+            reset()
+            blow(A, lt, 300, 1)
+            blow(B, lt, 300, 2)                     # B kills, a tie
+            kp = kill_posts()
+            check("a TIE (300 / 300): the first hitter (A) owns the loot, "
+                  "though B killed", len(kp) == 1 and kp[0][1]["to"] == 1
+                  and kp[0][1]["drop"], kp)
+
+            # a party pools its damage
+            wdrops.party_charids = lambda c: {3, 4} if int(c) in (3, 4) else {int(c)}
+            lt = objs[6]
+            lm = world["mobs"][lt]
+            lm["hp"] = lm["hpmax"] = 1100
+            reset()
+            rewards[:] = []
+            E = dict(A, charid=5)
+            C3, D4 = dict(A, charid=3), dict(A, charid=4)
+            blow(E, lt, 500, 5)                     # the best single player
+            blow(C3, lt, 300, 3)
+            blow(D4, lt, 300, 4)                    # party 600 > 500
+            kp = kill_posts()
+            owner = [p[1]["to"] for p in kp if p[1]["drop"]]
+            exp = {p[1]["to"]: p[1]["exp"] for p in kp}
+            check("a PARTY (3+4, 600) beats the best solo player (5, 500): "
+                  "charid 3 (first hit of the party) owns the chest",
+                  owner == [3], kp)
+            check("...EXP split inside the party by damage (3 gets half; 4, "
+                  "the killer here, is paid locally), nothing to charid 5",
+                  exp.get(5, 0) == 0 and 4 not in exp
+                  and exp.get(3, 0) == wdrops.mob_exp(args, lm) // 2, exp)
+            check("...and charid 5 still gets gold for its share",
+                  any(p[1]["to"] == 5 and p[1]["gold"] > 0 for p in kp), kp)
+
+            # --loot-rule last: the old rule
+            lt = objs[7]
+            lm = world["mobs"][lt]
+            lm["hp"] = lm["hpmax"] = 1000
+            reset()
+            rewards[:] = []
+            last = _args(loot_rule="last")
+            feworld._TLS.session = B
+            wcombat.mob_damage(None, None, "ecb", False, last, lt, lm, 900, 2, "t")
+            feworld._TLS.session = A
+            wcombat.mob_damage(None, None, "ecb", False, last, lt, lm, 100, 1, "t")
+            check("--loot-rule last: the killing blow (A, 100 of 1000) takes "
+                  "everything", not kill_posts() and rewards == ["gold"],
+                  (posts, rewards))
+
+            # a respawn starts a clean ledger (mob_register builds a new record)
+            check("the ledger lives on the monster record (a respawn re-registers "
+                  "it)", "ledger" in lm and "first" in lm)
+        finally:
+            wdrops.party_charids = real_party
+            feworld._TLS.session = A
+
         say("one session drives the field")
         feworld._MOB_DRIVER.clear()
         check("the first to ask drives", feworld.mob_driver(args))

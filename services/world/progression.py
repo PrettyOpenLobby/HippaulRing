@@ -105,8 +105,15 @@ FEZ_SP_PER_LEVEL = "2:1-5,1:6-35,0:36-40"
 #: backed by dated edits (Lv19 5,200 on 2006-03-05; Lv34 500k / Lv35 700k on
 #: 2006-03-04), and China's 2007 closed test ran almost the same curve.
 #: Lv40 shows 3,200,000 but "経験値は入りません" -- EXP stops at the cap.
+#: KEY: Lv1 IS 32, NOT THE WIKI'S 30 (2026-10-01, audit C19): the retail
+#: manual's Status window screenshot (pp.32-33, IMG_0205: a Lv1 Scout, HP
+#: 1000/1000, Pw 100/100) reads Exp 0/32. The client still ships no curve
+#: to check the rest against (dat.jp.dec and the FE_Client.dll memory dump
+#: scanned for the wiki's runs as u16/u32 either endian and for any rising
+#: 30+ entry u32 run: nothing), so only this entry moved; Lv2.. stay the
+#: wiki's.
 ROD_EXP_NEXT = (
-    30, 45, 60, 100, 120, 150, 200, 250, 300, 350,                    # 1-10
+    32, 45, 60, 100, 120, 150, 200, 250, 300, 350,                    # 1-10
     450, 600, 850, 1100, 1500, 2000, 2800, 3800, 5200, 7000,          # 11-20
     9500, 13000, 18000, 24000, 32000, 44000, 60000, 82000, 110000,    # 21-29
     150000,                                                           # 30
@@ -201,10 +208,10 @@ def exp_need(args, level):
     [unit+0x135C]. No curve SHIPS in the client.
 
     `rod` (default, 2026-09-11) = ROD_EXP_NEXT, the RoD table of the 2006
-    fan wiki: 30 at Lv1, 350 at Lv10, 7,000 at Lv20, 150,000 at Lv30,
+    fan wiki: 32 at Lv1 (the manual's screenshot), 350 at Lv10, 7,000 at Lv20, 150,000 at Lv30,
     2,400,000 at Lv39, 3,200,000 at Lv40 (~9.03M to reach Lv40). A level
     past the table repeats Lv40's. Against the RoD monster table (EXP = the
-    level to L20) Lv1 takes 30 kills of Lv1 monsters -- in 2006 war was the
+    level to L20) Lv1 takes 32 kills of Lv1 monsters -- in 2006 war was the
     main EXP source past the early levels (fecampaign's war_reward).
 
     `auto` (OURS, the 2026-09-11 first pass) = 16 * L * (L + 5): 96 at Lv1,

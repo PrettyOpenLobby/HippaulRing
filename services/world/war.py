@@ -1,5 +1,6 @@
 """The war cycle on a field: start, notify, truce, peace, the deadline pump."""
 import struct
+import sys
 import time
 from . import campaignview, clock, death, sess, wire, zones
 
@@ -240,10 +241,30 @@ def war_notify(conn, outbound, mode, be, args):
                   "countdown only a war can end, and there is no war here."
                   % grp, flush=True)
         return
+    # WARNING: 0x1018 / 0x1019 ARE NOT THE TWO SIDES (static, 2026-10-01).
+    # The window arm stores `sete ebp==0x1018` at [screen+0x60], and the
+    # 0x1021 arm's log for +0x60 == 0 is 「フィールドに入っていない状態で、荷担国
+    # 選択に失敗しました」 (side choice failed while NOT IN A FIELD). So 0x1018
+    # is the window opened inside the field (the 0x1015 arm auto-joins it at
+    # the start, see fecampaign.on_decide_country) and 0x1019 the one opened
+    # from outside -- the continent map. The player's side is told by
+    # 0x101D/0x101E (war_start_notify, fecampaign._side_notify), which do
+    # use the real side. `--war offensive` therefore stays the in-field
+    # window for EVERYONE, defenders included; serving 0x1019 to defenders
+    # would take away the client's own join at the start.
     side = args.war
     mid = 0x1018 if side == "offensive" else 0x1019
     fields = [int(x, 0) for x in args.war_fields.split(",")] if args.war_fields else []
     fields = (fields + [0, 0, 0, 0])[:4]
+    # --war-notify-keys on: u32_1/u32_2 are the two sides' NATION record keys
+    # (force_by_id 0x5005560 at 0x051157ff; the window draws each one's name
+    # and colour, and a key with no record draws nothing), so the window can
+    # name both sides instead of neither. Slot 0 = the defender, slot 1 = the
+    # attacker: CHOSEN, the order 0x1127 fills its counts in (defence first).
+    # PARTIAL: unproven on a client -- default off.
+    keys = _war_keys(args, grp)
+    if keys and getattr(args, "war_notify_keys", "off") == "on":
+        fields[0], fields[1] = keys
     # ONE number drives both messages. The tail of this record is the same
     # 64-bit deadline 0x1015 carries -- HIGH first, then LOW -- and this is the
     # one the client renders as READABLE TEXT (phase 0 draws
@@ -293,13 +314,59 @@ def war_notify(conn, outbound, mode, be, args):
         sess._SESSION["war_notify_t"] = time.monotonic()
         if ms:
             clock.war_arm("prewar", dl, kind)
-    print("[feworld] -> 0x30 inner 0x%04X MSG_START_WAR_AS_%s_NOTIFY "
+    print("[feworld] -> 0x30 inner 0x%04X war window (%s) "
           "fields=%s%s -- arms [screen+0x62]; watch the client log for "
           "'Island Info was Updated. Open War Prepare Window.'"
-          % (mid, side.upper(), fields,
+          % (mid, "in the field" if mid == 0x1018 else "from outside the field",
+             fields,
              ("  [deadline %d ms -> the phase-0 label 戦争開始まで %02d:%02d:%02d]"
               % (ms, ms // 3600000, ms // 60000 % 60, ms // 1000 % 60))
              if ms else ""), flush=True)
+    if keys and getattr(args, "war_army_keys", "off") == "on":
+        war_armies_push(conn, outbound, mode, be, args, keys)
+
+
+#: 0x101F -- the war window's ARMY CHOICES. Arm 0x05117e47: the screen's
+#: byte table 0x05118748 at index 0x101F - 0x1015 = 0xA holds 6, and entry 6
+#: of the jump table 0x0511871c is this arm; dispatcher c1 0x0505353e
+#: forwards the message to the open windows exactly as it does 0x1020. Reads
+#: [u32][u32][u32 army0][u32 army1]; the first two go to locals nothing in
+#: the arm reads back. army0/army1 become the two Join widgets' army ids
+#: ([window+0x5c]/[+0x60] +0x8c, which the click hands to the 0x2018
+#: sender) AND the manager's two side keys (0x5001200 slots 0/1, the same
+#: slots 0x1018's u32_1/u32_2 fill). It also clears both widgets' +0xb0 and
+#: their tried-flags [screen+0x63/+0x64], and SETS scene pending bit 0x80
+#: (cleared again by 0x1015 / 0x1020). Nothing else in the client sets the
+#: widgets' army, which is why every live 0x2018 said army 0.
+WAR_ARMIES = 0x101F
+
+
+def war_armies_push(conn, outbound, mode, be, args, keys):
+    """0x101F [0][0][defender nation][attacker nation] -- --war-army-keys on
+    only. PARTIAL: read statically; never sent to a client. The live check:
+    with it on, a Join click (or the start's own join) should arrive as
+    0x2018 army = one of the two nation ids instead of 0."""
+    body = struct.pack(">IIII", 0, 0, int(keys[0]) & 0xFFFFFFFF,
+                       int(keys[1]) & 0xFFFFFFFF)
+    wire.send(conn, outbound, wire.inner_msg(WAR_ARMIES, body), mode, be,
+              args.seq_mode == "echo", args.world_prefix)
+    print("[feworld] -> 0x30 inner 0x101F war window ARMY CHOICES: Join "
+          "buttons = nation %d (defence) / nation %d (attack) -- a click "
+          "should come back as 0x2018 army=<that nation>"
+          % (keys[0], keys[1]), flush=True)
+
+
+def _war_keys(args, area):
+    """(defender nation, attacker nation) of the campaign war in `area`, or
+    None when no campaign war is on there."""
+    mod = sys.modules.get("fecampaign")
+    fn = getattr(mod, "war_keys", None)
+    if fn is None or area is None:
+        return None
+    try:
+        return fn(args, area)
+    except Exception:                                  # noqa: BLE001
+        return None
 
 
 def war_deadline_pump(conn, outbound, mode, be, args):

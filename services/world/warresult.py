@@ -135,7 +135,9 @@ def war_result_values(args):
     columns:
 
         Players/ATTACK, Players/DEFEND  the sign-ups the war settled with
-        Score                           this visit's rank-ladder score
+        Score                           the war's score (what settle added
+                                        to Total Score), else this visit's
+                                        rank-ladder score
         Exp                             the war EXP credited, else the visit's
         Crystal                         crystals drawn in that war
         Destroyed / Built               buildings this session felled / put up
@@ -177,10 +179,40 @@ def war_result_values(args):
         at("rewards", w.get("rings", 0))
         if int(w.get("exp") or 0) > 0:
             at("exp", w["exp"])             # the war's EXP, not the visit's
+        if int(w.get("score") or 0) > 0:
+            # the war's score, the number settle() added to Total Score
+            at("score", w["score"])
         scores = w.get("scores") or {}
         if scores.get("crystals"):
             at("crystal", scores["crystals"])
+        if getattr(args, "war_result_destroyed", "count") == "castle":
+            # the retail manual's 敵城破壊率 (p.53): the ENEMY base's damage
+            # share, in percent. NOT this build's label -- see the note at
+            # WAR_RESULT_DESTROYED below -- hence a knob, default off.
+            at("destroyed", int(round(float(w.get("destroyed") or 0.0) * 100)))
     return tuple(vals)
+
+
+# KEY: WHAT THIS BUILD'S RESULT WINDOW CAN SHOW (2026-10-01, against the retail
+# manual p.53). The window's own labels sit together at .data 553772..553868
+# (fe-ui-xlate.tsv): 戦闘結果を見る, スコア, 建物建築数 (buildings BUILT),
+# 建物破壊数 (buildings DESTROYED -- a count), 召喚数, デッド数, キル数,
+# ランキング. The manual's columns are a later layout: 敵城破壊率 (enemy castle
+# destruction %) and 参加時間 (participation %, 38 of 45 min = 85%) have NO
+# label in this client, and PC damage / building damage / crystals per player
+# are not scalars here. So:
+#   * Destroyed stays the count the label names; `--war-result-destroyed
+#     castle` sends the enemy base's % in that slot instead (a mislabel, for
+#     a look at it only).
+#   * participation is measured (fecampaign._member_frac, --war-presence) and
+#     pays the reward and is LOGGED at push time; no field draws it.
+#   * Summ / Deaths / Kills and Ranking are not among the eleven scalars, so
+#     they come from the per-row records (the u16 count <= 2, four mask-gated
+#     sub-decoders 0x05075980 / 0x05075A80 / 0x05075AD0 / 0x05075B80) or from
+#     the Ranking button's own exchange. Neither layout is decoded; rows go
+#     out as count 0. Decoding those four is the next step, then one live
+#     window with sentinels in each mask's fields.
+WAR_RESULT_DESTROYED = ("count", "castle")
 
 
 def war_result_kind(args):
@@ -213,6 +245,13 @@ def war_result_push(conn, outbound, mode, be, args):
     print("[feworld]    %s" % ", ".join(
         "%s=%d" % (n, v) for n, v in zip(WAR_RESULT_FIELDS, vals)
         if not n.startswith("(")), flush=True)
+    w = sess._SESSION.get("war_result") or {}
+    if w and w.get("frac") is not None:
+        # measured, paid for, and drawn nowhere in this build (see
+        # WAR_RESULT_DESTROYED's note)
+        print("[feworld]    participation %.0f%% of the war (the manual's "
+              "参加時間; no field of this window draws it)"
+              % (float(w["frac"]) * 100), flush=True)
     sess._SESSION.pop("war_result", None)      # drawn once; the next exit is a desert
     print("[feworld]    now CLOSE the window in-game. Its handler 0x05114FA0 "
           "-> 0x05115000 puts [win+0xAB0] in state 3, and one second later "

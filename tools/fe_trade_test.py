@@ -533,8 +533,8 @@ def part3():
     ok("...and Bob's inbound 0x2052 fronts it with Lex's OWN avatar (face 7)")
 
     # with the peer NOT drawn, it falls back to the stand-in NPC.
-    # (a cancel by the requester leaves the partner's own session key set --
-    # existing fetrade behaviour, not this change; clear it as part2 does)
+    # (since 2026-10-01 the requester's cancel reaches the partner and clears
+    # its session key itself -- part 4; the explicit clear here is harmless)
     q(a, 0x2056, struct.pack(">HI", tid, 3))
     w.do(lambda: (feworld._SESSION.__setitem__("pres_seen", {}),
                   feworld._SESSION.__setitem__("trade", None), pump(b)))
@@ -559,6 +559,116 @@ def part3():
     r = Reader(out[0][2]); assert out[0][0] == 0x108C and r.u32() == 5; r.done()
     ok("--unit-id 1 -> no charid shortcut, 0x108C code 5 (unbound unit)")
     out[:] = []
+    w.do(feworld._chat_room_leave)
+    w.tasks.put(None)
+    feworld._chat_room_leave()
+
+
+# ---------------------------------------------------------------------------
+# PART 4 -- the manual's rules (2026-10-01): a partner going away cancels the
+# trade on the survivor's screen, same field only, blacklist both ways, and
+# the 50-crystal carry cap (NG 14)
+# ---------------------------------------------------------------------------
+def part4():
+    _stub_store()
+    _reset()
+    STORE[7] = {"items": [], "equip": [], "gold": 0, "crystal": 20}
+    STORE[8] = {"items": [], "equip": [], "gold": 0, "crystal": 45}
+    _session(7, "a", "Lex")
+    a = _args(unit_id="auto", crystal=0)
+    b = _args(unit_id="auto", crystal=0)
+    w = _Worker(); w.start()
+    w.do(lambda: (_session(8, "b", "Bob"), feworld._SESSION.__setitem__("trade", None)))
+    bob_out = w.do(_out)
+    out = _out()
+
+    def bob_trade():
+        return w.do(lambda: feworld._SESSION.get("trade"))
+
+    def request():
+        out[:] = []
+        q(a, 0x2052, struct.pack(">I", 8))
+        assert out and out[0][0] == 0x108B, [(hex(m), x) for m, _, x in out]
+        r = Reader(out[0][2]); r.u32(); tid = r.u16(); r.done()
+        out[:] = []
+        w.do(lambda: pump(b))
+        bob_out[:] = []
+        return tid
+
+    # the requester cancels: the relay now REACHES the partner
+    tid = request()
+    q(a, 0x2056, struct.pack(">HI", tid, 3))
+    w.do(lambda: pump(b))
+    assert [m for m, _, _ in bob_out] == [0x2057], bob_out
+    r = Reader(bob_out[0][2]); assert r.u16() == tid and r.u32() == 2; r.done()
+    assert bob_trade() is None
+    bob_out[:] = []
+    ok("a cancel reaches the partner: 0x2057 [tid][2], its trade key cleared")
+
+    # the requester LOGS OUT while the request is pending
+    tid = request()
+    fetrade.session_end()
+    w.do(lambda: pump(b))
+    assert [m for m, _, _ in bob_out] == [0x2057], bob_out
+    assert bob_trade() is None and not fetrade.TRADES
+    assert feworld._SESSION.get("trade") is None
+    bob_out[:] = []
+    ok("requester logout -> partner 0x2057, both trade keys clear")
+
+    # the partner logs out with the window OPEN
+    tid = request()
+    w.do(lambda: q(b, 0x2053, struct.pack(">H", tid)))
+    pump(a); out[:] = []; bob_out[:] = []
+    w.do(fetrade.session_end)
+    pump(a)
+    assert [m for m, _, _ in out] == [0x2056], out
+    r = Reader(out[0][2]); assert r.u16() == tid and r.u32() == 1; r.done()
+    assert feworld._SESSION.get("trade") is None and not fetrade.TRADES
+    out[:] = []
+    ok("partner logout mid-trade -> 0x2056 [tid][1] ('Partner cancelled')")
+
+    # same field only
+    feworld._TLS.session["field"] = 5
+    w.do(lambda: feworld._TLS.session.__setitem__("field", 6))
+    q(a, 0x2052, struct.pack(">I", 8))
+    r = Reader(out[0][2]); assert out[0][0] == 0x108C and r.u32() == 5; r.done()
+    out[:] = []
+    w.do(lambda: feworld._TLS.session.__setitem__("field", 5))
+    ok("partner in another field -> 0x108C code 5")
+
+    # blacklist: Lex has BOB (upper-cased, as the client stores it)
+    saved = feworld.blacklist_rows
+    feworld.blacklist_rows = lambda args: [{"id": 0x40000001, "name": "BOB"}]
+    try:
+        q(a, 0x2052, struct.pack(">I", 8))
+    finally:
+        feworld.blacklist_rows = saved
+    r = Reader(out[0][2]); assert out[0][0] == 0x108C and r.u32() == 8; r.done()
+    assert not fetrade.TRADES
+    out[:] = []
+    ok("blacklisted partner -> 0x108C code 8, no trade opened")
+
+    # the carry cap: Bob holds 45, Lex offers 10 crystal -> 55 > 50 -> NG 14
+    tid = request()
+    w.do(lambda: q(b, 0x2053, struct.pack(">H", tid)))
+    pump(a); out[:] = []; bob_out[:] = []
+    saved_of = fetrade._crystal_of
+    fetrade._crystal_of = (lambda args, party: 45 if not party.is_me()
+                           else saved_of(args, party))
+    try:
+        q(a, 0x2054, struct.pack(">HIIH", tid, 0, 10, 0))
+        r = Reader(out[0][2]); assert out[0][0] == 0x108F
+        assert r.u16() == tid and r.u32() == 14; r.done()
+        out[:] = []
+        ok("an offer that puts the partner over 50 crystal -> 0x108F code 14")
+        q(a, 0x2054, struct.pack(">HIIH", tid, 0, 5, 0))
+        assert [m for m, _, _ in out] == [0x108E], out
+        ok("...5 (to exactly 50) is accepted")
+    finally:
+        fetrade._crystal_of = saved_of
+    out[:] = []
+    q(a, 0x2056, struct.pack(">HI", tid, 3))
+    w.do(lambda: pump(b))
     w.do(feworld._chat_room_leave)
     w.tasks.put(None)
     feworld._chat_room_leave()
@@ -589,6 +699,7 @@ if __name__ == "__main__":
         part1()
         part2()
         part3()
+        part4()
     finally:
         if quiet:
             sys.stdout = _saved_out

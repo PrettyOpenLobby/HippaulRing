@@ -1466,6 +1466,15 @@ def main():
                          "is applied: which table column says what an item "
                          "heals is not identified, so this takes the item and "
                          "grants nothing. 'off' restores the hang.")
+    ap.add_argument("--pocket-refill", default="off", choices=["on", "off"],
+                    help="when the last of a pocket item is used, move the next "
+                         "of the same item from the bag into that pocket "
+                         "(manual p.45, audit B17): the stored worn entry is "
+                         "replaced in place and the client is sent the same "
+                         "0x107A worn-marker reflection a 0x2098 pocket assign "
+                         "gets. OFF by default: no client has been seen taking a "
+                         "server-initiated pocket fill yet, and whether the "
+                         "client refills on its own is not known.")
     ap.add_argument("--room-exit", default="conversation",
                     choices=["conversation", "off"],
                     help="walk the player OUT of a room when a conversation "
@@ -1675,6 +1684,31 @@ def main():
                          "figure; Hordaine 2006 said 4.8M), which the u16 hit "
                          "channel cannot carry. What the 2006 rules fix is the "
                          "FRACTIONS of it (fecampaign --base-dots, 480 dots).")
+    ap.add_argument("--building-damage", default="attack",
+                    choices=["attack", "flat"],
+                    help="what one swing takes off a keep or a war building. "
+                         "attack (default) = the attacker's attack (class + "
+                         "weapon) x the hit's skill power, the monster rule "
+                         "without the level gap; a war building takes it off "
+                         "its shipped HP as is, a keep takes it scaled by "
+                         "--keep-hp / 12,000,000 (fractions carried). flat = "
+                         "the old rule: --hit-damage per swing, unscaled.")
+    ap.add_argument("--giant-building-mult", type=float, default=8.0,
+                    metavar="X",
+                    help="a GIANT summon's swing on a keep or building is x "
+                         "this (manual p.51: high attack against buildings; "
+                         "8 is CHOSEN, about six swings to an arrow tower)")
+    ap.add_argument("--friendly-fire", default="off", choices=["on", "off"],
+                    help="off (default): a swing on your own side's keep or "
+                         "war building lands on nothing. on = the old rule, "
+                         "any swing damages any of them.")
+    ap.add_argument("--keep-influence", default="off", choices=["on", "off"],
+                    help="on = a swing on an enemy keep/castle counts only "
+                         "from inside your side's own 勢力範囲, the rule book "
+                         "59 gives war buildings. off (default): the bases "
+                         "sit 60+ cells apart inside their own 38-cell "
+                         "spheres, so the rule leaves them nearly "
+                         "unattackable.")
     ap.add_argument("--keep-types", default="20:16", metavar="DEF:ATK",
                     help="FE_BUILDING_DATA rows for the two bases. Default "
                          "20 Castle / 16 Keep -- SE warsystem02: the defender's "
@@ -1841,6 +1875,11 @@ def main():
     ap.add_argument("--talk-lines", type=int, default=4, metavar="N",
                     help="lines a talk balloon shows (4, measured live: a "
                          "fifth is clipped at its bottom edge)")
+    ap.add_argument("--starter-books", default="on", choices=["on", "off"],
+                    help="the capital Managers hand a character the two "
+                         "starter books once (manual p.30; staff.STARTER_BOOKS: "
+                         "1850 the Soldier's Handbook, controls, and 1841 the "
+                         "HP/Pw set). off = they only give the King's message.")
     ap.add_argument("--quests", default="on", choices=["on", "off"],
                     help="QUESTS (2026-09-12): the capital's quest givers "
                          "(QUESTS: Cheese at scripts 115/315/515/715/915, "

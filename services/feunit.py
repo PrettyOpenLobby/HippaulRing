@@ -282,6 +282,8 @@ import struct
 import sys
 import time
 
+from world import status as _status
+
 fw = None   # the feworld module, handed in by register()
 
 # ---------------------------------------------------------------------------
@@ -550,6 +552,43 @@ def add_args(ap):
                     help="crystals debited from the per-character store per 0x20AD")
     ap.add_argument("--crystal-heal-drain", type=int, default=0,
                     help="subtract this from the crystal building's +0x778 via 0x209D")
+    # ---- 2026-10-01: statuses, crouch, loot (world/status.py, world/combat.py)
+    ap.add_argument("--status-effects", default="on", choices=("on", "off"),
+                    help="the server-side STATUS model (world/status.py, manual "
+                         "pp.38-39): poison/burn HP over time, slow/root/stun "
+                         "in the monster AI, no damage from a stunned or "
+                         "disarmed attacker, resistance up/down in damage "
+                         "taken, root and Hide broken by a hit, Hide can't be "
+                         "target-locked in PvP. Every status comes from the "
+                         "skill's own EFFECT_DATA rows. Nothing new goes on "
+                         "the wire unless --status-effects-wire on. `!status` live.")
+    ap.add_argument("--status-effects-wire", default="off", choices=("on", "off"),
+                    help="ALSO tell the player's own client: the CONDITION "
+                         "word (0x2024 maskA 0x100000) carries the status bits "
+                         "(poison 0x1, stun 0x10, root 0x20, disarm 0x40, hide "
+                         "0x2000, no flinch 0x4000, blind 0x8000, chant "
+                         "0x2000000 -- the client's own bit names). UNPROVEN on "
+                         "a screen: default off. The live check is in "
+                         "world/status.py cond_sync.")
+    ap.add_argument("--hide-presence", default="off", choices=("on", "off"),
+                    help="a HIDDEN player is taken off enemy-nation screens "
+                         "(fepresence: 0x1004 when hidden, 0x1006 again when "
+                         "Hide ends) and off their minimap. Default off: "
+                         "removing and re-adding a live peer this way is not "
+                         "proven on a screen.")
+    ap.add_argument("--crouch-damage", type=float, default=1.3, metavar="X",
+                    help="damage multiplier on a CROUCHED player (manual p.38: "
+                         "extra damage while crouched). 1.3 is CHOSEN (RoD "
+                         "players felt 1.2-1.5x); 1.0 turns it off. Crouch is "
+                         "read off the client's own cadences: a 0x20AD crystal "
+                         "heal, or two 0x2028 regen asks under 2.2 s apart "
+                         "(1349 ms crouched vs 3000 ms standing, 0x0507D84B).")
+    ap.add_argument("--loot-rule", default="damage", choices=("damage", "last"),
+                    help="who gets a monster kill (world/combat.py): damage "
+                         "(default, manual p.38) = the player or PARTY with "
+                         "the most landed damage, first hit on a tie; gold "
+                         "split by damage share. last = the old rule, all of "
+                         "it to the killing blow.")
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +596,50 @@ def add_args(ap):
 # ---------------------------------------------------------------------------
 def _log(msg):
     print("[feunit]    " + msg, flush=True)
+
+
+def _gm_status(ctx, rest):
+    """!status                 -- this player's statuses and crouch
+    !status KIND SECS          -- put one on (poison/burn tick 20 HP / 2 s)
+    !status SKILL              -- what that skill applies (and put it on)
+    !status clear              -- end them all"""
+    s, args = ctx.session, ctx.args
+    if rest and rest[0].lower() == "clear":
+        n = _status.clear(s)
+        _status.cond_sync(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+        _log("!status clear: %d status(es) ended" % n)
+        return True
+    if rest and rest[0].isdigit():
+        sk = int(rest[0])
+        specs = _status.skill_specs(sk)
+        _log("!status %d: %s" % (sk, ", ".join(
+            "%s %dms (effect %d)" % (x["kind"], x["ms"], x["effect"])
+            for x in specs) or "no status"))
+        _status.player_apply(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args,
+                             specs, skill=sk, why="!status")
+        return True
+    if len(rest) >= 2:
+        kind, secs = rest[0].lower(), float(rest[1])
+        spec = {"kind": kind, "ms": int(secs * 1000), "effect": 0}
+        if kind in _status.DOT:
+            spec.update(amount=20, tick_ms=2000)
+        if kind == "slow":
+            spec.update(factor=0.7)
+        if kind in ("resist_up", "resist_down"):
+            spec.update(amount=10.0)
+        _status.player_apply(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args,
+                             [spec], why="!status")
+        return True
+    a = _status.active(s)
+    _log("!status charid %s: %s; bits 0x%X (sent 0x%X, --status-effects %s, "
+         "--status-effects-wire %s); crouched %s"
+         % (s.get("charid"), ", ".join("%s %.0fs" % (k, e["until"] - time.monotonic())
+                                       for k, e in sorted(a.items())) or "none",
+            _status.bits(s), s.get("status_bits_sent", 0),
+            getattr(args, "status_effects", "on"),
+            getattr(args, "status_effects_wire", "off"),
+            _status.crouched(s)))
+    return True
 
 
 def _uid(ctx):
@@ -1429,6 +1512,9 @@ def on_recover_from_crystal(ctx, inner):
         return
     bld = struct.unpack_from(">I", f, 0)[0]
     args = ctx.args
+    # the client only sends this while CROUCHED at a giant crystal (0x05152ca0
+    # family): the evidence --crouch-damage reads
+    _status.crouch_note(ctx.session, "0x20AD crystal heal")
     heal = int(getattr(args, "crystal_heal", 50) or 0)
     # 2026-09-11: a giant crystal of a live war (fecampaign's deposits) pays
     # the heal out of ITS deposit -- RoD and FEZ-early drained one crystal per
@@ -1494,6 +1580,11 @@ def on_20ae(ctx, inner):
 # ---------------------------------------------------------------------------
 def pump(ctx):
     s = ctx.session
+    try:
+        _status.player_pump(ctx.conn, ctx.outbound, ctx.mode, ctx.be, ctx.args)
+        _status.mob_pump(ctx.conn, ctx.outbound, ctx.mode, ctx.be, ctx.args)
+    except Exception as e:                              # noqa: BLE001
+        _log("status pump failed (%r) -- session kept" % (e,))
     if s.get("morph") is not None or s.get("morph_hpfix") or s.get("player_dead"):
         morph_tick(ctx)
     if not s.get("player_dead"):
@@ -1522,7 +1613,8 @@ HELP = ("!stat FIELD VALUE [UNIT] [col]  -- 0x2026/0x2027 (UNIT: 0x1183/0x1184)\
         "!del ID [ID..]                  -- 0x1005 batch MSG_DEL\n"
         "!durability UID CUR [MAX]       -- 0x2032 group-4\n"
         "!bhp UID CUR [MAX]              -- 0x209D building hp\n"
-        "!effect6e [UNIT]                -- 0x20B0 header-only")
+        "!effect6e [UNIT]                -- 0x20B0 header-only\n"
+        "!status [KIND SECS|clear|SKILL] -- this player's statuses (world/status.py)")
 
 
 def gm(ctx, line):
@@ -1534,6 +1626,8 @@ def gm(ctx, line):
         if verb == "!unitstat":
             _log("\n" + HELP)
             return True
+        if verb == "!status":
+            return _gm_status(ctx, rest)
         if verb == "!stat":
             if len(rest) < 2:
                 _log("!stat FIELD VALUE [UNIT] [col]")

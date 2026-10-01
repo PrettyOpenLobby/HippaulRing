@@ -474,6 +474,75 @@ def part_serve(wa):
           not feworld.spawn_protected(wa) and "protect_until" not in S)
 
 
+def part_validate(wa):
+    print("\n4c. Field Out (manual p.22/23): damage cancels the countdown "
+          "(0x1158), a capital finishes at once", file=OUT)
+    check("--validate-cancel-on-hit defaults off (0x1158 not seen live yet)",
+          getattr(wa, "validate_cancel_on_hit", None) == "off",
+          getattr(wa, "validate_cancel_on_hit", None))
+    wa = with_(wa, validate_cancel_on_hit="on")
+    check("--validate-capital defaults to instant",
+          getattr(wa, "validate_capital", None) == "instant")
+    S = session(account="member:88", charid=602, in_field=True, field=17)
+    del SENT[:]
+    with contextlib.redirect_stdout(io.StringIO()):
+        feworld.player_hp_push(None, None, 0, False, wa, 1000)
+        S["validate_due"] = time.time() + 10
+        feworld.player_hp_push(None, None, 0, False, wa, 1000)
+    check("an unchanged HP push with a countdown pending cancels nothing",
+          0x1158 not in ids() and "validate_due" in S, [hex(i) for i in ids()])
+    with contextlib.redirect_stdout(io.StringIO()):
+        feworld.player_hp_push(None, None, 0, False, wa, 900)
+    got = of(0x1158)
+    check("a hit (1000 -> 900) during the countdown -> 0x1158 [u32 0]",
+          len(got) == 1 and got[0] == struct.pack(">I", 0), got)
+    check("...sent BEFORE the 0x2024 that draws the hit",
+          ids().index(0x1158) < len(ids()) - 1 and ids()[-1] == 0x2024,
+          [hex(i) for i in ids()])
+    check("...and the pending 0x1157 FINISH is dropped",
+          "validate_due" not in S)
+    del SENT[:]
+    with contextlib.redirect_stdout(io.StringIO()):
+        feworld.player_hp_push(None, None, 0, False, wa, 800)
+        S["validate_due"] = time.time() + 10
+        feworld.player_hp_push(None, None, 0, False, wa, 1000)
+        feworld.player_hp_push(None, None, 0, False, with_(
+            wa, validate_cancel_on_hit="off"), 500)
+    check("no countdown -> no 0x1158; a heal or --validate-cancel-on-hit off "
+          "-> none either", of(0x1158) == [] and "validate_due" in S,
+          [hex(i) for i in ids()])
+    S.pop("validate_due", None)
+
+    inbox = []
+    fenet.recv_frame = lambda conn: inbox.pop(0) if inbox else None
+    for field, instant in ((21, True), (17, False)):
+        session(account="member:88", charid=603, in_field=True, field=field,
+                room=-1)
+        inbox.append((0x30, struct.pack(">H", 0x209A)))
+        del SENT[:]
+        t0 = time.time()
+        with contextlib.redirect_stdout(io.StringIO()):
+            feworld.serve(_Conn(), with_(wa, ui_auto="ok"), None, None, 0, False)
+        S = feworld._SESSION
+        if instant:
+            due = S.get("validate_due") or 0
+            # the FINISH goes out on the loop's next pump (the next inbound
+            # message or the 250 ms idle tick); run that pump here
+            with contextlib.redirect_stdout(io.StringIO()):
+                feworld.validate_pump(None, None, 0, False, wa)
+            check("Field Out in capital 21 -> 0x1154, then 0x1157 on the "
+                  "next pump", 0x1154 in ids() and 0 < due <= time.time()
+                  and 0x1157 in ids() and "validate_due" not in S,
+                  ([hex(i) for i in ids()], due - t0))
+        else:
+            due = S.get("validate_due") or 0
+            check("Field Out in war field 17 -> 0x1154, FINISH still 10 s off",
+                  0x1154 in ids() and 0x1157 not in ids()
+                  and t0 + 9 < due <= time.time() + 10.5,
+                  ([hex(i) for i in ids()], due - t0))
+    feworld._SESSION.pop("validate_due", None)
+
+
 def part_peace_arrival(wa, fecampaign):
     print("\n5. at peace you arrive on the castle side, whoever holds it",
           file=OUT)
@@ -770,6 +839,7 @@ def main():
                 ("war return", lambda: part_war_return(wa, fecampaign)),
                 ("protection", lambda: part_protection(war, fecampaign)),
                 ("serve", lambda: part_serve(wa)),
+                ("validate", lambda: part_validate(wa)),
                 ("peace arrival", lambda: part_peace_arrival(wa, fecampaign)),
                 ("penalty", lambda: part_penalty(wa, fecampaign, tmp)),
                 ("return to base",

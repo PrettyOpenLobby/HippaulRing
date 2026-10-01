@@ -128,10 +128,16 @@ def blacklist_add(args, name):
     """
     rows = blacklist_rows(args)
     for r in rows:
-        if r["name"] == name:
+        # casefold: the client upper-cases the name on the wire (0x20A0
+        # measured 08-25), so "Jimmy" and "JIMMY" are one row
+        if r["name"] == name or r["name"].casefold() == name.casefold():
             return r["id"], rows, False
     # A name we already know as a character keeps that character's real id, so
-    # the blacklist and the rest of the world agree about who this is.
+    # the blacklist and the rest of the world agree about who this is. Since
+    # 2026-10-01 that is ANY stored character, not only the session's own
+    # roster: the client's own blacklist tests (the 0x112E and 0x2052 arms)
+    # compare a unit's [+0x3c0] ChrID against these ids, and a synthetic id
+    # can never equal a real player's.
     nid = _charid_of_name(args, name)
     if nid is None:
         nid = max([BLACKLIST_ID_BASE - 1]
@@ -151,29 +157,111 @@ def blacklist_remove(args, target_id):
     return True
 
 
-def _charid_of_name(args, name):
-    """The charid of a character with this name, in the session's own roster.
+#: Test hook: fn() -> [(account, charid, name)]. None = walk felobby's store.
+_ALL_CHARS_FN = None
 
-    Only the session's roster: felobby's store is keyed by account and there is
-    no whole-store reader, so a cross-account lookup would mean reaching past
-    its API into the file layout. Resolving "I blacklisted my own alt" is worth
-    having; everything else falls through to a synthetic id, which works just as
-    well because the id only has to be stable, not meaningful.
-    """
-    acct = sess._SESSION.get("account")
-    if not acct:
-        return None
+
+def all_chars():
+    """[(account, charid, name)] over EVERY stored account, through felobby's
+    public API (store_accounts, then load_roster per account -- the same walk
+    femail and feforce make). A store fault returns what was read so far: a
+    blacklist lookup is never worth failing a request over."""
+    if _ALL_CHARS_FN is not None:
+        return list(_ALL_CHARS_FN())
+    out = []
     try:
         import felobby
-    except ImportError:
+        path = felobby._default_store()
+        for acct in (felobby.store_accounts(path) or {}):
+            for c in felobby.load_roster(path, acct) or []:
+                if c.get("charid") is None:
+                    continue
+                out.append((acct, int(c["charid"]) & 0xFFFFFFFF,
+                            str(c.get("name", ""))))
+    except Exception:                                  # noqa: BLE001
+        pass
+    return out
+
+
+def char_by_name(name):
+    """(account, charid, name) of the stored character called `name`: exact
+    first, then case-folded (the client upper-cases blacklist names), else
+    None."""
+    want = (name or "").strip()
+    if not want:
         return None
-    for c in felobby.load_roster(felobby._default_store(), acct) or []:
-        if str(c.get("name", "")) == name and c.get("charid") is not None:
-            try:
-                return int(c["charid"]) & 0xFFFFFFFF
-            except (TypeError, ValueError):
-                return None
+    rows = all_chars()
+    for r in rows:
+        if r[2] == want:
+            return r
+    for r in rows:
+        if r[2].casefold() == want.casefold():
+            return r
     return None
+
+
+def _charid_of_name(args, name):
+    """The REAL charid of the stored character with this name, any account,
+    case-insensitive, else None.
+
+    Until 2026-10-01 this looked in the session's own roster only ("no
+    whole-store reader"), so every other player got a synthetic id from
+    BLACKLIST_ID_BASE and the client's own blacklist test, which compares
+    ChrIDs, could never match them. felobby.store_accounts IS the whole-store
+    reader (femail and feforce already walk it).
+    """
+    hit = char_by_name(name)
+    return None if hit is None else hit[1]
+
+
+def blacklist_rows_for(account, charid):
+    """Another character's stored blacklist (read only), [{"id", "name"}].
+    Used for the "blocked in both directions" checks, where the other side's
+    list lives on a session this thread does not own."""
+    if not account or charid is None:
+        return []
+    try:
+        import felobby
+        roster = felobby.load_roster(felobby._default_store(), account) or []
+    except Exception:                                  # noqa: BLE001
+        return []
+    for c in roster:
+        if c.get("charid") == charid:
+            out = []
+            for r in c.get("blacklist") or []:
+                try:
+                    out.append({"id": int(r["id"]) & 0xFFFFFFFF,
+                                "name": str(r["name"])})
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return out
+    return []
+
+
+def blacklist_hit(rows, charid=None, name=None):
+    """Does a blacklist name this character? By real charid (a synthetic id
+    never equals one) or by name, case-folded."""
+    cid = None if charid is None else int(charid) & 0xFFFFFFFF
+    fold = (name or "").casefold()
+    for r in rows or []:
+        if cid is not None and r["id"] < BLACKLIST_ID_BASE and r["id"] == cid:
+            return True
+        if fold and r["name"].casefold() == fold:
+            return True
+    return False
+
+
+def blacklist_blocked(args, other_account, other_charid, other_name):
+    """True when THIS session's character and the other one have blocked each
+    other in EITHER direction (manual p.48: blacklisted players cannot party
+    or trade with you, both ways). Runs on this session's thread; the other
+    side's list is read from the store."""
+    if blacklist_hit(blacklist_rows(args), other_charid, other_name):
+        return True
+    my_cid = sess._SESSION.get("charid")
+    my_name = _load_char_field(args, "name", None)
+    theirs = blacklist_rows_for(other_account, other_charid)
+    return blacklist_hit(theirs, my_cid, my_name)
 
 
 def _store_char_field(args, key, value):
@@ -259,8 +347,24 @@ def blacklist_send(conn, outbound, mode, be, args, who=0):
     0x20A2 registers no reply of its own (0x051333d0 has none of the
     `mov word ptr [esp+N], imm16` pairs), so 0x1163 is an unsolicited push and
     may be sent whenever the list changes.
+
+    Rows stored before 2026-10-01 carry a synthetic id for any name outside
+    the player's own roster. They are re-resolved here against the whole
+    store and saved with the real charid, so the client's id-based blacklist
+    test starts matching on the next list push.
     """
     rows = blacklist_rows(args)
+    fixed = 0
+    for r in rows:
+        if r["id"] >= BLACKLIST_ID_BASE:
+            real = _charid_of_name(args, r["name"])
+            if real is not None and real not in [x["id"] for x in rows]:
+                r["id"] = real
+                fixed += 1
+    if fixed:
+        blacklist_save(args, rows)
+        print("[feworld]    blacklist: %d synthetic id(s) replaced by the real "
+              "charid" % fixed, flush=True)
     payload = struct.pack(">I", len(rows))
     for r in rows:
         payload += (struct.pack(">I", r["id"])

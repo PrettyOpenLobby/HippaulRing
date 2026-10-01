@@ -412,3 +412,24 @@ def stored_equip_rows(args, only_uid=None):
         if uid in worn or only_uid is not None:
             rows.append((uid, int(no), i, worn.get(uid), ct))
     return rows
+
+
+def pocket_refill(equip, rows, used_uid, item_no):
+    """The stored worn map after pocket item `used_uid` ran out: (equip, uid).
+
+    Manual p.45: "When a pocket item is used up, the next one of the same item
+    from the inventory moves in automatically" (audit B17). `rows` is the bag
+    AFTER the use. The next bag row holding `item_no` that is not already worn
+    takes the used item's entry IN PLACE -- worn_layout hands out 11/12 in list
+    order, so keeping the position keeps it in the same pocket. With none,
+    the entry is dropped and the pocket stays empty (uid None)."""
+    worn = {int(u) for _sl, u in equip}
+    nxt = next((int(r[0]) for r in itemrecords.item_rows(rows)
+                if int(r[1]) == int(item_no) and int(r[0]) not in worn), None)
+    out = []
+    for sl, u in equip:
+        if int(u) != int(used_uid):
+            out.append((int(sl), int(u)))
+        elif nxt is not None and int(sl) == POCKET_SLOT_TYPE:
+            out.append((int(sl), nxt))
+    return out, (nxt if any(int(u) == nxt for _s, u in out) else None)

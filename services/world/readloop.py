@@ -17,7 +17,44 @@ def serve(conn, args, session, outbound, mode, be):
     try:
         _serve_loop(conn, args, session, outbound, mode, be)
     finally:
+        session_teardown()
         chat._chat_room_leave()
+
+
+def session_teardown():
+    """The session is over (logout, disconnect, idle hang-up): leave the party
+    and cancel any trade, on THIS thread, while the chat room still lists the
+    session so the relays to the others can be posted. Until 2026-10-01
+    nothing did, so a logged-out player kept a party row ("already in a
+    party" at relog) and a trade partner kept session["trade"] forever.
+    Looked up in sys.modules: an extension that was not loaded has nothing
+    to tear down. Each step is guarded -- a teardown must never raise."""
+    import sys
+    for name in ("feparty", "fetrade"):
+        mod = sys.modules.get(name)
+        fn = getattr(mod, "session_end", None) if mod is not None else None
+        if fn is None or getattr(mod, "fw", None) is None:
+            continue
+        try:
+            fn()
+        except Exception as e:                         # noqa: BLE001
+            print("[feworld] %s.session_end failed: %r" % (name, e),
+                  flush=True)
+
+
+def _field_out_teardown():
+    """Field Out's share of session_teardown: feparty.field_out (nothing to
+    the leaver, whose scene is going away) and fetrade.session_end."""
+    import sys
+    for name, attr in (("feparty", "field_out"), ("fetrade", "session_end")):
+        mod = sys.modules.get(name)
+        fn = getattr(mod, attr, None) if mod is not None else None
+        if fn is None or getattr(mod, "fw", None) is None:
+            continue
+        try:
+            fn()
+        except Exception as e:                         # noqa: BLE001
+            print("[feworld] %s.%s failed: %r" % (name, attr, e), flush=True)
 
 
 def _serve_loop(conn, args, session, outbound, mode, be):
@@ -668,6 +705,21 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                     live_atk = campaignview.campaign_attacker(args, gid)
                     if live_atk:
                         atk = int(live_atk)
+                    elif getattr(args, "campaign", "off") == "on":
+                        # --peace-atk-id (2026-10-01): with --field-nations
+                        # set, a field NOBODY is attacking still named the
+                        # knob's attacker. `none` = 0xFFFFFFFF, the record's
+                        # own unset ((ID:-1), what the dat path below serves
+                        # when no knob is given); `zero` = 0. The name goes
+                        # empty with it (an inline buffer: one NUL, never
+                        # left unwritten). PARTIAL: neither has been seen on
+                        # the continent map under --field-nations, so the
+                        # default `knob` keeps today's record.
+                        pk = str(getattr(args, "peace_atk_id", "knob") or "knob")
+                        if pk == "none":
+                            atk = 0xFFFFFFFF
+                        elif pk == "zero":
+                            atk = 0
                     vals["def_id"] = dfn
                     vals["def_name"] = args.force_table.get(dfn, {}).get("name", "")
                     vals["atk_id"] = atk
@@ -2184,7 +2236,7 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                            "fewiki 2006 (fv_consum.txt): a potion only replaces "
                            "one of equal or lower rank"
                            % (fx["stat"].upper(), cur["tier"]))
-            new_rows, gone = list(old), []
+            new_rows, gone, refill_uid = list(old), [], None
             if not why:
                 i, row = hit[0]
                 # ONE. `arg1` is 1 in the only capture we have and is NOT
@@ -2204,10 +2256,19 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                     # the pocket item is GONE from the bag: forget its worn
                     # entry too, or the next login re-fills the pocket (a
                     # stack that still has some keeps its entry)
+                    keep = [tuple(e) for e in equip if int(e[1]) != uid]
+                    if getattr(args, "pocket_refill", "off") == "on":
+                        # manual p.45 (audit B17): the next of the same item
+                        # in the bag moves into the emptied pocket
+                        keep, refill_uid = equipment.pocket_refill(
+                            equip, new_rows, uid, row[1])
                     character._store_char_field(args, "equip",
-                                      [list(e) for e in equip if int(e[1]) != uid])
+                                      [list(e) for e in keep])
                     print("[feworld]    pocket uid %d emptied from the stored "
-                          "worn map (pockets are worn slots)" % uid, flush=True)
+                          "worn map (pockets are worn slots)%s"
+                          % (uid, "" if refill_uid is None else
+                             "; uid %d moves in (--pocket-refill)" % refill_uid),
+                          flush=True)
             if why:
                 wire.send(conn, outbound,
                      wire.inner_msg(0x108A, struct.pack(">II", 0, uid),
@@ -2236,6 +2297,16 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                       flush=True)
                 inventory.bag_layout_push(conn, outbound, mode, be, args, old, new_rows,
                                 gone, "used uid %d (item %d)" % (uid, item_no))
+                if refill_uid is not None:
+                    # AFTER the layout push, so the emptied pocket is free and
+                    # the bag slot is the one the client now draws it in: the
+                    # same 0x107A worn-marker reflection a 0x2098 pocket
+                    # assign gets (Equip picks the first free of 11..12)
+                    equipment.equip_reflect_push(
+                        conn, outbound, mode, be, args,
+                        equipment.stored_equip_rows(args, only_uid=refill_uid),
+                        "pocket refill: uid %d replaces used-up uid %d"
+                        % (refill_uid, uid))
         elif (real_id == 0x204C and args.ui_auto == "ok"
               and getattr(args, "bag_organize", "on") != "off"):
             # KEY: SELLING, and it is the last of the acknowledge-and-do-nothing
@@ -2514,11 +2585,25 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # say it finished. Answering OK and stopping would move the hang ten
             # seconds later rather than fix it.
             if real_id == 0x209A and mid == ok and args.validate_finish > 0:
-                sess._SESSION["validate_due"] = time.time() + args.validate_finish
+                # In a CAPITAL it is immediate (manual p.22/23: "In a capital
+                # logout is immediate"). 0x1157's arm calls the exit
+                # (0x050AD420) without looking at the countdown, so a FINISH
+                # right after the OK ends it at once. --validate-capital wait
+                # keeps the 10 s everywhere. Damage during the wait cancels
+                # it (death.validate_cancel_on_hit, 0x1158).
+                here = sess._SESSION.get("field")
+                instant = (getattr(args, "validate_capital", "instant") == "instant"
+                           and here is not None
+                           and int(here) in zones.CAPITAL_GROUP_IDS)
+                wait = 0.0 if instant else args.validate_finish
+                sess._SESSION["validate_due"] = time.time() + wait
                 print("[feworld]    validate sequence armed: 0x1157 FINISH in "
-                      "%.1fs (the client's own countdown constant is 0x2710 = "
-                      "10000ms, so the default matches what it already expects)"
-                      % args.validate_finish, flush=True)
+                      "%.1fs (%s)" % (wait,
+                                      "in capital %s: immediate" % here if instant
+                                      else "the client's own countdown constant "
+                                      "is 0x2710 = 10000ms, so the default "
+                                      "matches what it already expects"),
+                      flush=True)
             if real_id == 0x209C:
                 sess._SESSION.pop("validate_due", None)
             # THE DUMMY AREA. 0x1045 releases the field, and mode 0x0B then
@@ -2550,6 +2635,12 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 # (the one whose failure it logs at 5021) could not close.
                 #
                 # Pushed AFTER war_result_push above, which reads the session.
+                #
+                # 2026-10-01: leaving the field screen leaves the party
+                # (manual p.43) and ends any trade (it needs both players in
+                # one field) -- before in_field goes, so the relays to the
+                # others are posted from a session that still looks present.
+                _field_out_teardown()
                 if sess._SESSION.get("in_field"):
                     print("[feworld]    FIELD OUT: in_field cleared (was field "
                           "%s). Until today this flag was never cleared, so the "
@@ -2650,7 +2741,10 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # 0x14 stride). Echoing the requester's charid -- which is what the
             # request carries -- would give every row the SAME id and make
             # removing one remove the wrong one. blacklist_add() allocates a
-            # stable id instead.
+            # stable id instead: since 2026-10-01 the REAL charid of the
+            # stored character with that name (any account, case-folded),
+            # which is what the client's own id test on 0x112E/0x2052
+            # compares; a synthetic id only for a name no character has.
             f = inner[2:]
             if args.blacklist == "off":
                 print("[feworld]    0x%04X blacklist request -- NOT ANSWERED "

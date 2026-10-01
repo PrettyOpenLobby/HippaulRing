@@ -155,6 +155,8 @@ import struct
 import threading
 import time
 
+from world import status as _hide_status
+
 fw = None                       # the feworld module, handed in by register()
 
 #: a reported position further than this from the last one relayed is a
@@ -677,6 +679,16 @@ def on_move_field(ctx, inner):
             fw._SESSION["pres_gone"] = True
     except Exception:                                   # noqa: BLE001
         pass
+    # 2026-10-01: an area change leaves the party (manual p.43). feparty
+    # compares the member's last outdoor field with the current one; its own
+    # tick does the same on every message, this only makes it prompt.
+    try:
+        import sys
+        party = sys.modules.get("feparty")
+        if party is not None and party.fw is not None:
+            party.area_check(ctx)
+    except Exception:                                   # noqa: BLE001
+        pass
     return False
 
 
@@ -1118,6 +1130,12 @@ def visible_peers(s, key, now, args):
         # PvP kill has to produce -- the other player falling over -- was the
         # one thing it did not.
         if ps.get("player_dead") and _dead_mode(args) == "drop":
+            continue
+        # HIDE (manual p.38): invisible to the enemy nation, still drawn for
+        # allies. --hide-presence on only: dropping the peer here is a 0x1004
+        # now and a fresh 0x1006 when Hide ends, unproven for a live peer.
+        if (getattr(args, "hide_presence", "off") == "on"
+                and _hide_status.hidden_from(s, ps)):
             continue
         if not 0 < cid < limit:
             _once(("range", cid), "charid %d is outside 1..%d (--monster-base "

@@ -335,6 +335,57 @@ def _session_named(name):
     return None
 
 
+def _blocked(ctx, ps, name):
+    """Either player has the other blacklisted (world/character.py)."""
+    try:
+        return bool(fw.character.blacklist_blocked(
+            ctx.args, ps.get("account"), ps.get("charid"), name or ""))
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
+def _crystal_cap(args):
+    """The carry cap: fecampaign's --crystal-carry-max (50, SE warsystem01:
+    トレードなどで最大50まで; manual p.50: "can hold up to 50 through trades
+    from allies")."""
+    try:
+        return int(getattr(args, "crystal_carry_max", 50) or 50)
+    except (TypeError, ValueError):
+        return 50
+
+
+def _crystal_of(args, party):
+    """What `party` carries now, read from the store (any thread), or None
+    when unknown: a phantom, no stored character, or the channel off."""
+    if party.kind != "session" or party.session is None:
+        return None
+    if party.is_me():
+        return _money(args, "crystal", "crystal")
+    acct, cid = party.session.get("account"), party.session.get("charid")
+    if not acct or cid is None:
+        return None
+    try:
+        import felobby
+        for c in felobby.load_roster(felobby._default_store(), acct) or []:
+            if c.get("charid") == cid:
+                v = c.get("crystal")
+                if v is None:
+                    v = getattr(args, "crystal", None)
+                return None if v is None else int(v)
+    except Exception:                                  # noqa: BLE001
+        return None
+    return None
+
+
+def _crystal_after(args, party, gives, takes):
+    """(after, cap) for `party` once the trade moves `gives` out and `takes`
+    in, or None when its holding is unknown."""
+    have = _crystal_of(args, party)
+    if have is None:
+        return None
+    return int(have) - int(gives) + int(takes), _crystal_cap(args)
+
+
 def _u16(f, o):
     return struct.unpack_from(">H", f, o)[0] if len(f) >= o + 2 else None
 
@@ -396,7 +447,11 @@ def _send_inbound_request(ctx, tid, requester_name, face):
 # ---------------------------------------------------------------------------
 def _deliver(ctx, trade, party, op, **kw):
     """Returns True when the op reached a thread (or the party is a phantom)."""
-    payload = dict(kw, op=op, tid=trade.tid)
+    # the Trade rides along (an in-process queue): a cancel is posted AFTER
+    # the record leaves TRADES, and the partner must still be able to act on
+    # it -- until 2026-10-01 every cancel relay was "no such trade -- dropped"
+    # and the partner's session["trade"] stayed set for good
+    payload = dict(kw, op=op, tid=trade.tid, trade=trade)
     if party.kind != "session":
         return True
     if party.is_me():
@@ -414,10 +469,16 @@ def on_relay(ctx, payload):
     op, tid = payload.get("op"), payload.get("tid")
     with _LOCK:
         trade = TRADES.get(tid)
+        if trade is None and op in ("cancel", "reqcancel"):
+            trade = payload.get("trade")
         me = trade.mine() if trade else None
     if trade is None or me is None:
         _log("relay %r for tid %s: no such trade on this session -- dropped"
              % (op, tid))
+        return
+    if op in ("cancel", "reqcancel") and fw._SESSION.get("trade") not in (None, tid):
+        _log("relay %r for tid %s: this session is in tid %s now -- dropped"
+             % (op, tid, fw._SESSION.get("trade")))
         return
     if op == "request":
         fw._SESSION["trade"] = tid
@@ -464,6 +525,40 @@ def on_relay(ctx, payload):
         fw._SESSION["trade"] = None
     else:
         _log("relay op %r unknown -- dropped" % (op,))
+
+
+def session_end(why="disconnect"):
+    """This session is going away (logout, disconnect, Field Out): cancel
+    every trade it is a party to and tell the partner on THEIR thread --
+    0x2057 [tid][2] while the request is pending, 0x2056 [tid][1] once the
+    window is open (it prints 'Partner cancelled the trade'). Called from
+    world/readloop.py. Never raises."""
+    if fw is None:
+        return 0
+    try:
+        me_s = fw._TLS.session
+        with _LOCK:
+            mine = [t for t in TRADES.values()
+                    if any(p.kind == "session" and p.session is me_s
+                           for p in t.parties())]
+            for t in mine:
+                TRADES.pop(t.tid, None)
+        for t in mine:
+            me = t.mine()
+            requested = t.state == "requested"
+            t.state = "cancelled"
+            if me is not None:
+                _deliver(None, t, t.other(me), "reqcancel" if requested
+                         else "cancel", reason=2 if requested else 1)
+            _log("tid %d cancelled: %s (%s)" % (t.tid, why, me.name if me else "?"))
+        if me_s is not None and me_s.get("trade"):
+            me_s["trade"] = None
+        return len(mine)
+    except Exception:                                  # noqa: BLE001
+        import traceback
+        _log("session_end(%s) failed:" % why)
+        traceback.print_exc()
+        return 0
 
 
 def _finish(ctx, trade, me, op, reason):
@@ -529,6 +624,10 @@ def _apply_side(ctx, trade, me):
     code, why = _validate_give(args, dict(give, raw=[(u, c) for u, _n, c in give["items"]]))
     if code:
         return False, why
+    if take["b"]:
+        got = _crystal_after(args, me, give["b"], take["b"])
+        if got is not None and got[0] > got[1]:
+            return False, "crystal would be %d, cap %d" % got
     old = fw.item_rows(args)
     charid = int(fw._SESSION.get("charid") or 0)
     new_rows, gone = list(old), []
@@ -581,6 +680,12 @@ def _try_complete(ctx, trade, me):
     first and reports back ('applied'), then this side applies."""
     other = trade.other(me)
     code, why = _validate_give(ctx.args, dict(me.offer, raw=[(u, c) for u, _n, c in me.offer["items"]]))
+    if not code:
+        # the crystal cap on THIS side (the partner's is checked on its own
+        # thread in _apply_side, which runs first and cancels cleanly)
+        got = _crystal_after(ctx.args, me, me.offer["b"], other.offer["b"])
+        if got is not None and got[0] > got[1]:
+            code, why = 14, "I would hold %d crystal, cap %d" % got
     if code:
         _log("   my half no longer validates (%s)" % why)
         _ng(ctx, 0x1147, trade.tid, 0, NG_COMPLETE, "MSG_TRADE_COMPLETE_NG")
@@ -631,6 +736,23 @@ def on_request(ctx, inner):
         # the clicked unit IS a player: fepresence draws each peer under its
         # charid, so no `!trade bind` is needed between two live clients
         ent = _session_by_charid(target)
+    if ent is not None:
+        ps = ent["session"]
+        mine, theirs = fw._SESSION.get("field"), ps.get("field")
+        if mine is not None and theirs is not None and mine != theirs:
+            # a trade is between two players in one field (they have to
+            # target each other); the client's request table has no "other
+            # field" text, so the partner reads as not present
+            ctx.reply(0x108C, struct.pack(">I", 5),
+                      why="MSG_TRADE_REQUEST_NG 5 (partner in field %s, me in %s)"
+                      % (theirs, mine))
+            return
+        if _blocked(ctx, ps, ent["name"]):
+            # manual p.48: blacklisted players cannot trade with you, both
+            # ways. 8 is the answer the client's own auto-decline amounts to
+            ctx.reply(0x108C, struct.pack(">I", 8),
+                      why="MSG_TRADE_REQUEST_NG 8 (blacklist, one way or the other)")
+            return
     with _LOCK:
         tid = _NEXT[0]
         _NEXT[0] = (_NEXT[0] % 0xFFFF) + 1
@@ -759,6 +881,16 @@ def on_entry(ctx, inner):
     if len(raw) > slots:
         _ng(ctx, 0x108F, tid, 4, NG_ENTRY, "MSG_TRADE_ENTRY_NG")
         return
+    if b:
+        # NG 14 "Their crystals would overflow": what the partner holds, less
+        # what they offer (if entered), plus this offer, against the cap
+        got = _crystal_after(ctx.args, other,
+                             other.offer["b"] if other.entered else 0, b)
+        if got is not None and got[0] > got[1]:
+            _log("   refused: %s would hold %d crystal, cap %d"
+                 % (other.name, got[0], got[1]))
+            _ng(ctx, 0x108F, tid, 14, NG_ENTRY, "MSG_TRADE_ENTRY_NG")
+            return
     with _LOCK:
         me.offer = {"items": [(u, by_uid[u][1], c) for u, c in raw], "a": a, "b": b}
         me.entered = True

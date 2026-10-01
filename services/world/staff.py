@@ -1,6 +1,6 @@
 """Capital staff: role lines, the free weapon, the inn fee."""
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import events, itemrecords, progression, shops, skilllist, town, wallet, zones
+from . import character, events, inventory, itemrecords, progression, sess, shops, skilllist, town, wallet, zones
 
 # The capital roster's NON-shop roles and what each says. The five capitals
 # share the twenty ROLES and their script SLOTS (band 2 = the town, band 3 =
@@ -54,6 +54,114 @@ def prize_clerk_line(args):
             % (int(r), "" if int(r) == 1 else "s"))
 #: every Manager slot gives the King's message + the nation's news
 ROLE_MANAGERS = {(3, 1), (3, 2), (3, 3)}
+
+# ---------------------------------------------------------------------------
+# KEY: THE KING'S MESSAGE IS RECORDED (2026-10-01, audit B10). Manual p.30:
+# "You can only join wars after receiving the king's message" from the
+# Manager. The Manager's talk sets KING_MESSAGE_KEY on the stored character
+# (festore keeps unknown keys in its `extra` column), and
+# king_message_heard(charid) reads it back for the war join.
+#
+# The same talk hands a new character two books, once (manual p.30 side box:
+# "new players get two books from the Manager with basic instructions and
+# controls"). STARTER_BOOKS, from the client's own book tables (dat.pak
+# fet_bookset_title / fet_bookset_content), both by the 兵士教練協会 (Soldier
+# Training Association), both in FE_ITEM_DATA:
+#   1850 兵士手帳 "how to move as a soldier": the controls (W/S/A/D, Q/E side
+#        steps, Space jump, left click attack/talk, right click pick up,
+#        Z target menu, Alt cursor, H control help, Field Out).
+#   1841 ＨＰ・Ｐｗブック: the two-volume set of 1838 (HP: what it is, the
+#        Regenerate items, using an item) and 1840 (Pw: what it is, C to
+#        crouch, Power Pots, the item pockets and F/G).
+# CHOSEN: which two. The pick is by content; nothing names the retail pair.
+# The 世界学入門 "Tutorial Book" series (1785..1799) would read more like a
+# primer, but those item numbers are NOT in this client's FE_ITEM_DATA, and an
+# item number the client cannot look up is a crash (shops.py, 2026-09-05 #5).
+# 1835 訓練紹介状 (the letter sending you to the Trainer) is the other
+# candidate.
+# ---------------------------------------------------------------------------
+KING_MESSAGE_KEY = "king_message"
+STARTER_BOOKS_KEY = "starter_books"
+STARTER_BOOKS = (1850, 1841)
+#: charids already seen to have heard it (it is never un-heard)
+_KING_HEARD = set()
+
+
+def king_message_record(args):
+    """Mark the session character as having heard the King's message. True
+    when it is stored (or already was)."""
+    charid = sess._SESSION.get("charid")
+    if charid is not None and int(charid) in _KING_HEARD:
+        return True
+    if character._load_char_field(args, KING_MESSAGE_KEY, None):
+        ok = True
+    else:
+        ok = character._store_char_field(args, KING_MESSAGE_KEY, 1)
+        print("[feworld]    the King's message: heard by charid %s -- %s"
+              % (charid, "stored" if ok else "NOT stored (no stored character)"),
+              flush=True)
+    if ok and charid is not None:
+        _KING_HEARD.add(int(charid))
+    return bool(ok)
+
+
+def king_message_heard(charid):
+    """True when the character `charid` (any account) has heard the King's
+    message from a Manager. Reads the store; a store fault answers False."""
+    try:
+        cid = int(charid)
+    except (TypeError, ValueError):
+        return False
+    if cid in _KING_HEARD:
+        return True
+    try:
+        import felobby
+        path = felobby._default_store()
+        for acct in (felobby.store_accounts(path) or {}):
+            for c in felobby.load_roster(path, acct) or []:
+                if int(c.get("charid") or -1) == cid:
+                    if c.get(KING_MESSAGE_KEY):
+                        _KING_HEARD.add(cid)
+                        return True
+                    return False
+    except Exception:                                  # noqa: BLE001
+        pass
+    return False
+
+
+def starter_books_due(args):
+    """The STARTER_BOOKS this character has not been given yet ([] once they
+    have, or under --starter-books off)."""
+    if str(getattr(args, "starter_books", "on") or "on") == "off":
+        return []
+    given = character._load_char_field(args, STARTER_BOOKS_KEY, None) or []
+    have = fegamedata.items()
+    return [no for no in STARTER_BOOKS
+            if no not in given and int(no) in have]
+
+
+def starter_books_give(conn, outbound, mode, be, args):
+    """Put the due starter books in the bag (one push, the free weapon's path)
+    and record them as given. A bag without room for them gets nothing and
+    nothing is recorded, so the next talk tries again. -> the item numbers."""
+    due = starter_books_due(args)
+    if not due:
+        return []
+    old = itemrecords.item_rows(args)
+    if len(old) + len(due) > 96:
+        print("[feworld]    the Manager's books: the bag is full (%d rows) -- "
+              "not given, next talk tries again" % len(old), flush=True)
+        return []
+    new, uid = list(old), inventory.new_item_uid(args, old)
+    for no in due:
+        new.append((uid, int(no), 1, 1))
+        uid += 1
+    character._store_char_field(args, "items", [list(x) for x in new])
+    inventory.bag_layout_push(conn, outbound, mode, be, args, old, new, [],
+                              "the Manager's starter books %s" % due)
+    given = list(character._load_char_field(args, STARTER_BOOKS_KEY, None) or [])
+    character._store_char_field(args, STARTER_BOOKS_KEY, given + list(due))
+    return due
 #: [item table +0x50] slot types a WEAPON goes in: 1/9/10 two-handed (worn
 #: 0), 2 one-handed (worn 1) -- the two worn indices the cast gate reads.
 WEAPON_SLOT_TYPES = (1, 2, 9, 10)

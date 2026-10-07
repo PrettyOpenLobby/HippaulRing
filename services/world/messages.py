@@ -359,7 +359,7 @@ DEFAULT_NOTICE = "Notice|Welcome to Fantasy Earth."
 #
 # WARNING: THE TEXT IS cp932 ON THE WIRE and FE splits DBCS with IsDBCSLeadByte,
 # which answers for the SYSTEM codepage (1252 on this host), so Japanese echoed
-# back draws as dot pairs -- an earlier note. ASCII is safe.
+# back draws as dot pairs. ASCII is safe.
 _CHAT_IDS = {
     0x201A: ("/say (area)", 2),
     0x201B: ("/all", 2),

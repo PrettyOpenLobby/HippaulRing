@@ -17,7 +17,8 @@ Three things are measured and are asserted here:
      0x5045be0 +4 (u32), 0x5045bb0 +2 (u16), 0x5045b80 +1 (u8), 0x5045ca0 +4
      (f32) -- so the parse is 4*u32, u16, u8, 3*f32 = 31 bytes and no other
      split fits. A decoder that reads the skill id at the wrong offset is the
-     0x107A bug again, and the only cheap defence is a vector.
+     0x107A bug again (one format character,
+     six probes, two hours), and the only cheap defence is a vector.
 
   2. The HP push is a 0x1006 TYPE-8 record whose mask1 is 0x6 -- bit 1
      (+0x49a, HP max base) and bit 2 (+0x49e, HP current), the two rows

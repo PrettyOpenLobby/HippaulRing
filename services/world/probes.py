@@ -61,8 +61,8 @@ def stat_probe_push(conn, outbound, mode, be, args):
     2026-08-25. `felive --avatar` read the whole block before anything was
     served, and it sorted three ways: HP and Pw already carry correct values
     (so they have a writer), Skill Points has another channel, and TEN fields
-    are zero AND unnamed. Serving plausible numbers into those would be
-    an earlier note exactly -- every screen still renders
+    are zero AND unnamed. Serving plausible numbers into those would
+    launder a guess into a choice -- every screen still renders
     and nothing is learned.
 
     So each gets an IMPOSSIBLE, DISTINCT value, 4001..4010, and one look at the

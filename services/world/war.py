@@ -164,7 +164,7 @@ def war_notify(conn, outbound, mode, be, args):
     (0x0511850f), 0x1018 (0x0511823d) and 0x1019 (0x0511843b) -- have the
     identical shape, so THE WIRE CARRIES HIGH FIRST, THEN LOW. For any deadline
     short of ~49 days the high word is 0, i.e. the pair is `0,<milliseconds>`.
-    an earlier note recorded this correctly ("first u32 -> the +0x6c slot");
+    The world-door notes recorded this correctly ("first u32 -> the +0x6c slot");
     this docstring did not.
 
     WARNING: THE "Attack [Count %3d / Max %3d]" READING OF u32_1/u32_2 IS WITHDRAWN

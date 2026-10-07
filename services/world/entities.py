@@ -126,8 +126,8 @@ def draw_self_push(conn, outbound, mode, be, args):
     WARNING: THE POLARITY IS NOT ESTABLISHED, AND THAT IS WHY THIS DEFAULTS TO "off".
     The `/stealth` label says non-zero = "Draw self: OFF"; the only reader says
     non-zero = "run the self-animation block". Those two readings disagree, and
-    guessing which is right is exactly the an earlier note
-    failure -- either value renders *a* screen. `--draw-self` therefore takes
+    guessing which is right is exactly the failure to avoid -- either value
+    renders *a* screen. `--draw-self` therefore takes
     the literal wire value and sends nothing at all unless asked:
 
         --draw-self off   send nothing (default -- today's behaviour)
@@ -357,7 +357,7 @@ def add_entities(conn, outbound, mode, be, args):
     # Found 2026-08-25, minutes after skill points first worked: the test player
     # learned five skills with the five points we served, and the very next
     # field entry would have served a flat 5 again. Relaunch, spend five more,
-    # forever. That is an earlier note's shape exactly -- a constant
+    # forever. That is Tetra Master's start-money bug exactly -- a constant
     # served as a balance, materialised at every touch, and the TM version of
     # it minted 10000 gold per member before anyone noticed.
     #

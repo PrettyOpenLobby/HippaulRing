@@ -116,8 +116,8 @@ def acquire_skill(args, skill_id):
 # WARNING: A LEVEL IS A CLAIM, and we do not track progression -- so this is a knob
 # with a chosen default, said out loud, rather than a number that arrives by
 # accident. The accident is the status quo: nobody chose 0 either, and 0 is what
-# has been blocking every equip. That is an earlier note read the
-# other way round -- the unchosen zero is the bug, not the safe option.
+# has been blocking every equip. That is Tetra Master's start-money bug
+# read the other way round -- the unchosen zero is the bug, not the safe option.
 # WARNING: Bit 0 also writes [unit+0x3AC], which the Status screen draws, so whatever
 # is set here is VISIBLE to the player as their level. Do not raise it casually.
 SKILL_LIST = (0x1075, "acquired skill list (unnamed -- no NG entry, no request)",

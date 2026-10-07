@@ -836,7 +836,7 @@ def raw_relay(a):
           and mv["spd"] == (1300, 250) and near(mv["pos"], (12.0, 20.5, -28.0))
           and mv["tail"] == 0x00080000, mv)
     el = (time.monotonic() - t0) * 1000.0
-    check("...A:B = LEX's clock at arrival (100000 + ms since his sample), A 0",
+    check("...A:B = the sender's clock at arrival (100000 + ms since its sample), A 0",
           mv is not None and mv["ticks"][0] == 0
           and 100000 <= mv["ticks"][1] <= 100000 + el + 1500, (mv, el))
     check("...the pump's own state follows (pos = the relayed target)",

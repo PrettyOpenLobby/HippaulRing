@@ -55,12 +55,12 @@ def crystal_push(conn, outbound, mode, be, args, value=None):
     WARNING: IT IS NOT A BALANCE. 0x04fe4e9a compares the incoming value against the
     stored one and plays the E25_GetCrystal pickup effect when it INCREASED, so
     the client treats this as an authoritative total, not a delta -- and
-    nothing here debits it. Do not build the summon economy on it:
-    an earlier note is what that costs.
+    nothing here debits it. Do not build the summon economy on it: a
+    price that depends on which door the player came in by is what that costs.
 
     WARNING: BIT 0 (+0x8a8) IS LEFT ALONE. It is unnamed, zeroed beside CRYSTAL by the
     same ctor, and drawn by no screen we have opened. Serving an invented value
-    into an unnamed field is an earlier note exactly.
+    into an unnamed field launders a guess into a choice.
     """
     # `value` is an explicit one-off (the `!crystal N` probe) and is NOT
     # persisted; otherwise the per-character stored value, seeded from the
@@ -95,13 +95,12 @@ def wallet_push(conn, outbound, mode, be, args):
 
     \u26a0 UNSET SENDS NOTHING. A zero here is a real value -- it would show the
     player as broke -- so "no flag" and "zero gold" have to be different
-    things. This is the an earlier note shape: a wallet that reads
+    things. This is Tetra Master's start-money bug: a wallet that reads
     zero because nobody served it looks exactly like a wallet that is empty.
 
     \u26a0 NOT PERSISTED. This serves whatever the flag says on every field
     entry; it is not a balance, and nothing debits it. Do not build buying or
-    selling on it until there is a store behind it -- see
-    an earlier note for how that goes wrong.
+    selling on it until there is a store behind it.
 
     \u26a0 CRYSTAL sits between Skill Points and GOLD in the same table
     (0x052e29c8) and NONE of the sentinels landed on it, so its offset is not

@@ -20,8 +20,8 @@ WHERE IT LIVES. The `fe_character` table in the stack's PostgreSQL database,
 through OpenLobby's `polcore.db` (POL_DATABASE_URL; see fedb.py for how the
 package is found and how HippaulRing's migrations are numbered). Until
 2026-09-27 it was its own SQLite file, `data/fe.db`, kept apart from
-accounts.db because a container restart had truncated that file once
-. A server database has no such file to
+accounts.db because a container restart had truncated that file once.
+A server database has no such file to
 share, so the table sits beside OpenLobby's; the `fe_` prefix keeps the names
 apart.
 

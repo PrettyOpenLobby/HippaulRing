@@ -117,7 +117,7 @@ def status_push(conn, outbound, mode, be, args):
     against the dump's loads did not converge -- the stack delta drifts through
     the sprintf sequence -- so it is left UNKNOWN rather than guessed.
 
-    Guessing here is the an earlier note failure exactly:
+    Guessing here is exactly the failure to avoid:
     a wrong slot would put the player's skill points into `gold` or `fame`,
     every screen would still render, and it would read as "served, works".
 

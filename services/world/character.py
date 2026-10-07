@@ -310,7 +310,7 @@ def _seeded_value(args, key, seed):
 
     `seed` None still sends NOTHING, whatever the store holds -- that flag
     being unset means the channel is off, and "unset" must not look like
-    "broke" (the an earlier note shape).
+    "broke".
 
     WARNING: Since 2026-09-11 GOLD and RING ARE SPENT (the shops, the inn, the bank)
     -- always through gold_get / rings_get / wallet_charge / wallet_credit,

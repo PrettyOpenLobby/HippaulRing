@@ -244,7 +244,7 @@ def dat_door_for(args, gid, x, z, y=None):
     0x05000450 is not a ground snap -- it calls 0x04FF7EF0, the CAPITAL
     PREDICATE, and is the field-load path. Whether the client snaps a served
     position to the terrain at all is UNVERIFIED, and until it is, a wrong Y
-    has to be assumed to matter. an earlier note
+    has to be assumed to matter.
     """
     if getattr(args, "doors", "off") != "dat":
         return None

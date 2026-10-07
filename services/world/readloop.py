@@ -1220,7 +1220,6 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # island because the only frame ever captured said 1, and under
             # --islands 5 --groups 1 the island and its single group BOTH have
             # id 1: the observation could not tell them apart.
-            # an earlier note
             #
             # Under --world dat they diverge -- area 39 is on island 3 -- so
             # the poll now names a real field, and a war layer that keys off

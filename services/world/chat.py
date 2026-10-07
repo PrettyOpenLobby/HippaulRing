@@ -340,8 +340,8 @@ def chat_send(conn, outbound, mode, be, args, mid, parts, speaker=None):
 
     KEY: `0x504d410` matches on BOTH `[obj+0x3c]` (id) and `[obj+0x24]` (kind,
     and it passes **1**, which is the kind the player reads) -- the same pair of
-    fields the 0x2023 movement family gates on. an earlier note: CHECK THE
-    GATE BEFORE THE PAYLOAD.
+    fields the 0x2023 movement family gates on. Check the
+    gate before the payload.
 
     So the speaker id must NOT resolve to a live kind-1 unit if the line is to
     reach the chat log, which is what a served/relayed line wants. 0 is the

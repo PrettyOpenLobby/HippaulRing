@@ -27,7 +27,7 @@ from . import progression, wire
 #     usable = ([skill+0xd0] & 0x1E000000) == 0
 #              or ([player+0x2b4] & [skill+0xd0] & 0x1E000000) != 0
 #
-# THE RETRACTION. an earlier note recorded that "our echo's
+# THE RETRACTION. An earlier note recorded that "our echo's
 # auto-select runs BEFORE that pass". It does not: the inbound 0x2029 worker
 # calls the local setter 0x05162360, which calls vtbl+0x3c at 0x0516238e and
 # only THEN auto-selects at 0x05162391. The flag is always recomputed. What

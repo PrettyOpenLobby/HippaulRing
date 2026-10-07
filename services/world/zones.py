@@ -275,7 +275,7 @@ INNER_CAPITAL_PAIRS = {21: 91, 39: 92, 57: 93, 62: 94, 78: 95}
 #: polshim.<pid>.log the whole time: `[DATA\capital\map01_00.oct] Stand-By ok.`
 #: on entering 39, and `map00_01.oct` on entering 91. Two lines, no ambiguity.
 #: The disassembly was read three times and never disagreed with itself; only
-#: the running client did. an earlier note.
+#: the running client did.
 #:
 #: The pairing is regular once aligned: each of the five capitals the map
 #: screen offers (21, 39, 57, 62, 78) has a 9x partner holding the OTHER half

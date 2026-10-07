@@ -46,7 +46,7 @@ def main(argv=None):
     feworld.territory_load(args)
     femap.register(feworld)
     people = [("Lex", 5, 1), ("Quinn", 5, 3), ("Elena", 12, 5), ("Rin", 12, 4),
-              ("Ash", 12, 4), ("Ned", 62, 4)]
+              ("Elm", 12, 4), ("Ned", 62, 4)]
     feworld.ext_sessions = lambda: [
         {"key": i, "name": n, "session": {"in_field": True, "field": a,
                                           "pres_card": {"force": f}}}

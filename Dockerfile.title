@@ -17,3 +17,4 @@ COPY services/festore.py /app/festore.py
 COPY services/fetitle.py /app/fetitle.py
 
 ENV POL_TITLES=fetitle
+

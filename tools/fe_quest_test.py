@@ -121,7 +121,8 @@ def main():
             args, {"name": "Someone", "script": 999}) is None)
         check("--quests off: a giver plays its plain line",
               feworld.quest_script_for(_args(quests="off"), GIVER) is None)
-        check("all ten 2006 givers are mapped", len(feworld.QUEST_BY_GIVER) == 10)
+        check("all twelve 2006 givers are mapped (cheese, goblin book, luck)",
+              len(feworld.QUEST_BY_GIVER) == 12)
 
         say("first talk: offer -> menu -> Yes -> accepted at the close")
         steps = talk(args)

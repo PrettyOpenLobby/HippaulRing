@@ -118,12 +118,30 @@ WARNING: THE GATE, and it is worse than "the window must be open". The c3 dispat
     0xA067..68, 0xA06A..6B             -> 0x05058887: copy, jmp epilogue. NO POST.
     0xA081..82, 0x111C..1D             -> 0x0505889e: copy, jmp epilogue. NO POST.
 
-The epilogue 0x05058b17 is `mov al,1; ret` -- the message is consumed. So the
-header list, the body, the delete ack and the attachment ack reach the Mail
-window ONLY if the pre-dispatch notifier at 0x050475d3 (`[0x535cec8]->vt[1](id)`,
-the task manager 0x2074 registers with) delivers them; that object is NULL in
-the dump and could not be read. A live client decides this; the server side
-is complete either way. Every send below logs the gate.
+The epilogue 0x05058b17 is `mov al,1; ret` -- the message is consumed.
+
+SETTLED 2026-10-08 (read to the end, not left to a live run): those replies
+NEVER reach the Mail window in this build.
+  * 0x0509fca0 is only a two-field constructor ({stream, id} into a stack
+    local); the copy is not a hand-off.
+  * The window poster 0x0509fc50 walks the open-window list [0x53432d8] and
+    calls each window's vt+0x54 (the Mail window's is 0x050c5280, the switch
+    above). It has 43 callers; none is in the 0xA067/0xA06A/0xA081/0x111C
+    arms. The Mail window joins that list on open (0x050c5260 ->
+    0x0509fb50) and leaves it on close (0x050c5270).
+  * The pre-dispatch notifier is the request TRACKER, not a router:
+    [0x535cec8] is built at 0x051b59f0 (vtable 0x05298608); vt[1]
+    0x051b5cc0 finds the pending request whose registered reply ids contain
+    the id and erases it ("erase >>> 0x%04x" 0x52f25d0). No data moves.
+  So the header list can never fill, a mail can never be opened and a
+  delete can never be confirmed on screen, whatever the server sends.
+  The parts that DO reach the window are 0xA051/0xA052 (send ack / the NG
+  text) and 0xA061/0xA064 (counts), and the client never asks for counts:
+  the 0xA060/0xA063 builders (0x050c40a0, 0x050c4200) have no caller. The
+  window does ask for headers, once per folder click (0x050c1e38 ->
+  0x050c4330), with index 0xFFFFFFFF and count 0x7FFFFFFF ("all").
+  Hence the --mail-notice delivery below (OURS): the message window prints
+  what the Mail window cannot show. Every send still logs the gate.
 
 PERSISTENCE: the `fe_mail` table in the stack's PostgreSQL database
 (POL_DATABASE_URL, through fedb.py; migration fe_migrations/1002_fe_mail.sql).
@@ -139,8 +157,11 @@ NOT DONE / NOT POSSIBLE:
     window's switch and the CHECKMARK builder has no caller (xref empty) --
     dead code in this build; nothing to serve.
   * A "you have mail" push: no inbound id carries one (0x303D is the only
-    other id 0x05058815 posts and it is not a mail id). The recipient's live
-    session gets a server LOG line via the relay, nothing on screen.
+    other id 0x05058815 posts and it is not a mail id). OURS, --mail-notice:
+    the 0xF900 '@' system line (0x0517ef60 -> 0x05121fd0, the message
+    window) tells the player at field entry and when a mail arrives live;
+    'full' (default) also prints each unread mail and marks it read, since
+    the Mail window cannot display it (see SETTLED above).
 """
 import struct
 import time
@@ -216,6 +237,7 @@ def register(feworld):
     fw.register_gm(gm)
     fw.register_args(add_args)
     fw.register_relay("mail.new", on_relay_new)
+    fw.register_pump(notice_pump)
     for mid, name in NAMES.items():
         fw.KNOWN.setdefault(mid, name)
 
@@ -245,6 +267,20 @@ def add_args(ap):
                     help="the FROM name on mail sent with `!mail send`")
     ap.add_argument("--mail-order", default="new", choices=("new", "old"),
                     help="header paging order: newest first (default) or oldest")
+    ap.add_argument("--mail-notice", default="full",
+                    choices=("full", "count", "off"),
+                    help="OURS (no retail mail notice exists on the wire, and "
+                         "this client never posts the mail list to its "
+                         "window): print mail in the message window with the "
+                         "0xF900 '@' system line, at field entry and when a "
+                         "mail arrives live. full (default) = the unread "
+                         "count, then each unread mail (from, subject, text) "
+                         "and mark it read; count = only the unread count; "
+                         "off = nothing on screen")
+    ap.add_argument("--mail-notice-max", type=int, default=5,
+                    help="--mail-notice full prints at most this many unread "
+                         "mails at a time, oldest first (the rest wait for "
+                         "the next field entry)")
 
 
 # --------------------------------------------------------------------------- #
@@ -432,8 +468,9 @@ def _gate(mid, why):
         mid, why,
         "posted to open windows by 0x05058847; the Mail window must be open"
         if posted else
-        "c3 arm 0x05058887/0x0505889e COPIES AND DOES NOT POST; reaches the "
-        "Mail window only via the task notifier [0x535cec8] (unresolved)"),
+        "c3 arm 0x05058887/0x0505889e consumes it and never posts it, so "
+        "it does not reach the Mail window in this build (settled "
+        "2026-10-08; --mail-notice prints the mail instead)"),
         flush=True)
 
 
@@ -625,10 +662,109 @@ def on_send(ctx, inner):
 
 
 def on_relay_new(ctx, payload):
-    print("[femail]    NEW MAIL for this session: %r from %r (mail %s). The "
-          "client learns of it when it next asks 0xA063 with the Mail window "
-          "open." % (payload.get("subject"), payload.get("from"),
-                     payload.get("id")), flush=True)
+    print("[femail]    NEW MAIL for this session: %r from %r (mail %s)"
+          % (payload.get("subject"), payload.get("from"), payload.get("id")),
+          flush=True)
+    if ctx.session.get("in_field") and ctx.session.get("field_ready"):
+        deliver_notice(ctx, live=True)
+    else:
+        # not on a screen that prints yet: the field-entry pump will
+        ctx.session.pop("mail_noticed", None)
+
+
+# --------------------------------------------------------------------------- #
+# --mail-notice: the message window carries what the Mail window cannot
+# --------------------------------------------------------------------------- #
+#: 0xF900's payload is clipped to the client's 0x200 buffer (world/gm.py);
+#: a line of mail text is cut well below it so a long body reads as lines.
+NOTICE_LINE_MAX = 120
+#: Seconds after field_ready before the field-entry notice, so it lands
+#: after the entry batch rather than inside the fade.
+NOTICE_DELAY_S = 3.0
+
+
+def _sys_line(ctx, text):
+    """One 0xF900 '@' line: [u16 len][cp932 text], no terminator (gm_command)."""
+    raw = ("@" + text).encode("cp932", "replace")[:0x1FF]
+    ctx.reply(0xF900, struct.pack(">H", len(raw)) + raw,
+              why="system line %r" % text)
+
+
+def _chunks(text, n=NOTICE_LINE_MAX):
+    out = []
+    for para in (text or "").replace("\r", "").split("\n"):
+        para = para.strip()
+        while len(para) > n:
+            out.append(para[:n])
+            para = para[n:]
+        if para:
+            out.append(para)
+    return out
+
+
+def unread_oldest(args, owner, limit):
+    _ready()
+    return db.query('SELECT * FROM fe_mail WHERE owner = %s AND folder = %s'
+                    ' AND "read" = 0 ORDER BY id ASC LIMIT %s',
+                    (owner, FOLDER_INBOX, max(0, int(limit))))
+
+
+def deliver_notice(ctx, live=False):
+    """Print the unread-mail notice (and, under 'full', the mail itself) in
+    the message window. Returns the number of mails printed in full."""
+    mode = getattr(ctx.args, "mail_notice", "full")
+    if mode == "off" or getattr(ctx.args, "mail", "on") == "off":
+        return 0
+    _apply_folder_labels(ctx.args)
+    owner, _me = my_identity(ctx)
+    if owner is None:
+        return 0
+    n = box_count(ctx.args, owner, FOLDER_INBOX, unread_only=True)
+    if n <= 0:
+        return 0
+    _sys_line(ctx, "%s: you have %d unread mail." % ("New mail" if live
+                                                     else "Mail", n))
+    if mode != "full":
+        return 0
+    cap = int(getattr(ctx.args, "mail_notice_max", 5) or 0)
+    shown = 0
+    for m in unread_oldest(ctx.args, owner, cap):
+        _sys_line(ctx, "Mail from %s (%s): %s" % (m["from_name"], m["date"],
+                                                  m["subject"] or "(no subject)"))
+        for ln in _chunks(m["text"]):
+            _sys_line(ctx, "  " + ln)
+        for taken, typ, iid, num in parse_attach(m.get("attach") or ""):
+            if not taken:
+                _sys_line(ctx, "  attached: %s" % (
+                    "%d gold" % num if typ == 1 else "item %d x%d" % (iid, num)))
+        box_mark_read(ctx.args, m["id"])
+        shown += 1
+    if n > shown:
+        _sys_line(ctx, "%d more unread mail; they follow at your next field "
+                       "entry." % (n - shown))
+    print("[femail]    --mail-notice %s: %d unread, %d printed and marked read"
+          % (mode, n, shown), flush=True)
+    return shown
+
+
+def notice_pump(ctx):
+    """Once per field entry: the unread-mail notice, NOTICE_DELAY_S after the
+    field has finished loading (arrival sets field_ready / field_ready_at)."""
+    s = ctx.session
+    if not s.get("in_field") or not s.get("field_ready"):
+        s.pop("mail_noticed", None)
+        return
+    if s.get("mail_noticed"):
+        return
+    t0 = s.get("field_ready_at")
+    if t0 is not None and time.monotonic() - float(t0) < NOTICE_DELAY_S:
+        return
+    s["mail_noticed"] = True
+    try:
+        deliver_notice(ctx)
+    except Exception as e:                             # noqa: BLE001
+        print("[femail]    mail notice failed (%r) -- session kept" % (e,),
+              flush=True)
 
 
 def on_num_all(ctx, inner):
@@ -689,8 +825,14 @@ def on_header(ctx, inner):
         ctx.reply(0xA068, bytes([err]), why="MSG_MAIL_HEADER_ERROR")
         return
     # the client allocates one 0x428 object per row and its list is bounded
-    # by the box size; never hand it more than it asked for
-    rows = box_page(ctx.args, owner, folder, index, min(count, 255))
+    # by the box size; never hand it more than it asked for. The only live
+    # caller (0x050c1e28 -> 0x050c4330) asks index -1 (0xFFFFFFFF), count
+    # 0x7FFFFFFF: "everything". Until 2026-10-08 that index went into the
+    # OFFSET as 4294967295 and the answer was always zero rows.
+    if index >= 0x80000000:
+        index = 0
+    cap = int(getattr(ctx.args, "mail_box_size", 30) or 30)
+    rows = box_page(ctx.args, owner, folder, index, min(count, cap, 255))
     for m in rows:
         print("[femail]      Mail:[%s][%s] id=%d read=%d" % (
             m["to_name"] if folder == FOLDER_SENT else m["from_name"],

@@ -120,6 +120,7 @@ if _HERE not in sys.path:
 
 
 import feident  # noqa: E402  -- WHO is on the socket; see its module docstring
+import peercap  # noqa: E402  -- the per-address handler cap
 import fegamedata  # noqa: E402  -- dat.pak's starting-gear and item tables
 from fenet import (bf_decrypt, bf_encrypt, fold_checksum,  # noqa: E402
                    hexdump, inner_msg, recv_frame, send_frame, traffic_unwrap,
@@ -879,13 +880,44 @@ def next_charid(path, roster):
 ADD_NG_NAME_UNUSABLE = 11     # "That character name can't be used."
 ADD_NG_NAME_TAKEN = 12        # "That name is already taken."
 
-#: Manual p.24: a name is 3-10 half-width alphanumeric characters.
-NAME_RE = re.compile(r"[A-Za-z0-9]{3,10}\Z")
+#: The creation screen's own help text (FE_Client.dll 0x052e4680): "half-width
+#: letters and digits, 3 to 10 characters; may be combined with an underscore;
+#: special characters and symbols cannot be used". Manual p.24 says the same
+#: without the underscore, so the client's text wins.
+NAME_RE = re.compile(r"[A-Za-z0-9_]{3,10}\Z")
+
+#: OURS: retail's server-side word list is not in the client (no NG-word
+#: table or string in FE_Client.dll); these staff-looking names are refused
+#: with the client's own "can't be used" (err 11). --char-name-deny replaces
+#: the list; matched case blind against the WHOLE name.
+NAME_DENY_DEFAULT = ("gm", "gamemaster", "game_master", "admin",
+                     "administrator", "system", "server", "support",
+                     "moderator", "staff", "official")
 
 
-def name_valid(name):
-    """True for a name the manual allows (3-10 half-width alphanumerics)."""
-    return bool(NAME_RE.match(str(name or "")))
+def name_rule_problem(name, deny=None):
+    """Why `name` breaks the creation rule, or "" when it is allowed."""
+    name = str(name or "")
+    if not NAME_RE.match(name):
+        return "not 3-10 half-width letters/digits/underscore"
+    if not re.search(r"[A-Za-z0-9]", name):
+        return "underscores only (the rule says COMBINED with an underscore)"
+    words = NAME_DENY_DEFAULT if deny is None else deny
+    if name.lower() in {w.strip().lower() for w in words if w.strip()}:
+        return "a reserved name"
+    return ""
+
+
+def name_valid(name, deny=None):
+    """True for a name the creation screen allows (see name_rule_problem)."""
+    return not name_rule_problem(name, deny)
+
+
+def _deny_list(args):
+    spec = getattr(args, "char_name_deny", None)
+    if spec is None:
+        return None
+    return [w for w in str(spec).split(",")]
 
 
 def name_owner(path, name, roster=None):
@@ -927,14 +959,14 @@ def name_owner(path, name, roster=None):
 def add_character_refusal(args, roster, name):
     """The 0xD005 code to refuse creating `name` with, or 0 to create it.
 
-    Checks the manual's rules (p.24): 3-10 half-width alphanumerics, and no
-    name already registered on ANY account (case blind). Under
-    `--char-name-check off` (the default until a client has been seen taking
-    the NG) a name that breaks a rule is only logged and still created, as
-    before; `on` refuses it."""
+    Checks the creation screen's rule (name_rule_problem: 3-10 half-width
+    letters/digits/underscore, not a reserved name -> err 11) and that no
+    character on ANY account already has the name, case blind (err 12).
+    `--char-name-check on` (the default) refuses; `off` only logs."""
     code, why = 0, ""
-    if not name_valid(name):
-        code, why = ADD_NG_NAME_UNUSABLE, "not 3-10 half-width letters/digits"
+    problem = name_rule_problem(name, _deny_list(args))
+    if problem:
+        code, why = ADD_NG_NAME_UNUSABLE, problem
     else:
         hit = name_owner(getattr(args, "char_store", None), name, roster)
         if hit is not None:
@@ -943,7 +975,7 @@ def add_character_refusal(args, roster, name):
                                                else " on %s" % hit[0]))
     if not code:
         return 0
-    if str(getattr(args, "char_name_check", "off")) != "on":
+    if str(getattr(args, "char_name_check", "on")) != "on":
         print("[felobby]    WARNING: name %a is %s -- would answer 0xD005 err=%d, "
               "but --char-name-check is off, so it is created anyway"
               % (name, why, code), flush=True)
@@ -1356,21 +1388,43 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
             # The string reader (0x5045f50 -> 0x522f5e0) copies bytes until NUL, so
             # the account goes on the wire as plain NUL-terminated text.
             #
-            # WARNING: THE BLOB MAY BE THE IDENTITY WE KEEP WORKING AROUND. This
-            # comment used to assert it was a constant and therefore useless.
-            # That was wrong: it applied fmo.py's "identical across two
-            # machines" measurement, which is about a 16-byte field at +0x38,
-            # to the 52-byte blob at +0x00 -- which the same file records as
-            # VARYING PER SESSION. FE sends the second one.
-            #
-            # So it is now RECORDED next to the resolved identity, and still
-            # not keyed on: four captures from one machine cannot tell
-            # "identifies the account" from "identifies the install", and those
-            # want opposite fixes. `tools/fe_blob_verdict.py` decides it the
-            # moment two different POL members have each presented a blob.
+            # THE BLOB IS THE IDENTITY (2026-10-08). It decodes to a hash the
+            # core filed when it answered this login's 4:5, so a hit names the
+            # POL member without the address (feident.identify_blob, which
+            # falls back to the address path on a miss). The identity resolved
+            # at connect time was by address; if the blob names somebody else
+            # the roster is re-keyed here, before any character message, and
+            # the wire name and the handoff follow the new key.
             print("[felobby]    MSG_CERTIFICATION request, %d-byte credential blob"
                   % (len(inner) - 2), flush=True)
             print("[felobby]    blob: %s" % inner[2:].hex(), flush=True)
+            if args.account_mode != "fixed":
+                by_blob = feident.member_for_blob(inner[2:], tag="felobby")
+                if by_blob is None:
+                    print("[felobby]    the credential blob did not decide; keeping "
+                          "the ADDRESS resolution %s" % ident["key"], flush=True)
+                elif by_blob["key"] == ident["key"]:
+                    print("[felobby]    the credential blob decided: %s, the same "
+                          "member the address named" % by_blob["key"], flush=True)
+                    ident.update(by_blob)
+                    ident["wire"] = feident.wire_account(ident, args.account_mode,
+                                                         args.account)
+                else:
+                    print("[felobby]    identity RE-KEYED by the credential blob: %s "
+                          "(was %s by address)" % (by_blob["key"], ident["key"]),
+                          flush=True)
+                    ident.update(by_blob)
+                    ident["wire"] = feident.wire_account(ident, args.account_mode,
+                                                         args.account)
+                    acct = ident["key"]
+                    roster = load_roster(args.char_store, acct)
+                    if roster is None:
+                        roster = parse_characters(args.characters, args.char_probe)
+                        print("[felobby] no stored characters for %r -- seeding %d "
+                              "from --characters" % (acct, len(roster)), flush=True)
+                    else:
+                        print("[felobby] loaded %d character(s) for %r from %s"
+                              % (len(roster), acct, args.char_store), flush=True)
             print("[felobby]    identity: %s -- %s"
                   % (ident["key"], ident["detail"]), flush=True)
             print("[felobby]    %s" % feident.record_blob(ident, inner[2:]),
@@ -1874,6 +1928,14 @@ def serve_lobby(conn, args, session, outbound, mode, be, ident):
                   "the WORLD PICKER and then 0x7820 MSG_LOBBY_JOIN_GAME_REQ -- "
                   "the lobby state machine only RETURNS at state 0x11, after "
                   "0x7821 sets [obj+0x93c]", flush=True)
+        elif real_id == 0x7830:
+            # MSG_LOBBY_GET_GAME_INFO_REQ (sender 0x05046cfd, log 0x52d4d0c).
+            # DELIBERATELY UNANSWERED: its OK, 0x7831, is the trap described
+            # at 0xC009 above (it fires a bare 0x7820 from outside the lobby
+            # state machine and parks FE in state 0xa). Logged by name only.
+            print("[felobby]    0x7830 MSG_LOBBY_GET_GAME_INFO_REQ body=%s -- "
+                  "not answered on purpose (0x7831 parks the lobby state "
+                  "machine)" % (inner[2:].hex() or "(empty)"), flush=True)
         else:
             print("[felobby]    (no handler for inner 0x%04X -- logging only; its "
                   "arrival is the finding)" % real_id, flush=True)
@@ -2051,13 +2113,19 @@ def main():
                          "logs can be traced back to the bytes that produced it. "
                          "Off by default: an arbitrary value in a field used as a "
                          "table index is a plausible way to crash the client.")
-    ap.add_argument("--char-name-check", default="off", choices=["on", "off"],
+    ap.add_argument("--char-name-check", default="on", choices=["on", "off"],
                     help="refuse a new character whose name is not 3-10 half-width "
-                         "letters/digits (0xD005 err 11) or is already used on any "
-                         "account, case blind (err 12) -- manual p.24. The NG and "
-                         "its codes are read from the client's code, but no client "
-                         "has been seen taking one yet, so it is OFF by default: "
-                         "off only logs the name it would have refused.")
+                         "letters/digits/underscore or is a reserved name (0xD005 "
+                         "err 11 'That character name can't be used.') or is "
+                         "already used on any account, case blind (err 12 'That "
+                         "name is already taken.'). Default on; off only logs the "
+                         "name it would have refused. Existing characters are "
+                         "never touched (tools/fe_name_dupes.py lists them).")
+    ap.add_argument("--char-name-deny", default=None, metavar="NAME,NAME",
+                    help="reserved names refused with err 11, case blind, whole "
+                         "name only. Default: gm, gamemaster, game_master, admin, "
+                         "administrator, system, server, support, moderator, "
+                         "staff, official. An empty string reserves nothing.")
     ap.add_argument("--notice", default=None, metavar="TITLE|TEXT",
                     help="answer 0xC009 with a 0xD014 notice window instead of "
                          "0xD015 'nothing to show'. FE then blocks in lobby state "
@@ -2155,8 +2223,21 @@ def main():
             conn, addr = srv.accept()
         except socket.timeout:
             continue
+        except OSError as e:
+            # EMFILE or ECONNABORTED: recoverable, and fatal to this port
+            # alone if it escaped, which reads as a client bug from outside.
+            print("[felobby] accept failed (%r); listener continues" % (e,),
+                  flush=True)
+            time.sleep(0.1)
+            continue
         print("\n[felobby] CONNECT from %s:%d" % addr, flush=True)
         if not args.capture:
+            if not peercap.acquire(addr[0]):
+                print("[felobby] %s:%d refused: that address already holds %d "
+                      "connections (POL_MAX_CONNS_PER_IP)"
+                      % (addr[0], addr[1], peercap.MAX_PER_IP), flush=True)
+                conn.close()
+                continue
             got += 1
             # WARNING: THREADED, AND THAT IS PART OF THE FIX, NOT A FLOURISH. The
             # accept loop used to serve one connection to completion -- up to
@@ -2166,7 +2247,8 @@ def main():
             # only one player can be in the lobby. Every per-session value now
             # lives in serve_lobby's frame or `ident`; the only shared mutable
             # thing left is the character store, held under _store_lock.
-            threading.Thread(target=_serve_one, args=(conn, addr, args),
+            threading.Thread(target=peercap.run,
+                             args=(_serve_one, conn, addr, args),
                              name="felobby-%s-%d" % addr, daemon=True).start()
             continue
         buf = b""

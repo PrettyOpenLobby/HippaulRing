@@ -152,7 +152,8 @@ nothing, the server PUSHES the state.
   0x1036 W=0x0503cef0  unit (class 3) then [u8 n] x [u16 id] ->
          0x0506be20(unit, id): walks the list at [unit+0x8b4] for [node+0x1c]
          == id, ends that entry (vtable+4) and re-scans [unit+0xbc..0xc0].
-         CHOSEN reading: "remove effects by id".
+         "Remove effects by id" -- confirmed 2026-10-08 by its three
+         client-side SENDERS (feunit.on_remove_effects), which answers it.
   0x1038 W=0x0503d000  [u16 mask] then per set bit i (16): [u16][u8][u8] ->
          0x5155fe0 vtable+0x28(i, u16, u8, u8) and vtable+0x18(i); then
          0x50ded70(0) and refresh kind 2.  The same 16-slot window 0x1041 /
@@ -292,7 +293,7 @@ PUSH_NAMES = {
     0x102F: "per-unit GHOST notify (chosen): flags |= 0x11000800 + effect 0x48 (c0 0x0503c800)",
     0x1034: "refresh window kind 4 (c0 0x0503be70)",
     0x1035: "per-unit equipment/part record (c0 0x0503c880) doc-only",
-    0x1036: "remove effects by id (chosen) [u8 n] x [u16] (c0 0x0503cef0)",
+    0x1036: "remove effects by id [u8 n] x [u16] (c0 0x0503cef0; feunit)",
     0x1038: "skill palette SET (server form) [u16 mask] + per bit [u16][u8][u8] (c0 0x0503d000)",
     0x1039: "refresh window kind 2 (c0 0x0503d0d0)",
     0x1041: "skill palette CLEAR (server form) [u16 mask] (c0 0x0503d0f0, shared with 0x202A)",
@@ -342,20 +343,33 @@ def register(feworld):
 
 
 def add_args(ap):
-    ap.add_argument("--enchant", default="ok", choices=["ok", "ng", "off"],
+    ap.add_argument("--enchant", default="ng", choices=["ok", "ng", "off"],
                     help="0x2077/0x2078/0x2079 enchant handshake: ok = answer "
                          "0x1122 [RID][COST] then 0x1120 and consume the material; "
-                         "ng = 0x1121 code 0 to the request; off = log only")
+                         "ng = 0x1121 code 0 to the request; off = log only. "
+                         "Default ng since 2026-10-08: retail RoD had NO "
+                         "enchanting (abolished in the 3rd beta, fewiki Q&A "
+                         "2006-05-26: エンチャントもβ3で廃止; no enchant NPC "
+                         "in the client's roster), so a stray request is "
+                         "refused rather than served for free")
     ap.add_argument("--enchant-cost", type=int, default=0,
                     help="COST in the 0x1122 reply, debited from the stored "
                          "wallet when one exists (0 = free)")
     ap.add_argument("--repair", default="ok", choices=["ok", "ng", "off"],
                     help="0x2086 -> 0x112C (ok) + a 0x107A re-push carrying "
-                         "--item-durability, or 0x112D code 5 (ng), or nothing")
+                         "the item's durability pair, or 0x112D code 5 (ng), "
+                         "or nothing. Under --item-wear on the OK restores the "
+                         "stored current to max and charges --repair-gold per "
+                         "point; a full item is NG 6.")
     ap.add_argument("--repair-cost", default="full",
-                    help="answer to 0x209E: `full` = 0x112D code 6 (durability "
-                         "full; the measured one-u32 NG shape), `ok:N` = 0x115B "
-                         "[u32 uid][u32 N] (CHOSEN shape, untested)")
+                    help="answer to 0x209E when --item-wear is off: `full` = "
+                         "0x112D code 6 (durability full; the measured one-u32 "
+                         "NG shape), `ok:N` = 0x115B [u32 uid][u32 N] (CHOSEN "
+                         "shape, untested). With wear on, a worn item quotes "
+                         "its real cost through the 0x115B shape.")
+    ap.add_argument("--repair-gold", type=int, default=1, metavar="G",
+                    help="--item-wear on: gold per missing durability point "
+                         "(OURS; SE's 2nd-beta repair prices did not survive)")
     ap.add_argument("--gather", default="ng:2",
                     help="0x201F: `ng:CODE` = 0x1024 code, `ok:ITEM` = add item "
                          "ITEM to the bag + 0x1023 + MSG_DEL of the object, `off`")
@@ -576,10 +590,23 @@ def on_repair_cost(ctx, inner):
                   why="MSG_GET_REPAIR_ITEM_COST_OK [u32 uid][u32 cost] -- "
                       "PARTIAL: CHOSEN shape (0x1086's), the reader is unmeasured")
         return
+    if uid is not None and fw.item_wear_on(ctx.args) and _row_of(ctx.args, uid)[1] is not None:
+        # --item-wear on (2026-10-08): a worn item quotes --repair-gold per
+        # missing point through the same CHOSEN 0x115B shape; a full one is
+        # the measured NG 6
+        mx, cur = fw.item_wear_record(ctx.args, uid)
+        if cur < mx:
+            cost = fw.item_wear_cost(ctx.args, uid)
+            ctx.reply(0x115B, struct.pack(">II", uid, cost),
+                      why="MSG_GET_REPAIR_ITEM_COST_OK uid %d at %d/%d -> %d gold "
+                          "(--item-wear on, --repair-gold per point)" % (uid, cur, mx, cost))
+            return
     ctx.reply(0x112D, struct.pack(">I", REPAIR_NG_FULL),
               why="MSG_REPAIR_ITEM_NG code=6 'durability full, no repair "
-                  "needed' -- this server tracks no wear; the arm names the "
-                  "item from category 0xbb8 and closes the dialog")
+                  "needed' -- %s; the arm names the item from category 0xbb8 "
+                  "and closes the dialog"
+                  % ("the item is at its maximum" if fw.item_wear_on(ctx.args)
+                     else "retail 2006 had no wear (--item-wear off)"))
 
 
 def on_repair(ctx, inner):
@@ -602,14 +629,27 @@ def on_repair(ctx, inner):
             cost = int(spec[3:], 0)
         except ValueError:
             cost = 0
+    wear = fw.item_wear_on(ctx.args)
+    if wear:
+        mx, cur = fw.item_wear_record(ctx.args, uid)
+        if cur >= mx:
+            ctx.reply(0x112D, struct.pack(">I", REPAIR_NG_FULL),
+                      why="MSG_REPAIR_ITEM_NG code=6: uid %d is at %d/%d" % (uid, cur, mx))
+            return
+        cost = fw.item_wear_cost(ctx.args, uid)
     if _debit(ctx, cost, "repair") is False:
         ctx.reply(0x112D, struct.pack(">I", REPAIR_NG_NO_GOLD),
                   why="MSG_REPAIR_ITEM_NG code=5 not enough gold")
         return
+    if wear:
+        mx, was = fw.item_wear_repair(ctx.args, uid)
+        fw.item_wear_load(ctx.args)
+        _p("    repaired uid %d: %d -> %d for %d gold (--item-wear on)" % (uid, was, mx, cost))
     ctx.reply(0x112C, b"", why="MSG_REPAIR_ITEM_OK (header-only, arm 0x050f116b "
                                "only resets window state)")
-    n = _repush(ctx, uid, "repair: 0x107A re-push carries +0x4aa/+0x4ac from "
-                          "--item-durability (%s)" % getattr(ctx.args, "item_durability", "-1:100"))
+    n = _repush(ctx, uid, "repair: 0x107A re-push carries +0x4aa/+0x4ac %s"
+                % ("= the restored pair (--item-wear on)" if wear else
+                   "from --item-durability (%s)" % getattr(ctx.args, "item_durability", "-1:100")))
     if not n:
         _p("    WARNING: the repair OK went out but NO 0x107A followed (not in a field, "
            "or --equip-reflect off) -- on screen nothing changed")

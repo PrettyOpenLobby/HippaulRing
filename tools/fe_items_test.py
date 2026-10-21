@@ -275,6 +275,86 @@ def main():
     check("--repair ng -> 0x112D code 5", ids() == [0x112D] and r.u32() == 5)
     r.done()
 
+    def wcheck(label, cond, detail=""):
+        check(label, cond)
+        if not cond and detail != "":
+            print("      detail: %r" % (detail,))
+
+    # ---- ITEM WEAR (2026-10-08; retail 2006 had none: --item-wear off) ------
+    a = _fresh()
+    wcheck("--item-wear off (default): every record is infinite (-1:100)",
+          feworld.item_wear_record(a, 1001) == (-1, 100)
+          and feworld.item_wear_on(a) is False)
+    a = _fresh(item_wear="on", item_wear_max=100, item_wear_cast=3, item_wear_hit=2,
+               repair_gold=2, gold=500)
+    STORE["equip"] = [[10, 1001], [4, 1003]]          # 1001 the held weapon, 1003 body
+    feworld.item_wear_load(a)
+    ctx = feworld.Ctx(None, None, "ecb", False, a)
+    OUT[:] = []
+    saved_send = (fenet.bf_encrypt, fenet.traffic_wrap, feworld.send_world_frame)
+    fenet.bf_encrypt = lambda st, body, mode, be: body
+    fenet.traffic_wrap = lambda data, seq=1: data
+    feworld.send_world_frame = _capture
+    try:
+        feworld.item_wear_cast(ctx, 285)
+        feworld.item_wear_cast(ctx, 285)
+    finally:
+        fenet.bf_encrypt, fenet.traffic_wrap, feworld.send_world_frame = saved_send
+    wcheck("two casts wear the HELD weapon (worn 0) by 3 each: 100 -> 94, stored",
+          STORE.get("durability", {}).get("1001") == 94
+          and feworld.item_wear_record(a, 1001) == (100, 94), STORE.get("durability"))
+    wcheck("...each change rides 0x2032 [uid][announce 1][mask 0xC][i16 max][i16 cur]",
+          ids() == [0x2032, 0x2032]
+          and OUT[1][2] == struct.pack(">IBIhh", 1001, 1, 0xC, 100, 94), OUT)
+    wcheck("...the armour did not wear on a cast",
+          feworld.item_wear_record(a, 1003) == (100, 100))
+    OUT[:] = []
+    fenet.bf_encrypt = lambda st, body, mode, be: body
+    fenet.traffic_wrap = lambda data, seq=1: data
+    feworld.send_world_frame = _capture
+    try:
+        worn = feworld.item_wear_hit(None, None, "ecb", False, a, 60, "test hit")
+    finally:
+        fenet.bf_encrypt, fenet.traffic_wrap, feworld.send_world_frame = saved_send
+    wcheck("a hit taken wears the worn ARMOUR (1003) by 2, not the weapon",
+          worn == [1003] and feworld.item_wear_record(a, 1003) == (100, 98)
+          and feworld.item_wear_record(a, 1001) == (100, 94), worn)
+    rep0 = feworld.item_fields(531, 1, 0, None, 0, uid=1001)
+    wcheck("item_fields serves the item's OWN pair when wear is loaded",
+          struct.unpack_from(">hh", rep0, 6 + 4 + 4 + 4 + 2)[:2] == (100, 94), rep0.hex())
+    OUT[:] = []
+    _dispatch(a, q(0x209E, struct.pack(">I", 1001)))
+    r = Reader(OUT[0][2])
+    wcheck("0x209E on a worn item -> 0x115B [uid][cost = 6 points x 2 gold]",
+          ids() == [0x115B] and r.u32() == 1001 and r.u32() == 12)
+    r.done()
+    OUT[:] = []
+    _dispatch(a, q(0x209E, struct.pack(">I", 1002)))
+    r = Reader(OUT[0][2])
+    wcheck("0x209E on a FULL item -> 0x112D code 6", ids() == [0x112D] and r.u32() == 6)
+    r.done()
+    OUT[:] = []
+    _dispatch(a, q(0x2086, struct.pack(">Ii", 1001, -1)))
+    wcheck("0x2086 repairs: 12 gold debited (500 -> 488), 0x112C, the 0x107A "
+          "re-push carries 100/100 and the store says 100",
+          0x112C in ids() and STORE["gold"] == 488
+          and STORE["durability"]["1001"] == 100
+          and _read_107a_add(OUT[-1][2])["dcur"] == 100
+          and _read_107a_add(OUT[-1][2])["dmax"] == 100, (ids(), STORE.get("gold")))
+    OUT[:] = []
+    _dispatch(a, q(0x2086, struct.pack(">Ii", 1001, -1)))
+    r = Reader(OUT[0][2])
+    wcheck("repairing it again -> 0x112D code 6 (full)", ids() == [0x112D] and r.u32() == 6)
+    r.done()
+    STORE["gold"] = 1
+    feworld.wear_set(a, 1001, 10)
+    OUT[:] = []
+    _dispatch(a, q(0x2086, struct.pack(">Ii", 1001, -1)))
+    r = Reader(OUT[0][2])
+    wcheck("...not enough gold -> 0x112D code 5, nothing restored",
+          ids() == [0x112D] and r.u32() == 5 and STORE["durability"]["1001"] == 10)
+    r.done()
+
     # ---- GATHER -------------------------------------------------------------
     a = _fresh()
     _dispatch(a, q(0x201F, struct.pack(">I", 3005)))

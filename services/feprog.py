@@ -42,9 +42,12 @@ burst can use it without this module; this module owns the MESSAGES.
                  has no caller).  So the 0x1075 goes out BEFORE the 0x1078.
   in 0x1079 NG   [u32 code]: 1 already learned, 2 conditions not met (used
                  for not enough SP), 4 not a registered learnable skill.
-  NOT validated server-side (logged only): prerequisites and the class tree.
-  SKILL_LEARN_DATA is a partial table (fefet.py: skills 0..38 of 734) and the
-  window already hides rows whose prerequisite is not owned (0x050D50C1).
+  VALIDATED (2026-10-08, --skill-tree check): a rank above 1 needs the rank
+  below it owned (the window sends the NEXT rank's id); a rank 1 needs its
+  family in the player's class tree and every prerequisite group satisfied,
+  the window's own rule read off 0x050D5010 (fegamedata.skill_tree: the 56
+  SKILL_LEARN_DATA rows ARE the whole tree, families 0..38). A request that
+  fails gets 0x1079 code 2 (4 when the family is another class's).
 
 == 0x2028 -- the Pw REGEN ASK  [u32 mask] + per set bit [u8 ticks] ==========
   builder 0x0507D810 (a unit method): skipped when CONDITION has DEAD|GHOST
@@ -205,6 +208,12 @@ def add_args(ap):
                          "cost, refuse when short (0x1079 code 2), push the "
                          "owned flag and the new SP before 0x1078; legacy = "
                          "feworld's builtin arm (persist + OK, no charge)")
+    ap.add_argument("--skill-tree", default="check", choices=["check", "log"],
+                    help="0x2049: refuse a rank whose lower rank is not owned "
+                         "and a rank 1 outside the class tree or short of a "
+                         "prerequisite group (the window's own rule, "
+                         "0x050D5010; fegamedata.skill_tree) with 0x1079. "
+                         "log = allow and log, the pre-2026-10-08 behaviour")
     ap.add_argument("--pw-cost", default=fw.DEFAULT_PW_COST,
                     choices=["cast", "off"],
                     help="cast = debit [skill+0xF4] (pow_cost) on each "
@@ -220,6 +229,29 @@ def add_args(ap):
     ap.add_argument("--pw-max", type=int, default=fw.DEFAULT_PW_MAX,
                     help="the server's Pw ceiling -- the class table's own "
                          "100 (2006: Pw 100 at every level)")
+    ap.add_argument("--stamina", default=fw.DEFAULT_STAMINA_MODE,
+                    choices=["retail", "beta", "off"],
+                    help="the HUD's third gauge ([unit+0x4aa], 0x2024 maskA "
+                         "0x40; world/progression.py has the reading). retail "
+                         "(default, SOURCED): SE abolished stamina in the 3rd "
+                         "beta, 2006-01-27, and made food instant HP (fewiki "
+                         "fv_consum; this client's EFFECT_DATA has no stamina "
+                         "effect) -- the gauge stays full, nothing is sent. "
+                         "beta (OURS): the tutorial books' rule -- every Pw "
+                         "regen tick spends --stamina-per-regen, food restores "
+                         "its HP figure, and at 0 the Pw regen drops to "
+                         "--stamina-empty-regen of itself; the value is stored "
+                         "per character and served at field entry. off: "
+                         "nothing, not even the GM verb.")
+    ap.add_argument("--stamina-max", type=int, default=fw.DEFAULT_STAMINA_MAX,
+                    help="the gauge's ceiling (fet_class_param: 1000)")
+    ap.add_argument("--stamina-per-regen", type=int,
+                    default=fw.DEFAULT_STAMINA_PER_REGEN,
+                    help="--stamina beta: stamina one Pw regen tick spends (OURS)")
+    ap.add_argument("--stamina-empty-regen", type=float,
+                    default=fw.DEFAULT_STAMINA_EMPTY_REGEN,
+                    help="--stamina beta: the fraction of --pw-regen left at "
+                         "0 stamina (OURS; book 211 says only 'slowly')")
     ap.add_argument("--pw-dedupe-ms", type=int, default=250,
                     help="a second 0x1031/0x1032 for the SAME skill inside "
                          "this window is not charged again (OURS)")
@@ -337,11 +369,26 @@ def on_acquire(ctx, inner):
         return ng(ACQ_NG_KNOWN, "already owned")
     if have < cost:
         return ng(ACQ_NG_CONDITIONS, "not enough SP: %d < %d" % (have, cost))
+    tree = getattr(a, "skill_tree", "check")
     if s.get("rank", 1) > 1 and not any(
             o.get("family") == s.get("family") and o.get("rank") == s["rank"] - 1
             and oid in served for oid, o in fegamedata.skills().items()):
-        _p("    WARNING: LVUP to rank %d without rank %d owned -- allowed (the "
-           "window decides what it offers), logged" % (s["rank"], s["rank"] - 1))
+        why = "LVUP to rank %d without rank %d owned" % (s["rank"], s["rank"] - 1)
+        if tree == "check":
+            return ng(ACQ_NG_CONDITIONS, why)
+        _p("    WARNING: %s -- allowed (--skill-tree log)" % why)
+    if s.get("rank", 1) == 1:
+        try:
+            cls = int(fw.self_class_id(a))
+        except Exception:                               # noqa: BLE001
+            cls = None
+        if cls is not None:
+            ok, why = fegamedata.skill_tree_ok(cls, sid, served)
+            if not ok:
+                if tree == "check":
+                    return ng(ACQ_NG_NOT_LEARNABLE if "not in class" in why
+                              else ACQ_NG_CONDITIONS, why)
+                _p("    WARNING: %s -- allowed (--skill-tree log)" % why)
     stored, rows = fw.acquire_skill(a, sid)
     if stored is not True:
         return ng(ACQ_NG_UNDEFINED, "the store did not take it")
@@ -394,6 +441,10 @@ def on_cast(ctx, inner):
             pvp.on_cast(ctx, inner)
         except Exception as e:                          # noqa: BLE001
             _p("    pvp cast path failed (%r) -- the cast still counts" % (e,))
+    # the hider's own cast ends HIDE (the client clears 0x2000 itself), and
+    # every cast wears the held weapon (--item-wear; retail 2006 had no wear)
+    fw.player_cast(ctx.conn, ctx.outbound, ctx.mode, ctx.be, a, skill)
+    fw.item_wear_cast(ctx, skill)
     if skill is None or getattr(a, "pw_cost", fw.DEFAULT_PW_COST) != "cast":
         return
     cost = fegamedata.skills().get(skill, {}).get("pow", 0)
@@ -429,7 +480,10 @@ def on_regen(ctx, inner):
         ctx.session["pw_ask_seen"] = True
     if mask & REGEN_PW_BIT and regen > 0:
         before = fw.pw_now(a)
-        after = min(fw.pw_max(a), before + ticks[REGEN_PW_BIT] * regen)
+        # --stamina beta spends stamina per tick and slows an empty gauge
+        per = fw.stamina_regen_hook(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
+                                    a, ticks[REGEN_PW_BIT], regen)
+        after = min(fw.pw_max(a), before + ticks[REGEN_PW_BIT] * per)
         if after != before:
             fw.pw_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, a, after)
         n = ctx.session["pw_regen_n"] = ctx.session.get("pw_regen_n", 0) + 1

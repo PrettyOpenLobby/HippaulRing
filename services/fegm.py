@@ -143,6 +143,9 @@ issues, so any client can send these.
 WHAT IS OK: APPLIED (through feworld's own pushes, store first)
     /chr hp     -> ctx.session["player_hp"], player_hp_push (0x2024 bit 4)
     /chr gold   -> store "gold",  0x2024 maskA bit 0x00200000 (+0x4ec)
+    /chr power  -> 0x2024 maskA bit 0x10 (+0x4a4, pw_push)
+    /chr stamina-> store "stamina", 0x2024 maskA bit 0x40 (+0x4aa, the
+                   StaminaGaugeBar's current -- 2026-10-08, stamina_push)
     /chr score  -> store "total_score", 0x2024 maskB bit 1 (+0x500)
     /chr crystal-> store "crystal", crystal_push(value) (0x2035 bit 1)
     /chr exp    -> store "exp" via combat_exp_push(delta) (0x1075 bit 2)
@@ -514,7 +517,8 @@ def on_debug_command(ctx, inner):
         _log("   %r is not in --gm-accounts: NOT applied, NG 0" % _account(ctx))
         debug_ng(ctx, 0)
         return
-    if verb in ("hp", "gold", "score", "crystal", "exp", "pos") and obj not in (me, 0):
+    if verb in ("hp", "gold", "score", "crystal", "exp", "pos", "power",
+                "stamina") and obj not in (me, 0):
         # the object is another unit; the store and the pushes here are the
         # SELF session's. Cross-session application would need a relay
         # keyed by unit id; not built.
@@ -560,10 +564,24 @@ def on_debug_command(ctx, inner):
             return
         fw.goto_push(c, o, m, b, a, int(fld), pos=(float(x), float(y), float(z)))
         _log("   applied: same-field warp via 0x1166 to (%g, %g, %g)" % (x, y, z))
+    elif verb == "power":
+        v = int(fields[0])
+        fw.pw_push(c, o, m, b, a, v, "GM /chr power")
+        _log("   applied: Pw -> %d (0x2024 maskA 0x10 -> [unit+0x4a4])" % v)
+    elif verb == "stamina":
+        # 2026-10-08: maskA 0x40 -> [unit+0x4aa], the StaminaGaugeBar's
+        # current (update 0x050cefa0); see world/progression.py STAMINA
+        v = int(fields[0])
+        if fw.stamina_push(c, o, m, b, a, v, "GM /chr stamina", force=True) is None:
+            _log("   --stamina off: not applied -- NG 2")
+            debug_ng(ctx, 2)
+            return
+        _log("   applied: stamina -> %d (0x2024 maskA 0x40 -> [unit+0x4aa], "
+             "stored)" % v)
     else:
         _log("   %s is decoded but has NO server-side setter here "
-             "(power/stamina: 0x2024 bit not pinned; token/fame/item/"
-             "endurance/break: another worker's lane) -- NG 2" % verb)
+             "(token/fame/item/endurance/break: no setter yet) -- NG 2"
+             % verb)
         debug_ng(ctx, 2)
         return
     debug_ok(ctx)

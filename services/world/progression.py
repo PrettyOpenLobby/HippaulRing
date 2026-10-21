@@ -499,6 +499,127 @@ def progress_entry_push(conn, outbound, mode, be, args):
     if str(getattr(args, "pw_cost", DEFAULT_PW_COST)) != "off":
         pw_push(conn, outbound, mode, be, args, pw_max(args),
                 "field entry: the gauge starts full")
+    stamina_entry_push(conn, outbound, mode, be, args)
+
+
+# ---------------------------------------------------------------------------
+# STAMINA (2026-10-08). THE WIRE, read off the dump:
+#
+#   * the HUD's third gauge is StaminaGaugeTitle/Frame/Bar (names at
+#     0x052e244c/60/74, ctor 0x050cef30). Its update, 0x050cefa0, draws
+#     [unit+0x4aa] (current) over [unit+0x4a6] + [unit+0x4a8] (max base plus
+#     bonus) -- the same shape as HP (+0x49e over +0x49a + +0x49c, 0x050cee60),
+#     Pw (+0x4a4 over +0x4a0 + +0x4a2, 0x050cef00) and the Down gauge (+0x4bc
+#     over +0x4b8 + +0x4ba, 0x050cf040);
+#   * 0x2024's ladder (0x04ff36c0) writes +0x4aa from maskA 0x40 (setter
+#     0x04ff4030, one u16) and +0x4a6 from maskA 0x20 (0x04ff3fe0, one u16);
+#   * the class table seeds 1000 (fet_class_param, every class) when the unit
+#     is built, and nothing in the image decrements +0x4aa: like Pw, the
+#     client never spends it. The 0x2028 regen ask (0x0507d8cb) reads Pw and
+#     the Down gauge, never stamina, so a slower regen is the server's to do.
+#
+# THE RULE. SE abolished stamina in the 3rd beta (2006-01-27, before the
+# 2006-02-23 launch): fewiki fv_consum 「スタミナ廃止にともない、食料が即効のHP回復
+# アイテムになった」, and this client's own EFFECT_DATA agrees -- bread, meat,
+# cheese, apples and steak carry bitsA 0x4 (HP) and not one effect in the 386
+# touches a stamina stat. So `--stamina retail` (default) leaves the gauge
+# full and static, which is what a retail player saw. `beta` is OURS: the
+# 2nd-beta rule the tutorial books describe (lines 82, 151, 211, 251 -- the Pw
+# regen spends stamina, food restores it, and at 0 stamina Power "takes long
+# to return"), with every amount CHOSEN. `off` serves nothing at all.
+# ---------------------------------------------------------------------------
+U2024_ST, U2024_ST_MAX = 0x40, 0x20
+DEFAULT_STAMINA_MAX = 1000          # fet_class_param, every class
+DEFAULT_STAMINA_PER_REGEN = 16      # OURS: a Pw tick costs its own worth
+DEFAULT_STAMINA_EMPTY_REGEN = 0.25  # OURS: the Pw regen left at 0 stamina
+DEFAULT_STAMINA_MODE = "retail"
+
+
+def stamina_mode(args):
+    return str(getattr(args, "stamina", DEFAULT_STAMINA_MODE) or DEFAULT_STAMINA_MODE)
+
+
+def stamina_max(args):
+    return max(1, int(getattr(args, "stamina_max", DEFAULT_STAMINA_MAX)
+                      or DEFAULT_STAMINA_MAX))
+
+
+def stamina_now(args):
+    """The session's stamina; the stored value on the first ask, else full."""
+    if "stamina" not in sess._SESSION:
+        stored = character._load_char_field(args, "stamina", None)
+        try:
+            v = int(stored) if stored is not None else stamina_max(args)
+        except (TypeError, ValueError):
+            v = stamina_max(args)
+        sess._SESSION["stamina"] = max(0, min(stamina_max(args), v))
+    return int(sess._SESSION["stamina"])
+
+
+def stamina_push(conn, outbound, mode, be, args, value, why="", force=False):
+    """0x2024 maskA 0x40 -> [unit+0x4aa], the stamina the gauge draws. Sent
+    under --stamina beta, or `force` (the GM verb) in any mode but off.
+    Stores the value with the character. Returns the value kept, or None
+    when nothing went out."""
+    md = stamina_mode(args)
+    if md == "off" or (md != "beta" and not force):
+        return None
+    v = max(0, min(int(value), stamina_max(args)))
+    sess._SESSION["stamina"] = v
+    character._store_char_field(args, "stamina", v)
+    wire.send(conn, outbound,
+         wire.inner_msg(0x2024, struct.pack(">IIH", U2024_ST, 0, v),
+                   wire.unit_id_of(args)),
+         mode, be, args.seq_mode == "echo", getattr(args, "world_prefix", 4))
+    if why:
+        print("[feworld]    -> 0x2024 maskA 0x40 STAMINA %d/%d -- %s"
+              % (v, stamina_max(args), why), flush=True)
+    return v
+
+
+def stamina_entry_push(conn, outbound, mode, be, args):
+    """Field entry under --stamina beta: the STORED stamina replaces the
+    class table's full gauge (the client built the unit at 1000). Retail
+    sends nothing: the gauge is full and stays full."""
+    if stamina_mode(args) != "beta":
+        return None
+    return stamina_push(conn, outbound, mode, be, args, stamina_now(args),
+                        "field entry: the stored stamina (--stamina beta)")
+
+
+def stamina_regen_hook(conn, outbound, mode, be, args, ticks, per_tick):
+    """One 0x2028 regen ask of `ticks` ticks is about to add `per_tick` Pw
+    per tick. Under --stamina beta each tick spends --stamina-per-regen
+    stamina (book 151: Power returns over time and spends stamina as it
+    does); at 0 stamina the Pw per tick drops to --stamina-empty-regen of
+    itself (book 211: with no stamina, Power comes back slowly). Returns the
+    Pw per tick to apply."""
+    if stamina_mode(args) != "beta" or per_tick <= 0:
+        return per_tick
+    cost = max(0, int(getattr(args, "stamina_per_regen", DEFAULT_STAMINA_PER_REGEN)
+                      or 0))
+    have = stamina_now(args)
+    if have <= 0:
+        frac = float(getattr(args, "stamina_empty_regen", DEFAULT_STAMINA_EMPTY_REGEN)
+                     or 0.0)
+        return max(1, int(per_tick * frac)) if frac > 0 else 0
+    if cost > 0 and ticks > 0:
+        stamina_push(conn, outbound, mode, be, args, have - cost * int(ticks),
+                     "%d regen tick(s) spend %d stamina each" % (ticks, cost))
+    return per_tick
+
+
+def stamina_restore(conn, outbound, mode, be, args, amount, why=""):
+    """Food under --stamina beta: +amount stamina (book 167/251/286 -- eat
+    bread, meat and the like). The amount is the item's own HP figure, since
+    this client's data has no stamina figure to read (OURS)."""
+    if stamina_mode(args) != "beta" or int(amount) <= 0:
+        return None
+    have = stamina_now(args)
+    return stamina_push(conn, outbound, mode, be, args, have + int(amount),
+                        "%s: +%d stamina (%d -> %d)"
+                        % (why, int(amount), have,
+                           min(stamina_max(args), have + int(amount))))
 
 
 def exp_seed(args):

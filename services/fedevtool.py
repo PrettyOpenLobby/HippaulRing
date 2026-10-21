@@ -29,6 +29,7 @@ there is exactly one implementation of every command, the file console keeps
 working, and anything this page can do can also be typed.
 """
 import collections
+import hmac
 import inspect
 import json
 import os
@@ -102,7 +103,10 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         q = urllib.parse.urlparse(self.path).query
         got = urllib.parse.parse_qs(q).get("t", [""])[0]
-        return got == token or self.headers.get("X-Devtool-Token") == token
+        hdr = self.headers.get("X-Devtool-Token") or ""
+        want = token.encode("utf-8")
+        return (hmac.compare_digest(got.encode("utf-8"), want)
+                or hmac.compare_digest(hdr.encode("utf-8"), want))
 
     def _send(self, code, body, ctype="application/json"):
         if isinstance(body, (dict, list)):

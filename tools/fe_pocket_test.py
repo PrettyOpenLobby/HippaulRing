@@ -175,13 +175,20 @@ n_on = len(adds(1020))
 
 _reset()
 STORE["items"].append([1020, 7, 1, 1])
-err = use(1011)
+err = use(1011, pocket_refill="off")
 # the bag shift re-sends 1020 (unworn) either way; on adds ONE more, the
-# worn-marker reflection
-check("--pocket-refill off (default): the pocket just empties, as before",
+# worn-marker reflection. The default became `on` on 2026-10-08 (retail
+# refilled the pocket: manual p.45, SE's 3rd-beta notes), so off is explicit.
+check("--pocket-refill off: the pocket just empties, as before",
       err is None and [11, 1011] not in STORE["equip"]
       and not any(int(u) == 1020 for _s, u in STORE["equip"])
       and len(adds(1020)) == n_on - 1, (STORE["equip"], len(adds(1020)), n_on))
+
+_reset()
+STORE["items"].append([1020, 7, 1, 1])
+err = use(1011, equip_reflect="request")
+check("the DEFAULT (on since 2026-10-08) refills the pocket from the bag",
+      err is None and STORE["equip"][0] == [11, 1020], STORE["equip"])
 
 _reset()
 err = use(1011, pocket_refill="on", equip_reflect="request")
@@ -199,4 +206,4 @@ check("an item already worn elsewhere is never pulled in twice",
 if FAILS:
     print("[fe_pocket_test] %d FAILED: %s" % (len(FAILS), FAILS))
     sys.exit(1)
-print("[fe_pocket_test] OK -- %d checks" % 12)
+print("[fe_pocket_test] OK -- %d checks" % 13)

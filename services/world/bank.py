@@ -48,6 +48,12 @@ from . import character, equipment, inventory, itemrecords, sess, wallet, wire
 # WARNING: --field-item-kind both mirrors the bag into the kind-1 array, i.e. INTO
 # THE BANK WINDOW; the bank refuses to open its cells while that is set.
 #
+# NO WITHDRAWAL FEE (2026-10-08). The client's tutorial book (2005-12, line
+# 179) says gold costs a fee to take out; SE's 3rd-beta change list
+# (update/index.html captured 2006-01-31: "銀行の手数料が廃止されました")
+# abolished it before launch, so retail had none and neither do we. The
+# round-2 walk through the keeper's talk is tools/fe_bankloop_test.py.
+#
 # The bank's rows keep an EXPLICIT slot ([uid, item, flag, count, slot]) --
 # unlike the bag, whose slot is its list index -- so a withdrawal from the
 # middle shifts nobody and costs one push.

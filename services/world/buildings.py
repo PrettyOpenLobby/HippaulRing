@@ -326,6 +326,113 @@ def _pair(spec, default):
         return default
 
 
+# ---------------------------------------------------------------------------
+# THE CASTLE SHIELD (2026-10-08). Tutorial book 191/266: "As the number of
+# fields your nation holds falls, a shield is drawn up around the castle.
+# That raises its HP and makes it harder to fell. Lose more fields and the
+# shield grows stronger."
+#
+# WHAT THE CLIENT DRAWS, read off the dump:
+#   * the building loader 0x05070530 special-cases a building whose TYPE
+#     ([bld+0x382]) is 15 -- FE_BUILDING_DATA row 15, "Castle" -- in a field
+#     whose group record is NOT a capital (0x05070602 group_by_id ->
+#     `test byte [grp+0x8c], 8`): it loads Build\shield_castle.mdl/.tex
+#     (0x052de6e4/0x052de6cc) into bld+0x784 and sets the alpha byte
+#     [bld+0xb09] = 0x80;
+#   * the per-frame update 0x050715a3..0x05071625 fades that alpha toward
+#     [[0x5336f74]+0x58] * 2.55 (0x05283948), by 0.1 of the gap per frame,
+#     clamped to +-1 -- so [field+0x58] is a PERCENT, 0 = no shield drawn,
+#     100 = fully opaque;
+#   * [0x5336f74] is the FIELD object (its +0x1c4 is what every ground
+#     lookup 0x5000450 takes), and the only writer of its +0x58 past the
+#     constructor's zero (0x04fffb76) is the 0x1142 applier 0x04ff5df0 (arm
+#     0x05055bab, id table 0x5057620 index 0x1142-0x1124): [u32 mask], bit
+#     0x1 u32, bit 0x2 u16 -> +0x5a, bit 0x4 u16 -> +0x58, bit 0x8 u32,
+#     bit 0x10 u16 (fegm's decode of 2026-09). Bits 0x1/0x8/0x10 land in
+#     locals or unread fields; only 0x4 is served.
+#
+# So the shield is TWO things: a percent on the wire (0x1142 bit 0x4, pushed
+# at field entry) that the client turns into the model's opacity, and a
+# castle HP bonus the server applies when a war row is made (castle_shield_hp,
+# called from fecampaign where the keep row is built). The percent is OURS:
+# SE gives no numbers. With 95 fields over 5 nations a nation's "fair share"
+# is 19 (--castle-shield-base); at or above it there is no shield, and every
+# field below it adds 100/19 percent, so a nation down to nothing fights
+# behind a full shield and a castle with --castle-shield-hp (100) percent more
+# HP. WARNING: the model only loads for TYPE 15; the castle is served as
+# type 20 (--keep-types 20:16) because row 20 is the one proven to offer the
+# Knight -- whether row 15 offers the same summon is unread, so the shield's
+# MODEL will not show until --keep-types 15:16 is tried on a screen. The
+# percent and the HP bonus do not depend on it.
+# ---------------------------------------------------------------------------
+FIELD_STATE_MSG = 0x1142
+FIELD_STATE_SHIELD_BIT = 0x4          # u16 -> [field+0x58], percent
+
+
+def nation_fields_held(args, nation):
+    """How many of the 95 areas `nation` holds right now."""
+    n = int(nation or 0)
+    if not n:
+        return 0
+    return sum(1 for a in fegamedata.areas()
+               if int(territory.territory_owner(a, args) or 0) == n)
+
+
+def castle_shield_pct(args, nation, held=None):
+    """0..100: the shield a castle of `nation` has, from its holdings."""
+    if str(getattr(args, "castle_shield", "on") or "on") != "on" or not nation:
+        return 0
+    base = max(1, int(getattr(args, "castle_shield_base", 19) or 19))
+    if held is None:
+        held = nation_fields_held(args, nation)
+    return max(0, min(100, int(round((base - int(held)) * 100.0 / base))))
+
+
+def castle_shield_hp(args, nation, hp):
+    """The castle's HP with the shield's bonus: hp * (1 + pct/100 *
+    --castle-shield-hp/100), clamped to the i16 the wire carries."""
+    pct = castle_shield_pct(args, nation)
+    bonus = max(0, int(getattr(args, "castle_shield_hp", 100) or 0))
+    out = int(round(int(hp) * (1.0 + pct / 100.0 * bonus / 100.0)))
+    return max(1, min(32767, out))
+
+
+def building_shield_pct(args, area=None):
+    """The percent for the castle standing in `area` (this session's field
+    when None): its HOLDER's shield."""
+    if area is None:
+        area = sess._SESSION.get("field")
+    if area is None:
+        return 0
+    holder = int(territory.territory_owner(int(area), args) or 0)
+    return castle_shield_pct(args, holder)
+
+
+def castle_shield_push(conn, outbound, mode, be, args, area=None):
+    """0x1142 [u32 mask 0x4][u16 percent] -> [field+0x58]: the shield's
+    opacity for the castle of this field's holder. Sent at field entry; a
+    capital (where the loader never mounts the model) gets 0."""
+    if str(getattr(args, "castle_shield", "on") or "on") != "on":
+        return None
+    if area is None:
+        area = sess._SESSION.get("field")
+    if area is None:
+        return None
+    pct = 0 if int(area) in zones.CAPITAL_GROUP_IDS else building_shield_pct(args, area)
+    wire.send(conn, outbound,
+         wire.inner_msg(FIELD_STATE_MSG,
+                        struct.pack(">IH", FIELD_STATE_SHIELD_BIT, pct & 0xFFFF),
+                        wire.unit_id_of(args)),
+         mode, be, args.seq_mode == "echo", args.world_prefix)
+    holder = int(territory.territory_owner(int(area), args) or 0)
+    print("[feworld]    -> 0x1142 field state: castle shield %d%% (holder nation "
+          "%d holds %d fields, base %d; [field+0x58] -> shield_castle.mdl alpha, "
+          "type-15 castles only)"
+          % (pct, holder, nation_fields_held(args, holder),
+             int(getattr(args, "castle_shield_base", 19) or 19)), flush=True)
+    return pct
+
+
 def keep_grids(area):
     """{"def": (gx, gz), "atk": (gx, gz)} for `area`, or None when the
     shipped castle table has no row for its map.
@@ -382,7 +489,15 @@ def keep_push(conn, outbound, mode, be, args, area, keeps, nations,
         print("[feworld]    keeps: area %s has no castle row in fet_castle_info "
               "-- none served" % area, flush=True)
         return {}
-    types = _pair(getattr(args, "keep_types", None), (20, 16))
+    # KEY: THE DEFENDER'S BASE IS TYPE 15, NOT 20 (static, 2026-10-08). The
+    # in-field war gauge's animator (0x05111010) finds the two base HP bars
+    # by walking the field's buildings for [obj+0x380] == 0x10 (the Keep,
+    # +0x38) and == 0x0f (Castle row 15, +0x3c); a type-20 castle is never
+    # looked at, so under --keep-types 20:16 the defenders' bar stood still
+    # for the whole war. The model stays 30 castle00_a (rows and models are
+    # separate fields of the 0x1006 record); row 15's +0xde is the same
+    # Knight (954). A compose that pins 20:16 has to change it.
+    types = _pair(getattr(args, "keep_types", None), (15, 16))
     models = _pair(getattr(args, "keep_models", None), (30, 16))
     base = int(getattr(args, "keep_base", 2900) or 2900)
     reg = sess._SESSION.setdefault("keeps", {})
@@ -536,6 +651,12 @@ def building_hit_damage(args, skill=None):
     else:
         base = float(flat)
         why = "flat --hit-damage %d (no attack known)" % flat
+    # the skill's own anti-building amount (fegamedata.skill_flat: the
+    # Giant's Strong Cannon +1600, the Wraith's Fireball +650) replaces the
+    # CHOSEN Giant multiplier when the client's data carries one
+    bld = fegamedata.skill_flat(skill)[1] if skill is not None else 0.0
+    if bld > 0:
+        return base + bld, why + " + %g against buildings (skill data)" % bld
     m = sess._SESSION.get("morph")
     if m and m.get("form") == GIANT_FORM:
         mult = float(getattr(args, "giant_building_mult", GIANT_BUILDING_MULT))

@@ -494,6 +494,49 @@ def main():
     _dispatch(a, q(0x1031, cast))
     check("--pw-cost off: skills are free again", OUT == [])
 
+    # --- STAMINA (2026-10-08): 0x2024 maskA 0x40 -> [unit+0x4aa] ------------
+    a = _fresh()
+    feworld._SESSION.pop("stamina", None)
+    feworld._SESSION["pw"] = 50
+    OUT[:] = []
+    _dispatch(a, q(0x2028, struct.pack(">I", 0x10) + b"\x02"))
+    check("--stamina retail (default): a regen ask sends Pw only, no 0x40 push",
+          [read_2024_i16(b)[0] for m, _, b in OUT if m == 0x2024] == [0x10]
+          and "stamina" not in STORE, OUT)
+    a = _fresh(stamina="beta", stamina_per_regen=16, stamina_empty_regen=0.25)
+    feworld._SESSION.pop("stamina", None)
+    feworld._SESSION["pw"] = 50
+    OUT[:] = []
+    _dispatch(a, q(0x2028, struct.pack(">I", 0x10) + b"\x02"))
+    pushes = [read_2024_i16(b) for m, _, b in OUT if m == 0x2024]
+    check("--stamina beta: 2 regen ticks spend 2 x 16 stamina (1000 -> 968), "
+          "pushed as maskA 0x40 u16, then Pw +6",
+          pushes == [(0x40, 0, 968), (0x10, 0, 56)] and STORE.get("stamina") == 968,
+          pushes)
+    feworld._SESSION["stamina"] = 0
+    feworld._SESSION["pw"] = 50
+    OUT[:] = []
+    _dispatch(a, q(0x2028, struct.pack(">I", 0x10) + b"\x02"))
+    pushes = [read_2024_i16(b) for m, _, b in OUT if m == 0x2024]
+    check("...at 0 stamina the Pw regen drops to a quarter (3 -> 1 per tick) "
+          "and no stamina push goes out",
+          pushes == [(0x10, 0, 52)], pushes)
+    OUT[:] = []
+    _direct(lambda c, o, m, b, args: feworld.stamina_restore(c, o, m, b, args, 50, "test bread"), a)
+    check("...food restores it (+50 -> 50, stored)",
+          feworld._SESSION["stamina"] == 50 and STORE.get("stamina") == 50
+          and [read_2024_i16(b) for m, _, b in OUT if m == 0x2024] == [(0x40, 0, 50)])
+    STORE["stamina"] = 123
+    feworld._SESSION.pop("stamina", None)
+    OUT[:] = []
+    _direct(lambda c, o, m, b, args: feworld.stamina_entry_push(c, o, m, b, args), a)
+    check("...field entry serves the STORED value (123)",
+          [read_2024_i16(b) for m, _, b in OUT if m == 0x2024] == [(0x40, 0, 123)])
+    a = _fresh(stamina="off")
+    OUT[:] = []
+    _direct(lambda c, o, m, b, args: feworld.stamina_push(c, o, m, b, args, 5, force=True), a)
+    check("--stamina off: even the forced push sends nothing", OUT == [])
+
     # the safety net: no 0x2028 for 7 s -> 2 standing ticks server-side
     a = _fresh(pw_regen_fallback_ms=6000)
     S = feworld._SESSION

@@ -308,11 +308,32 @@ def run():
     r.done()
     _check(got == (39, 0xFFFFFFFF, 10.0, 20.0, 30.0),
            "GM /chr pos -> 0x1166 [field][-1][f32 x3]")
-    # power: decoded, no setter -> NG 2
+    # power -> pw_push (maskA 0x10, clamped to --pw-max)
     _setup()
-    dbg(0x13, 999, fmt="H", args=g)
+    feworld._SESSION.pop("pw", None)
+    dbg(0x13, 42, fmt="H", args=g)
+    r = Reader(_body(0x2024))
+    got = (r.u32(), r.u32(), r.s16())
+    r.done()
+    _check(got == (0x10, 0, 42) and _ids()[-1] == 0x1140,
+           "GM /chr power 42 -> 0x2024 [0x10][0][s16 42] then 0x1140", repr(got))
+    # stamina -> stamina_push (maskA 0x40 u16 -> [unit+0x4aa]), stored
+    _setup()
+    feworld._SESSION.pop("stamina", None)
+    dbg(0x14, 700, fmt="H", args=g)
+    r = Reader(_body(0x2024))
+    got = (r.u32(), r.u32(), r.u16())
+    r.done()
+    _check(got == (0x40, 0, 700) and H.STORE.get("stamina") == 700
+           and _ids()[-1] == 0x1140,
+           "GM /chr stamina 700 -> 0x2024 [0x40][0][u16 700], stored, then 0x1140",
+           repr(got))
+    _setup()
+    goff = H._args(unit_id="auto", gm_accounts="tester", sos="on",
+                   gm_slash="verbs", monster_base=400, stamina="off")
+    dbg(0x14, 700, fmt="H", args=goff)
     r = Reader(_body(0x1141))
-    _check(r.u32() == 2 and _ids() == [0x1141], "GM /chr power -> NG 2 (no setter)")
+    _check(r.u32() == 2 and _ids() == [0x1141], "GM /chr stamina under --stamina off -> NG 2")
     r.done()
     # another unit's id -> NG 2
     _setup()

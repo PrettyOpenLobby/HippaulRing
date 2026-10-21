@@ -128,8 +128,11 @@ one client can walk the whole machine.
             then 0x2055 + the 0x107A burst (bag_layout_push) + wallet_push
   0x2056 -> drop; 0x2056 [tid][reason] to the other side
 
-Chosen, not measured: A = gold, B = crystal (the NG texts name both
-currencies, the box ORDER is not labelled anywhere in the ctor);
+A = GOLD, B = CRYSTAL -- READ 2026-10-08, no longer a choice: the window
+ctor builds both "Input" boxes at 0x050b2047 / 0x050b20ec and caps the +0xe0
+box (A) by [player+0x4ec] GOLD (0x050b2080) and the +0xe4 box (B) by
+[player+0x8ac] CRYSTAL (0x050b210d). Round 2 suite: fe_tradeloop_test.py.
+Chosen, not measured:
 --trade-slots 9 (the entry list's own bound); SlotCnt is never read by the
 PC client anyway. The two-sided apply is NOT atomic: the partner applies
 first and reports back; if the local re-check then fails, the partner keeps

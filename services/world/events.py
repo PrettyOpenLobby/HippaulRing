@@ -182,7 +182,55 @@ QUESTS = {
         "rest": "I'm still reading the last one. Come back another day.",
     },
 }
+# ---------------------------------------------------------------------------
+# THE LUCK TEST (おまえの運はいか程か / 運試し), round 2 2026-10-08. A RoD
+# retail draw that left at the FEZ handover: pay gold, get one of three items
+# out of a bag. SOURCED: the givers and fees off fewiki's Quest page
+# (s_fv_quest.txt, 2006-03-17: Elsword Ficky 30 G, Hordaine Yan 100 G; the
+# Netzawar, Gebrand and Cesedria givers are not named, so nobody plays it
+# there), the prizes and their odds off the July 2006 tally of 1,500 draws
+# (fewiki Hordaine page: Steak 4.2 %, Power Pot 42 %, Bread 53.8 %), and the
+# meaning of SE's own quest-log line ("three items in a bag; pay gold and
+# you get one"). The 2006-03 page's first prize (a gem) is contested on the
+# same page and is not in FE_ITEM_DATA: Steak is the top prize. The LINES
+# are OURS. Repeatable, no cooldown: every draw is paid. The fee is taken
+# and the prize rolled when the player says Yes (the inn's live 'pay'
+# step); the item goes into the bag after the close, like every quest's.
+# ---------------------------------------------------------------------------
+LUCK_PRIZES = ((4, 538, "Bread"), (20, 420, "Power Pot"), (35, 42, "Steak"))
+QUESTS["luck"] = {
+    "givers": (535, 737),                     # Ficky (Elsword), Yan (Hordaine)
+    "kind": "draw", "repeat": "paid", "fee": {535: 30, 737: 100},
+    "offer": "Step right up! There are three things in this bag -- pay me "
+             "and you take one out. How lucky are you?",
+    "prompt": "Try your luck for %d gold?",
+    "refuse": "Suit yourself. Luck waits for no one.",
+    "short": "You haven't got the gold for it, friend.",
+    "full": "Your pack is full -- I can't hand you anything.",
+    "won": "Let's see what you drew... %s!",
+}
 QUEST_BY_GIVER = {s: q for q, d in QUESTS.items() for s in d["givers"]}
+
+
+def luck_roll(rng=None):
+    """One draw from LUCK_PRIZES by their per-mille odds: (item, name)."""
+    import random
+    r = (rng or random).randrange(1000)
+    for item, pm, name in LUCK_PRIZES:
+        if r < pm:
+            return item, name
+        r -= pm
+    return LUCK_PRIZES[0][0], LUCK_PRIZES[0][2]
+
+
+def luck_script(args, row):
+    d = QUESTS["luck"]
+    fee = int(d["fee"].get(int(row.get("script") or 0), 30))
+    return [("text", d["offer"]),
+            ("menu", d["prompt"] % fee, ["Yes", "No"],
+             {0: [("draw", fee, "luck")],
+              1: [("text", d["refuse"]), QUEST_END],
+              "cancel": [("text", d["refuse"]), QUEST_END]})]
 QUEST_END = ("window", EV_WIN_END, 0)
 
 
@@ -194,7 +242,10 @@ def quest_state(args):
 
 
 def quest_cooldown(args, q):
-    over = int(getattr(args, "quest_cooldown_secs", -1))
+    """Seconds between two hand-ins of quest `q`: --quest-cooldown-secs (one
+    in-game day, 2400 s, by default -- an anti-farm rule (OURS); retail
+    Cheese had none), or each quest's own with -1."""
+    over = int(getattr(args, "quest_cooldown_secs", QUEST_DAY_S))
     return over if over >= 0 else int(QUESTS[q].get("cooldown", 0))
 
 
@@ -209,6 +260,8 @@ def quest_script_for(args, row, now=None):
         return None
     if q is None:
         return None
+    if QUESTS[q].get("kind") == "draw":
+        return luck_script(args, row)
     d, st = QUESTS[q], quest_state(args).get(q, {})
     if not st.get("on"):
         return [("text", d["offer"]),
@@ -274,6 +327,19 @@ def event_after(conn, outbound, mode, be, args, ev):
             character._store_char_field(args, "items", [list(x) for x in new])
             inventory.bag_layout_push(conn, outbound, mode, be, args, rows, new, gone,
                             "quest %s hand-in" % q)
+        elif kind == "prize":
+            # a quest's item reward, after the close (the luck test's draw)
+            item, q = int(step[1]), step[2]
+            rows = itemrecords.item_rows(args)
+            if len(rows) >= inventory.bag_capacity(args):
+                print("[feworld]    quest %s: the bag filled up before the "
+                      "close -- item %d NOT given (the fee stays paid)"
+                      % (q, item), flush=True)
+                continue
+            new = rows + [(inventory.new_item_uid(args, rows), item, 0, 1)]
+            character._store_char_field(args, "items", [list(x) for x in new])
+            inventory.bag_layout_push(conn, outbound, mode, be, args, rows, new,
+                                      [], "quest %s prize %d" % (q, item))
         elif kind == "credit":
             wallet.wallet_credit(conn, outbound, mode, be, args, gold=int(step[1]),
                           why="quest %s reward" % step[2])
@@ -425,7 +491,27 @@ def event_step(conn, outbound, mode, be, args):
         return
     step = ev["steps"][pc]
     ev["pc"] = pc + 1
-    if step[0] in ("take", "credit", "qset"):
+    if step[0] == "draw":
+        # the luck test: room in the bag, then the fee, then the roll -- the
+        # line names the prize, the item itself follows the close
+        d = QUESTS["luck"]
+        fee, q = int(step[1]), step[2]
+        if len(itemrecords.item_rows(args)) >= inventory.bag_capacity(args):
+            rest = [("text", d["full"]), QUEST_END]
+        else:
+            ok, _short = wallet.wallet_charge(conn, outbound, mode, be, args,
+                                              fee, 0, "quest %s draw" % q)
+            if not ok:
+                rest = [("text", d["short"]), QUEST_END]
+            else:
+                item, name = luck_roll(sess._SESSION.get("luck_rng"))
+                print("[feworld]    quest %s: paid %d gold, drew item %d (%s)"
+                      % (q, fee, item, name), flush=True)
+                rest = [("prize", item, q), ("qset", q, "done"),
+                        ("text", d["won"] % name), QUEST_END]
+        ev["steps"] = ev["steps"][:ev["pc"]] + rest
+        return event_step(conn, outbound, mode, be, args)
+    if step[0] in ("take", "credit", "qset", "prize"):
         # a quest's bag/wallet/state change waits for the CLOSE (event_after)
         ev.setdefault("after", []).append(step)
         return event_step(conn, outbound, mode, be, args)

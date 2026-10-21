@@ -162,6 +162,7 @@ def enter_area(conn, outbound, mode, be, args, group_id, area_id=0, room=None):
                 worn = {u: w for u, w in worn.items() if w not in (0, 1)}
         if getattr(args, "field_items", "bag") != "on":
             equip = []                              # the worn-gear record crashed live #11
+        itemrecords.item_wear_load(args)            # --item-wear on: the per-item pair rides the bag
         body += itemrecords.bag_record(items, worn,             # 0x0503d330 sub-record: THE BAG
                            getattr(args, "field_item_kind", "both"))
         body += itemrecords.equip_record(equip, items)          # 0x0503c470 sub-record: WORN GEAR

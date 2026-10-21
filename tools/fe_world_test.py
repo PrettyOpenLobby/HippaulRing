@@ -1908,8 +1908,10 @@ def main():
                                      "steps": feworld.event_script_for(
                                          ca, {"name": "Inn_Master", "script": 3105})}
         feworld.event_step(None, None, 0, False, ca)
-        check("the inn puts you back to full HP, pushed, then welcomes you",
-              feworld._SESSION["player_hp"] == feworld.player_hp_max(ca) and len(out_) == 2
+        # three frames since 2026-10-01 (audit C18): the HP push, the Pw
+        # push the inn also does (manual p.30), then the welcome line
+        check("the inn puts you back to full HP and Pw, pushed, then welcomes you",
+              feworld._SESSION["player_hp"] == feworld.player_hp_max(ca) and len(out_) == 3
               and feworld._SESSION["event"]["steps"][0] == ("heal",), repr(len(out_)))
     finally:
         feworld.send, feworld._store_char_field, feworld.bag_layout_push, \

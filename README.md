@@ -15,7 +15,7 @@ is extracted from YOUR OWN client install by the tools in this repository.
   look for it (`git clone https://github.com/PrettyOpenLobby/HippaulRing.git hippaulring`).
   A checkout from before the rename, still named `crystalring`, needs renaming.
 - The core lobby stack (openlobby) checked out beside this repository
-  (`../openlobby`) and running on the same Docker host. The Fantasy Earth
+  (`../openlobby`), on the same Docker host. The Fantasy Earth
   services join its compose project and keep their characters and mail in
   its PostgreSQL database.
 - A Fantasy Earth client install of your own
@@ -25,6 +25,8 @@ is extracted from YOUR OWN client install by the tools in this repository.
 
 ## Bring-up
 
+From this directory:
+
 ```
 # 1. cipher tables, computed from public constants (no client needed):
 python tools/gen_blowfish_tables.py
@@ -32,21 +34,54 @@ python tools/gen_blowfish_tables.py
 # 2. game data, extracted from YOUR client install:
 python tools/fedata_build.py --client "C:\path\to\FantasyEarth"
 
-# 3. the services, added to the core's compose project:
-#    set FE_ADVERTISE to your server's LAN/VPN IP in ../openlobby/.env
-docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.yml up -d --build
+# 3. the services, with the core and any other game you have enabled:
+python ../openlobby/tools/stack.py enable fe
+python ../openlobby/tools/stack.py compose up -d --build
 ```
 
-The image is built on the core image (`openlobby:latest`, or the image named
-by `OPENLOBBY_IMAGE`), so build the core first.
+Step 3 builds the core image, builds this repository's image on it, starts
+`fellb`, `felobby` and `feworld`, and swaps the title plugin (below) into
+the core's `login` and `authsess`. `stack.py` is OpenLobby's launcher for the
+core and its games (OpenLobby's docs/games.md): it remembers which games you
+enabled, runs them in the core's compose project, and when several games
+plug into `login` it builds their images one on another and lists them all
+in `POL_TITLES`. `python ../openlobby/tools/stack.py check` says whether
+steps 1 and 2 have been run.
 
-Without building: the image is published to
-`ghcr.io/prettyopenlobby/hippaulring` on every push (it carries the cipher
-tables, so step 1 is not needed); step 2 still runs on the host, and the
-override mounts your `services/fedata/` into the containers:
+The game hands clients the core's `POL_ADVERTISE` (OpenLobby's `.env`).
+`FE_ADVERTISE` in this directory's `.env` (copy `.env.example`) overrides
+it for Fantasy Earth alone; stack.py passes that file after OpenLobby's.
+
+### By hand
+
+The command stack.py runs for Fantasy Earth alone, from this directory:
 
 ```
-docker compose --project-directory ../openlobby -f ../openlobby/docker-compose.yml     -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml \
+    -f docker-compose.yml -f docker-compose.title.yml up -d --build
+```
+
+Compose refuses an `--env-file` that does not exist, so leave out the one
+you have not created. Build the core first (`docker compose build` in
+`../openlobby`): both images here are built on `openlobby:latest`, or the
+image named by `OPENLOBBY_IMAGE`.
+
+### Without building
+
+The game image is published to `ghcr.io/prettyopenlobby/hippaulring` on
+every push (it carries the cipher tables, so step 1 is not needed); step 2
+still runs on the host, and the override mounts your `services/fedata/`
+into the containers. `python ../openlobby/tools/stack.py compose --ghcr up -d`
+uses it; the title plugin's small image is still built locally, on the
+published core. By hand, without the plugin:
+
+```
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml \
+    -f docker-compose.yml -f docker-compose.ghcr.yml up -d
 ```
 
 Step 2 writes `services/fedata/` (spawn tables, item and skill parameters,
@@ -153,16 +188,20 @@ The core builds the profile the Viewer shows for a Fantasy Earth Content ID from
 data only this title holds, so a small plugin runs inside the core's `login`
 and `authsess` processes (OpenLobby's `services/titles.py`, `POL_TITLES`).
 `Dockerfile.title` layers it on the core image and `docker-compose.title.yml`
-swaps that image into those two services. From this directory, with the core
-checked out beside it:
+swaps that image into those two services. The bring-up above includes it.
+To rebuild only those two, from this directory:
 
 ```
-docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.title.yml     up -d --build login authsess
+docker compose --project-directory ../openlobby \
+    -f ../openlobby/docker-compose.yml -f docker-compose.title.yml \
+    up -d --build login authsess
 ```
 
-Without it the game plays the same; only the Viewer's profile screen for a Fantasy Earth Content ID stays empty. The plugin reads the player database, the core's own PostgreSQL. To run several titles, build each title image on the previous
-one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
-`.env`, for example `POL_TITLES=tmtitle,fetitle`.
+Without it the game plays the same; only the Viewer's profile screen for a
+Fantasy Earth Content ID stays empty. The plugin reads the player database,
+the core's own PostgreSQL. With other games enabled, run
+`python ../openlobby/tools/stack.py compose up -d --build` instead: it builds
+each title image on the previous one and lists every plugin in `POL_TITLES`.
 
 ## Pointing a client at it
 

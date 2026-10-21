@@ -143,6 +143,43 @@ KEEP_ERR = {0: "no error", 1: "can't build a keep during a truce",
 #: the per-member status byte the dialog switches on (0x050334a0), and the
 #: reply byte the buttons send (0x050335d0) -- the same numbers on purpose
 VOTE_PENDING, VOTE_REJECT, VOTE_ACCEPT = 0, 1, 2
+#: KEY: THE WAR GAUGE'S TWO 支配領域 BARS HAVE A WIRE (static, 2026-10-08).
+#: 0x1176 is dispatcher c1's second switch, case 2 (ids 0x1152..0x117D, byte
+#: table 0x0505418c, jump table 0x05054178), arm 0x05053a64: it reads
+#: [u32][u32] straight into the in-field war gauge object ([0x5344f14],
+#: class ctor 0x0510dc50, the child the war view keeps at [view+0x74]) at
+#: +0x40 and +0x44. The gauge's per-frame animator 0x05111010 walks the
+#: field's buildings for the two base HP bars (+0x38 from a type-0x10 Keep,
+#: +0x3c from a type-0x0f Castle, each +0x778/+0x774 x 480) and then steps
+#: +0x48 toward +0x40 and +0x4c toward +0x44 by 0xff a frame, clamped to
+#: 0..0x10000; the draw (0x0510df30, reads at 0x051103cc / 0x051106fc)
+#: scales +0x48/+0x4c by 66/65536 px. So the full scale is 0x10000 = 100%
+#: and nothing but this message ever writes the targets (init 0x0510def0
+#: zeroes them). The inventory had 0x1176 filed as a trade notice from a
+#: doc guess; the arm is the gauge's. WHICH BAR IS WHICH SIDE is a READING:
+#: the HP pair is attacker (+0x38) then defender (+0x3c), so the share pair
+#: is sent attacker first. Live check: one side with obelisks, the other
+#: with none -- the bar that moves names the slot.
+WAR_GAUGE = 0x1176
+GAUGE_FULL = 0x10000
+#: KEY: THE RESULT WINDOW'S "VIEW RANKING" IS 0x112A (static, 2026-10-08).
+#: The result window's notify handler 0x05114FA0 hands its View Ranking
+#: button ([win+0x74]) to 0x05115000 with [mgr+0xf0], and 0x05115118 shows
+#: that object; the ONLY writer of [mgr+0xf0] is the c3 arm 0x050583f8
+#: (second c3 switch, ids 0x1129.., byte table 0x05058cd4, case 1 = 0x112A),
+#: which builds a 0x104-byte window (ctor 0x05111f80, title 戦闘結果を見る
+#: 0x52e5f2c) and decodes [u16 n] n x {cstr name, u16 x5, u32} into
+#: 0x40-byte rows (0x05112e50: name at +0x04, the u16s at +0x28..+0x38,
+#: the u32 at +0x3c). Its eight columns take their headers from the pointer
+#: table at 0x52e5f04 (read at 0x05112488): '', Ranking, Kills, Deaths,
+#: Summ, Destroyed, Built, Score -- so row order = the ranking, and the
+#: numbers follow the headers: kills, deaths, summons, destroyed, built, then
+#: the u32 score. fewar carries the same layout as `POPUP` from the 09-10
+#: static pass, unidentified; this names it. READING: that the list draws
+#: column i from record field i (the generic list control was not opened).
+WAR_RANKING = 0x112A
+RANK_ROWS_MAX = 100          # 50 v 50 is the whole war
+RANK_NAME_MAX = 0x23         # the row's name slot is 0x24 bytes, NUL included
 #: 0x1021 MSG_DECIDE_COUNTRY_NG codes (fe-ng-table.tsv); the war screen's arm
 #: 0x05117f7c clears the in-flight byte [screen+0x70] and draws the text
 DC_NG_ALREADY, DC_NG_NOT_AT_WAR = 5, 7
@@ -230,6 +267,9 @@ def _row_from(v):
             "build_seq": int(v.get("build_seq", 0) or 0),
             # SE's rank entry cost committed per side (--rank-cost)
             "spent": {str(a): int(b) for a, b in (v.get("spent") or {}).items()},
+            # each side's 支配領域 (territory_share) as last computed, 0..1:
+            # what the war gauge's two bars are fed (0x1176, war_gauge_push)
+            "share": {str(a): float(b) for a, b in (v.get("share") or {}).items()},
             # when PREP turned into WAR (time.time()): the start of the
             # war-time every member's participation is measured against
             "war_at": float(v.get("war_at", 0) or 0),
@@ -238,6 +278,11 @@ def _row_from(v):
             # everyone stayed to the end. Set when PREP turns into WAR, so a
             # war already running when the knob arrived keeps the old rule.
             "presence": bool(v.get("presence", False)),
+            # [winner, old holder, new holder] of the war this row settled:
+            # every session in the field hears its land notify from it on its
+            # own next pump (drive_client's TRUCE), not only the one whose
+            # pump decided the war
+            "outcome": (list(v["outcome"]) if v.get("outcome") else None),
             "settled": bool(v.get("settled", False))}
 
 
@@ -630,9 +675,12 @@ def declare(args, area, attacker=None, now=None, grid=None, members=None):
     for k, m in (members or {}).items():
         row["members"][k] = dict(m)
         row["signups"][m["side"]] = row["signups"].get(m["side"], 0) + 1
+        cost = int(m.get("cost") or 0)
+        if cost > 0:                       # the ★ gap counts them from the start
+            row["spent"][m["side"]] = int(row["spent"].get(m["side"], 0)) + cost
     if getattr(args, "keeps", "off") == "on":
         hp = max(1, min(32767, int(getattr(args, "keep_hp", 3000) or 3000)))
-        row["keeps"] = {"def": [hp, hp], "atk": [hp, hp]}
+        row["keeps"] = {"def": [fw.castle_shield_hp(args, holder, hp)] * 2, "atk": [hp, hp]}
     with _LOCK:
         _STATE[area] = row
     save(args)
@@ -683,9 +731,43 @@ def sign_up(args, area, side, who=None):
             members[who["key"]] = {"a": who.get("a"), "c": who.get("c"),
                                    "n": who.get("n"), "side": side, "dmg": 0,
                                    "pc_dmg": 0, "kills": 0, "cost": cost,
+                                   # the ranking window's columns (0x112A):
+                                   # kills above, then these four
+                                   "deaths": 0, "summons": 0, "built": 0,
+                                   "destroyed": 0,
+                                   "name": who.get("name"),
                                    "t": time.time()}
     save(args)
     return n
+
+
+def _credit_member(args, area, field, n=1, charid=None):
+    """Add `n` to one counter of a member row of `area`'s war -- this
+    session's row, or the row whose charid is `charid`. These are the
+    ranking window's columns (0x112A): kills, deaths, summons, built,
+    destroyed. Silent when there is no such row (a spectator)."""
+    key = _me()[0]
+    with _LOCK:
+        r = _STATE.get(int(area)) if area is not None else None
+        if not r or r["phase"] not in (PREP, WAR):
+            return False
+        members = r.get("members") or {}
+        m = None
+        if charid is not None:
+            for row in members.values():
+                try:
+                    if int(row.get("c")) == int(charid):
+                        m = row
+                        break
+                except (TypeError, ValueError):
+                    continue
+        elif key is not None:
+            m = members.get(key)
+        if m is None:
+            return False
+        m[field] = int(m.get(field, 0) or 0) + int(n)
+    save(args)
+    return True
 
 
 def king_heard(args, charid=None):
@@ -843,6 +925,9 @@ def pc_damage(args, area, dmg, kill=False, victim=None):
     if kill and phase_of(area) == WAR:
         war_ticker(args, area, _my_name(), _peer_name(victim)
                    if victim is not None else _fallen_peer(area), kind=1)
+        if victim is not None:
+            # the fallen player's own row: the ranking window's Deaths
+            _credit_member(args, area, "deaths", charid=victim)
     with _LOCK:
         r = _STATE.get(int(area))
         if not r or r["phase"] != WAR:
@@ -923,6 +1008,10 @@ def war_ticker(args, area, actor, target, kind=1):
     session standing in `area`, this one included (--war-ticker on)."""
     if str(getattr(args, "war_ticker", "off") or "off") != "on" or area is None:
         return False
+    # the arm (0x05058371) reads each name into a 0x84-byte stack buffer
+    # with an unbounded cstr read: a relayed name never exceeds 0x80 bytes
+    actor = str(actor).encode("cp932", "replace")[:0x80].decode("cp932", "ignore")
+    target = str(target).encode("cp932", "replace")[:0x80].decode("cp932", "ignore")
     side = int(_nation(args) or 0xFF)
     print("[fecampaign] area %s: battle report -- %s %s %s"
           % (area, actor, "destroyed" if kind == 4 else "defeated", target),
@@ -1380,7 +1469,7 @@ def settle(args, area, winner, defender):
         except Exception as e:                         # noqa: BLE001
             print("[fecampaign] crystal reset for %s failed: %s" % (key, e),
                   flush=True)
-    out = []
+    out, posts, ranked = [], [], []
     for key, m in sorted(members.items()):
         won = m.get("side") == winner
         got = {}
@@ -1474,21 +1563,40 @@ def settle(args, area, winner, defender):
             # everything the WAR RESULT window draws goes with it: the window
             # is pushed on Field Out, on the player's own thread, long after
             # this settlement ran on somebody else's (feworld.war_result_*)
-            fw.ext_post("campaign.reward",
-                        {"charid": cid, "won": won, "area": int(area),
-                         "rank": got["rank"], "rings": got["rings"],
-                         "exp": got.get("exp", 0),
-                         "score": got.get("score", 0),
-                         "side": m.get("side"),
-                         "players": {"atk": int(signups.get("atk", 0)),
-                                     "def": int(signups.get("def", 0))},
-                         "scores": dict(scores),
-                         "destroyed": destroyed,
-                         # share of the war this member was present, 0..1
-                         # (--war-presence); the manual's 参加時間
-                         "frac": frac},
-                        to=lambda s, _n, cid=cid: s.get("charid") is not None
-                        and int(s["charid"]) == cid, include_me=True)
+            posts.append((cid, {"charid": cid, "won": won, "area": int(area),
+                                "rank": got["rank"], "rings": got["rings"],
+                                "exp": got.get("exp", 0),
+                                "score": got.get("score", 0),
+                                "side": m.get("side"),
+                                "players": {"atk": int(signups.get("atk", 0)),
+                                            "def": int(signups.get("def", 0))},
+                                "scores": dict(scores),
+                                "destroyed": destroyed,
+                                # share of the war this member was present,
+                                # 0..1 (--war-presence); the manual's 参加時間
+                                "frac": frac}))
+        ranked.append({"c": m.get("c"), "name": m.get("name"),
+                       "kills": int(m.get("kills") or 0),
+                       "deaths": int(m.get("deaths") or 0),
+                       "summons": int(m.get("summons") or 0),
+                       "destroyed": int(m.get("destroyed") or 0),
+                       "built": int(m.get("built") or 0),
+                       "score": int(got.get("score", 0) or 0),
+                       "side": m.get("side")})
+    # KEY: THE RANKING (0x112A, the result window's View Ranking): every
+    # member in score order, the same list to everyone, so the window each
+    # player opens on Field Out ranks the whole war and not just themselves.
+    # Retail ranked by score (the manual p.53: the ranking tab); ties keep
+    # the sign-up order. Names come from the member row (the sign-up's
+    # presence card) and fall back to the live session or 'charid N'.
+    ranked.sort(key=lambda row: -row["score"])
+    ranking = [dict(row, name=str(row.get("name") or _peer_name(row["c"])))
+               for row in ranked[:RANK_ROWS_MAX]]
+    for cid, payload in posts:
+        payload["ranking"] = ranking
+        fw.ext_post("campaign.reward", payload,
+                    to=lambda s, _n, cid=cid: s.get("charid") is not None
+                    and int(s["charid"]) == cid, include_me=True)
     win_nation = atk if winner == "atk" else holder
     with _LOCK:
         for n in {atk, holder}:
@@ -1522,6 +1630,8 @@ def on_reward_relay(ctx, payload):
             "score": int(payload.get("score") or 0),
             "frac": float(payload.get("frac") if payload.get("frac") is not None
                           else 1.0),
+            # the ranking window's rows (0x112A), pushed right after 0x1100
+            "ranking": list(payload.get("ranking") or []),
             "t": time.time(),
         }
     except Exception as e:                             # noqa: BLE001
@@ -1698,7 +1808,10 @@ def _present_here(ctx, args, now):
         s.pop("campaign_seen", None)
         s.pop("campaign_start_due", None)
         s.pop("campaign_nation", None)    # re-read at the next field entry
+        s.pop("campaign_rank", None)
+        s.pop("campaign_field", None)
         s.pop("keeps_none", None)
+        s.pop("gauge_sent", None)
         if s.get("keeps_area") is not None:
             s.pop("keeps_area", None)
             s.pop("keeps", None)          # the client tore them down on exit
@@ -1707,7 +1820,30 @@ def _present_here(ctx, args, now):
         s.pop("built_seen", None)         # ...and the players' buildings
         _crystal_expire(ctx, args, None)  # crystals outlive no war
         return
+    if s.get("campaign_field") != area:
+        # KEY: A FIELD CHANGE IS A TEARDOWN TOO (2026-10-08). Walking from
+        # one war field straight into another (0x2016/0x2000, in_field never
+        # false) reloads the scene: the client drops every object it had,
+        # the keeps included (0x1004 before the change is neither needed nor
+        # sent -- the field load discards them, and the 09-11 exit crash was
+        # the building.pak remount racing a placement on the NEXT field,
+        # closed by the field_ready gate). What did NOT follow it was this
+        # session's bookkeeping: `built_seen` is keyed by object id alone,
+        # so a building 3000 of the new field read as "already served" when
+        # the old field had a 3000, and `gauge_sent` held the old field's
+        # pair. Everything per-field starts over here; the keeps registry
+        # already prunes by area in _keeps_only.
+        if s.get("campaign_field") is not None:
+            print("[fecampaign] field %s -> %s: the client reloaded the "
+                  "scene, forgetting what was served there"
+                  % (s.get("campaign_field"), area), flush=True)
+        s["campaign_field"] = int(area)
+        for k in ("campaign_seen", "campaign_start_due", "keeps_none",
+                  "gauge_sent", "crystals_area", "war_crystals", "built_seen"):
+            s.pop(k, None)
     _nation(args)                         # cached for the voters' scan
+    if "campaign_rank" not in s:
+        s["campaign_rank"] = _my_rank(args)   # ...and the ★ a vote commits
     _presence_tick(args, area, now)       # time in the war (--war-presence)
     r = state_of(area)
     if r["phase"] == PEACE and getattr(args, "campaign_auto", None) == "on":
@@ -1741,6 +1877,7 @@ def _present_here(ctx, args, now):
     # first presented. _keeps_present is idempotent -- keeps_area gates it once
     # the buildings are out.
     _keeps_present(ctx, args, area, r["phase"])
+    war_gauge_push(ctx, args, area, r["phase"])
     _crystal_expire(ctx, args, area)
 
 
@@ -1782,7 +1919,7 @@ def _keeps_only(ctx, args, area, phase):
         want["atk"] = (int(r["atk"]), list(r["keeps"].get("atk") or [0, 0]))
     elif str(getattr(args, "castle_always", "on") or "on") == "on" and holder:
         hp = max(1, min(32767, int(getattr(args, "keep_hp", 3000) or 3000)))
-        want["def"] = (holder, [hp, hp])
+        want["def"] = (holder, [fw.castle_shield_hp(args, holder, hp)] * 2)
     want = {k: v for k, v in want.items() if int(v[1][0]) > 0}
     reg = s.get("keeps") or {}
     for obj in [o for o, k in reg.items() if k.get("area") != area]:
@@ -2215,6 +2352,26 @@ def on_draw_crystal(ctx, inner):
     step = max(1, int(getattr(args, "crystal_draw", 1) or 1))
     per_war = int(getattr(args, "crystal_war_max", 20) or 20)
     carry = int(getattr(args, "crystal_carry_max", 50) or 50)
+    # THE PACE (2026-10-08): the client's own timer -- 5 s after the crouch,
+    # then 5 s a crystal, 10 s once it carries more than 10 (0x05152cf6,
+    # 0x05152d66) -- is now also the server's floor, less --crystal-pace-
+    # slack. A draw that comes sooner is a client that does not run that
+    # timer, and it gets nothing (it is logged, not answered: 0x2081
+    # registers no reply).
+    if getattr(args, "crystal_pace", "on") == "on":
+        s = fw._SESSION
+        now = time.monotonic()
+        gap = 10.0 if int(have) > 10 else 5.0
+        gap -= float(getattr(args, "crystal_pace_slack", 1.0) or 0.0)
+        last = s.get("crystal_draw_at")
+        if last is not None and now - float(last) < gap:
+            print("[fecampaign]    0x2081: %.1f s after the last draw (the "
+                  "client's pace is %.0f s at %d carried) -- nothing drawn"
+                  % (now - float(last), gap + float(getattr(
+                      args, "crystal_pace_slack", 1.0) or 0.0), int(have)),
+                  flush=True)
+            return
+        s["crystal_draw_at"] = now
     with _LOCK:
         row = _STATE.get(area)
         drawn = int((row.get("drawn") or {}).get(key, 0)) if row else 0
@@ -2436,7 +2593,7 @@ def _tower_rows(args, area):
         # the two keeps are not in `buildings` -- they are the war's own, and
         # keep_grids says where they stand
         for obj, k in (fw._SESSION.get("keeps") or {}).items():
-            out.append((int(obj), {"t": 20 if k.get("side") == "def" else 16,
+            out.append((int(obj), {"t": 15 if k.get("side") == "def" else 16,
                                    "side": k.get("side"), "keep": True,
                                    "gx": None, "gz": None}))
     return out
@@ -2621,6 +2778,9 @@ def obelisk_drain(ctx, args, now):
             continue                    # the first pump only starts the clock
         for side in ("atk", "def"):
             share = territory_share(args, area, side)
+            with _LOCK:                      # the gauge reads the same number
+                if area in _STATE:
+                    _STATE[area].setdefault("share", {})[side] = float(share)
             dots = int(share * full)
             if dots <= 0:
                 continue
@@ -2630,6 +2790,71 @@ def obelisk_drain(ctx, args, now):
                   % (area, side, share * 100, dots, BASE_DOTS, foe), flush=True)
             base_hit(args, area, foe, "obelisk territory", conn=ctx.conn,
                      outbound=ctx.outbound, mode=ctx.mode, be=ctx.be, dots=dots)
+
+
+def _share_refresh(args, area):
+    """Recompute both sides' 支配領域 for `area` into the row's `share`,
+    the pair the war gauge is fed. Called when an obelisk goes up or comes
+    down and by the drain tick; the per-pump push reads the stored pair, so
+    the 64x64 sample runs on changes, not on every frame."""
+    if area is None:
+        return None
+    pair = {s: float(territory_share(args, area, s)) for s in ("atk", "def")}
+    with _LOCK:
+        r = _STATE.get(int(area))
+        if not r:
+            return None
+        r["share"] = pair
+    save(args)
+    return pair
+
+
+def gauge_pair(area):
+    """(attacker, defender) 支配領域 for the 0x1176 war gauge, in the
+    client's 0..0x10000 scale, off the row's stored `share` (0 when the war
+    has not computed one yet -- no obelisk, no territory)."""
+    r = state_of(area)
+    sh = r.get("share") or {}
+
+    def scale(v):
+        try:
+            return max(0, min(GAUGE_FULL, int(round(float(v) * GAUGE_FULL))))
+        except (TypeError, ValueError):
+            return 0
+    return scale(sh.get("atk", 0.0)), scale(sh.get("def", 0.0))
+
+
+def war_gauge_body(atk, dfn):
+    """0x1176 [u32 attacker share][u32 defender share], 0x10000 = 100%."""
+    return struct.pack(">II", int(atk) & 0xFFFFFFFF, int(dfn) & 0xFFFFFFFF)
+
+
+def war_gauge_push(ctx, args, area, phase, force=False):
+    """Feed the war gauge's two 支配領域 bars (--war-gauge on): 0x1176
+    whenever the pair differs from what THIS session was last sent, or on
+    `force` (a phase presentation). Only while the field is preparing for
+    or fighting a war; the gauge's own update zeroes the bars when the war
+    object goes. The attacker's share goes first (see WAR_GAUGE)."""
+    if str(getattr(args, "war_gauge", "on") or "off") != "on":
+        return False
+    s = fw._SESSION
+    if phase not in (PREP, WAR):
+        s.pop("gauge_sent", None)
+        return False
+    if not _client_armed():
+        # the arm drops the pair when the gauge object [0x5344f14] is not
+        # built yet, and a dropped pair is never re-said (gauge_sent): wait
+        # for this session's 0x1018 to have landed, then say it. READING:
+        # that the war window's arming is what builds the in-field gauge.
+        return False
+    pair = gauge_pair(area)
+    if not force and s.get("gauge_sent") == (int(area), pair):
+        return False
+    s["gauge_sent"] = (int(area), pair)
+    ctx.reply(WAR_GAUGE, war_gauge_body(*pair),
+              why="WAR GAUGE 支配領域 attacker %d/%d defender %d/%d (area %d)"
+                  % (pair[0], GAUGE_FULL, pair[1], GAUGE_FULL, area))
+    return True
 
 
 def territory_of(args, area, side):
@@ -2723,10 +2948,14 @@ def build_count(args, area, side, btype, grid=None):
         b = r.setdefault("built", {}).setdefault(side, {})
         b[str(int(btype))] = int(b.get(str(int(btype)), 0)) + 1
         n = b[str(int(btype))]
-        if grid is not None and int(btype) in OBELISK_TYPES:
+        obelisk = grid is not None and int(btype) in OBELISK_TYPES
+        if obelisk:
             r.setdefault("obelisks", {}).setdefault(side, []).append(
                 [int(grid[0]), int(grid[1])])
     save(args)
+    _credit_member(args, area, "built")        # the ranking's Built column
+    if obelisk:
+        _share_refresh(args, area)             # the gauge's 支配領域 moved
     return n
 
 
@@ -2832,6 +3061,9 @@ def building_fell(args, area, obj, conn=None, outbound=None, mode=None,
         # the battle report (--war-ticker): "<who> destroyed <building>"
         war_ticker(args, area, _my_name(),
                    fw.BUILDING_TYPES.get(btype, "building %d" % btype), kind=4)
+        # the ranking window's Destroyed column, for whoever felled it
+        # (this runs on the feller's thread: building_hit or !destroy)
+        _credit_member(args, area, "destroyed")
     if btype in OBELISK_TYPES:
         obelisk_gone(args, area, (b["gx"], b["gz"]))
     if b.get("side") in ("atk", "def"):
@@ -2963,6 +3195,7 @@ def obelisk_gone(args, area, grid):
                 break
     if hit:
         save(args)
+        _share_refresh(args, area)             # the gauge's 支配領域 shrank
     return hit
 
 
@@ -2983,6 +3216,7 @@ def summon_add(args, area, side, form):
         b[str(int(form))] = int(b.get(str(int(form)), 0)) + 1
         n = b[str(int(form))]
     save(args)
+    _credit_member(args, area, "summons")      # the ranking's Summ column
     return n
 
 
@@ -3013,13 +3247,47 @@ def ready_err_body(code, party=0, members=(), gold_short=0, crystal_short=0):
             + struct.pack(">hI", int(gold_short), crystal_short & 0xFFFFFFFF))
 
 
-def _accepts_needed(args):
+def _accepts_needed(args, nation=None):
     """--declare-accepts, the BUILDER INCLUDED; 0 and 1 both mean the builder
-    alone (solo testing)."""
+    alone (solo testing).
+
+    OURS, off by default: with --declare-quorum online the four SE asks
+    for become "that nation's players ONLINE right now, if fewer than four"
+    -- a nation of two cannot otherwise declare at all, and a small world
+    rarely has four of one nation online together. SE's four is the only
+    anti-solo-conquest guard, and this exception lets one player of a nation
+    that is alone online declare alone, which is why it is OFF by default."""
     try:
-        return max(0, int(getattr(args, "declare_accepts", 4)))
+        need = max(0, int(getattr(args, "declare_accepts", 4)))
     except (TypeError, ValueError):
-        return 4
+        need = 4
+    if nation and str(getattr(args, "declare_quorum", "accepts") or "accepts") == "online":
+        online = _nation_online(nation)
+        if 0 < online < need:
+            return online
+    return need
+
+
+def _nation_online(nation):
+    """Live world sessions playing a character of `nation`, anywhere in the
+    world (in a field, a capital, a room or on the map): the presence card's
+    force, or the campaign's cached nation for a session with no card yet."""
+    n = 0
+    seen = set()
+    for ent in fw.ext_sessions():
+        s = ent["session"]
+        cid = s.get("charid")
+        if cid is None or cid in seen:
+            continue
+        try:
+            f = int((s.get("pres_card") or {}).get("force") or 0) \
+                or int(s.get("campaign_nation") or 0)
+        except (TypeError, ValueError):
+            f = 0
+        if f == int(nation):
+            seen.add(cid)
+            n += 1
+    return n
 
 
 #: the keep dialog's member slots: 0xF502 carries exactly five (reader
@@ -3164,7 +3432,13 @@ def on_build_keep(ctx, inner):
         print("[fecampaign]    keep REFUSED: %s" % why, flush=True)
         _keep_err(ctx, code, why)
         return True
-    need = _accepts_needed(args)
+    need = _accepts_needed(args, nation)
+    if need != _accepts_needed(args):
+        print("[fecampaign]    --declare-quorum online: nation %d has %d "
+              "online, so %d accept(s) pass instead of --declare-accepts %d "
+              "(OURS, off by default)"
+              % (nation, _nation_online(nation), need, _accepts_needed(args)),
+              flush=True)
     voters = _voters(args, area, nation, cid)
     # with --declare-voters rotate the whole nation in the field can answer,
     # five at a time, so it is THEIR number that has to reach the target
@@ -3290,6 +3564,21 @@ def _vote_pass(ctx, args, vote):
         key, acct = vote["keys"].get(c, ("?|%d" % c, None))
         members[key] = {"a": acct, "c": c, "n": vote["atk"], "side": "atk",
                         "dmg": 0, "t": time.time()}
+    ranks = {}
+    for ent in fw.ext_sessions():
+        ps = ent["session"]
+        if ps.get("charid") is not None:
+            ranks[int(ps["charid"])] = int(ps.get("campaign_rank") or 1)
+    for m in members.values():
+        # the ranking window's name and counters (0x112A), from the start
+        c = m["c"]
+        m["name"] = _my_name() if c == _me()[2] else _peer_name(c)
+        for f in ("pc_dmg", "kills", "deaths", "summons", "built", "destroyed"):
+            m.setdefault(f, 0)
+        # SE's rank entry cost (--rank-cost): the declarers commit their ★
+        # like any 0x2018 join does (2026-10-08; they used to commit none,
+        # so a vote of five ★5 characters opened a war at ★0)
+        m["cost"] = rank_cost(args, ranks.get(int(c), 1))
     code, why = can_declare(args, area, vote["atk"])     # the world may have moved
     row = None if code is not None else declare(args, area, vote["atk"],
                                                 grid=vote["grid"], members=members)
@@ -3415,6 +3704,7 @@ def _advance(ctx, args, area, now):
             _STATE[area]["phase"] = TRUCE
             _STATE[area]["until"] = now + _ms(args, "war_truce_ms", 120000) / 1000.0
             _STATE[area]["signups"] = {}
+            _STATE[area]["outcome"] = [winner, int(old or 0), int(new or 0)]
         save(args)
         print("[fecampaign] area %d: At war -> Truce. %s won (rule %r); "
               "nation %s holds it%s"
@@ -3430,9 +3720,11 @@ def _advance(ctx, args, area, now):
             _STATE[area]["atk"] = 0
             # the war is over: nobody is 'in' it any more (one war at a time
             # ends HERE), and the next one starts from a fresh keep
-            for k in ("members", "drawn", "built", "obelisks", "summoned"):
+            for k in ("members", "drawn", "built", "obelisks", "summoned",
+                      "share"):
                 _STATE[area][k] = {}
             _STATE[area]["crystals"] = []   # the next war's deposits are full
+            _STATE[area]["outcome"] = None
             _STATE[area]["grid"] = None
             _STATE[area]["war_at"] = 0.0
             _STATE[area]["settled"] = False
@@ -3539,6 +3831,10 @@ def drive_client(ctx, args, area, phase, until):
     s["campaign_seen"] = (int(area), phase)
     ms = max(0, int((until - time.time()) * 1000)) if until else 0
     _keeps_present(ctx, args, area, phase)
+    # the gauge's two 支配領域 bars, re-said at every phase presentation
+    # (the client builds the gauge with the war view; a PREP/WAR entry is
+    # when it exists to be fed)
+    war_gauge_push(ctx, args, area, phase, force=True)
     if phase == PREP:
         # the pre-war countdown: arm it and send feworld's own 0x1018 (or
         # leave the held one to carry our deadline when the clock lands)
@@ -3566,6 +3862,13 @@ def drive_client(ctx, args, area, phase, until):
             fw.war_truce(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args, dl, kind)
         else:
             fw.war_arm("truce", dl, kind)
+        # KEY: THE LOSER HEARD NOTHING (2026-10-08, fe_warloop_test). The
+        # land notify went out only from the session whose pump decided the
+        # war; everyone else in the field got 0x1016 and no "captured by" /
+        # "defended" line. Each session now says it from the row's outcome.
+        oc = state_of(area).get("outcome")
+        if oc:
+            _outcome_notify(ctx, args, area, oc[0], oc[1], oc[2])
     else:
         if _client_armed():
             fw.war_peace(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
@@ -3590,9 +3893,14 @@ def _side_notify(ctx, args, area):
 
 
 def _outcome_notify(ctx, args, area, winner, old, new):
-    """Push the land notify that matches THIS player's side."""
+    """Push the land notify that matches THIS player's side, once per war
+    per session (drive_client and _advance can both reach it)."""
     if fw._SESSION.get("field") != area and not getattr(args, "campaign_notify_all", False):
         return
+    said = (int(area), float(state_of(area).get("war_at") or 0), winner)
+    if fw._SESSION.get("outcome_said") == said:
+        return
+    fw._SESSION["outcome_said"] = said
     mine = fw.nation_of(args)
     if not mine:
         return
@@ -3703,6 +4011,7 @@ def on_decide_country(ctx, inner):
             return True
         got = sign_up(args, area, side, who={"key": key, "a": acct, "c": cid,
                                              "n": _nation(args),
+                                             "name": _my_name(),
                                              "cost": rank_cost(args,
                                                                _my_rank(args))})
         if got == "full":
@@ -3827,6 +4136,7 @@ def gm(ctx, line):
                 _STATE[area]["phase"] = TRUCE
                 _STATE[area]["until"] = time.time() + _ms(args, "war_truce_ms", 120000) / 1000.0
                 _STATE[area]["signups"] = {}
+                _STATE[area]["outcome"] = [winner, int(old or 0), int(new or 0)]
         save(args)
         print("[fecampaign] area %s resolved: %s won, nation %s holds it%s"
               % (area, winner, new, "" if new == old else " (was %s)" % old),
@@ -3878,9 +4188,31 @@ def gm(ctx, line):
         print("[fecampaign] !campaign join %s: %s" % (side, got or "refused "
               "(no war in that area, or a bad side -- atk|def)"), flush=True)
         return True
+    if verb == "quorum":
+        # OURS: the keep vote's quorum, live (see _accepts_needed)
+        want = rest[1].lower() if len(rest) > 1 else ""
+        if want not in ("accepts", "online"):
+            print("[fecampaign] !campaign quorum accepts|online (currently %s: "
+                  "a keep vote needs %d accept(s)%s)"
+                  % (getattr(args, "declare_quorum", "accepts"),
+                     _accepts_needed(args),
+                     ", or the nation's players online when fewer"
+                     if getattr(args, "declare_quorum", "accepts") == "online"
+                     else ""), flush=True)
+            return True
+        prev = getattr(args, "declare_quorum", "accepts")
+        args.declare_quorum = want
+        print("[fecampaign] !campaign quorum %s (was %s) -- server-wide until "
+              "the next restart. %s" % (want, prev,
+              "A nation with fewer than %d online declares with everyone it "
+              "has online (OURS)." % _accepts_needed(args)
+              if want == "online" else
+              "SE's %d accepts, the builder counted." % _accepts_needed(args)),
+              flush=True)
+        return True
     print("[fecampaign] !campaign show | declare [AREA [NATION]] [force] | join "
-          "atk|def | win [atk|def] | end | auto on|off | trace on|off",
-          flush=True)
+          "atk|def | win [atk|def] | end | auto on|off | trace on|off | "
+          "quorum accepts|online", flush=True)
     return True
 
 
@@ -3906,8 +4238,27 @@ def add_args(ap):
                     help="accepts that pass a keep vote, THE BUILDER COUNTED "
                          "(SE: 4人以上が承諾; FFSKY reads 4 besides the builder). "
                          "0 or 1 = the builder alone declares (solo testing).")
+    ap.add_argument("--declare-quorum", choices=("accepts", "online"),
+                    default="accepts",
+                    help="OURS, off by default. accepts "
+                         "(default) = a keep vote passes on --declare-accepts, "
+                         "SE's four. online = the nation's players online "
+                         "right now, when FEWER than that: a nation of two "
+                         "declares with two. Trades SE's four-player "
+                         "guard against solo conquest for a war loop a small "
+                         "population can reach; `!campaign quorum` flips it "
+                         "live")
     ap.add_argument("--declare-rejects", type=int, default=3, metavar="N",
                     help="rejections that cancel a keep vote (SE: 3人が却下)")
+    ap.add_argument("--war-gauge", choices=("on", "off"), default="on",
+                    help="feed the in-field war gauge's two 支配領域 bars: "
+                         "0x1176 [u32 attacker][u32 defender], 0x10000 = the "
+                         "whole field, each side's obelisk coverage "
+                         "(territory_share), whenever it changes and at every "
+                         "phase presentation. The wire is read off the "
+                         "client (arm 0x05053a64 -> gauge +0x40/+0x44, drawn "
+                         "at 0x051103cc/0x051106fc); attacker-first is a "
+                         "READING, never on a screen")
     ap.add_argument("--declare-timeout-ms", type=int, default=60000, metavar="MS",
                     help="a keep vote with too few accepts by then is "
                          "cancelled, 0xF504 code 5 (SE: 60秒)")
@@ -3940,21 +4291,30 @@ def add_args(ap):
                          "to their stored Total Score, the number the fame "
                          "title is read from (manual p.47: the sum of war "
                          "scores). Other nations' volunteers too")
-    ap.add_argument("--war-ticker", choices=("on", "off"), default="off",
+    ap.add_argument("--war-ticker", choices=("on", "off"), default="on",
                     help="battle reports: 0x1129 '%%s defeated %%s' / '%%s "
                          "destroyed %%s' to everyone in a war field on a "
-                         "player kill or a building felled. OFF: the message "
-                         "is read statically and has never been on a screen")
-    ap.add_argument("--war-notify-keys", choices=("on", "off"), default="off",
+                         "player kill or a building felled. ON since "
+                         "2026-10-08: the retail manual (p.41) has the 戦況報告 "
+                         "tab, and the arm (0x05058371) reads exactly "
+                         "[cstr][u8][cstr][u8] into two 0x84-byte buffers "
+                         "(names are clamped to fit). Never on a screen")
+    ap.add_argument("--war-notify-keys", choices=("on", "off"), default="on",
                     help="put the defender's and attacker's nation ids in "
                          "0x1018's first two u32 (the war window's side record "
-                         "keys, 0x051157ff) so it names both sides; they are "
-                         "0 otherwise (--war-fields). OFF: unproven on a client")
-    ap.add_argument("--war-army-keys", choices=("on", "off"), default="off",
+                         "keys, 0x051157ff) so it names both sides; 0 draws "
+                         "neither. ON since 2026-10-08: retail's window named "
+                         "both nations, and a key with a 0x3027 record (every "
+                         "nation 1..5 has one) resolves; a key with none is "
+                         "skipped, not dereferenced. Never on a screen")
+    ap.add_argument("--war-army-keys", choices=("on", "off"), default="on",
                     help="after 0x1018, send 0x101F with the two nations as "
                          "the Join buttons' army ids (arm 0x05117e47), so a "
                          "click comes back as 0x2018 army=<nation> instead of "
-                         "0. OFF: read statically, never sent")
+                         "0. ON since 2026-10-08: it is the ONLY setter of "
+                         "the widgets' army in the client, so retail sent it; "
+                         "join_side honours a nation id and the 0x1021 arm "
+                         "retries the other button on a refusal. Never seen")
     ap.add_argument("--peace-atk-id", choices=("knob", "none", "zero"),
                     default="knob",
                     help="the 0x3031 group record's attacker for a field with "
@@ -4160,7 +4520,16 @@ def add_args(ap):
                     help="crystals credited per 0x2081 draw. The CLIENT times "
                          "the draws (0x05152ca0: 5 s, then 10 s above 10 "
                          "carried, none at 20); the RoD wiki says 1 per 5 s, "
-                         "10 s above 12. The server does not pace them")
+                         "10 s above 12. --crystal-pace holds the server to "
+                         "the client's timer")
+    ap.add_argument("--crystal-pace", choices=("on", "off"), default="on",
+                    help="refuse a 0x2081 draw that arrives sooner than the "
+                         "client's own timer allows (5 s, 10 s above 10 "
+                         "carried, less --crystal-pace-slack). Default on; "
+                         "off credits every draw as it comes")
+    ap.add_argument("--crystal-pace-slack", type=float, default=1.0,
+                    metavar="S", help="seconds of network jitter forgiven by "
+                                      "--crystal-pace (CHOSEN 1.0)")
     ap.add_argument("--crystal-heal-deplete", type=int, default=1, metavar="N",
                     help="crystals each crystal HEAL (0x20AD, feunit "
                          "--crystal-heal 50 HP per 5 s) takes out of a war's "
@@ -4237,8 +4606,15 @@ def register(feworld):
             (F_READY_ERR, "NotifyBuildToReadyKeepError [s16 code][u32 party]"
                           "[u32 member x5][s16 gold_short][u32 crystal_short]"),
             (0x1021, "MSG_DECIDE_COUNTRY_NG [u32 code]"),
+            (WAR_GAUGE, "WAR GAUGE 支配領域 [u32 attacker][u32 defender] "
+                        "0x10000 = 100%% (c1 arm 0x05053a64 -> gauge "
+                        "+0x40/+0x44; fecampaign)"),
+            (WAR_RANKING, "WAR RANKING window [u16 n]{cstr name,u16 kills,"
+                          "u16 deaths,u16 summons,u16 destroyed,u16 built,"
+                          "u32 score} (c3 arm 0x050583f8 -> [mgr+0xf0], the "
+                          "result window's View Ranking; fecampaign)"),
             (0x2081, "draw crystal [u32 crystal building] (fecampaign)")):
         if mid in (0x1127, 0x1021):
             fw.KNOWN.setdefault(mid, name)
         else:
-            fw.KNOWN[mid] = name     # fegm/feitems had these as guesses
+            fw.KNOWN[mid] = name     # fegm/feitems/fewar had these as guesses

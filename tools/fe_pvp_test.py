@@ -492,12 +492,12 @@ def table_checks():
     feworld.ext_post = spy
     try:
         _k, _b, _w, atk = feworld.player_attack(a)
-        row = fegamedata.lv_diff_correction(0)
-        want = max(1, int(round(atk * fegamedata.skill_power(0) / 100.0
-                                * (row[0] if row else 1.0))))
+        # 2026-10-08: no level row on a player hit (RoD: the correction
+        # was a monster rule; --pvp-level-gap on puts it back)
+        want = max(1, int(round(atk * fegamedata.skill_power(0) / 100.0)))
         cast(a, (12.0, 20.0, 0.0), skill=0, a_=3000, b_=4000)
-        check("the basic attack 2 u from Bob hits for ATTACK x POWER x level row "
-              "(%d), not the flat 25" % want,
+        check("the basic attack 2 u from Bob hits for ATTACK x POWER, no level "
+              "row (%d), not the flat 25" % want,
               len(POSTS) == 1 and POSTS[0]["dmg"] == want and want != 25
               and POSTS[0]["model"] == "table", (POSTS, want))
         rng, rad = fegamedata.skill_radius(0)

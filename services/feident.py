@@ -19,21 +19,19 @@ THE MECHANISM, AND ITS LIMIT
 ----------------------------
 FE never tells us who it is in a form we can trust:
 
-  * `0xC007 MSG_CERTIFICATION` carries a 52-byte credential blob lifted from
-    polcore ([0x52fe920]->vtable[0xea0]).
-    WARNING: THIS FILE ORIGINALLY SAID THAT BLOB IS A CONSTANT AND MUST NEVER BE
-    KEYED ON. THAT WAS WRONG -- see the blob section further down for the
-    correction and the evidence. The short version: fmo.py's "identical across
-    two machines" measurement is about a 16-byte field at `+0x38` that FE does
-    not send, while the 52-byte blob FE *does* send is the one fmo.py records
-    as VARYING PER SESSION. It may well be the per-account identity this whole
-    file works around, and `tools/fe_blob_verdict.py` is the experiment that
-    settles it. Until it does, nothing here keys on it -- but the reason is now
-    "unmeasured", not "known useless".
+  * `0xC007 MSG_CERTIFICATION` (lobby) and `0x400F` (world) carry a 52-byte
+    credential blob polcore built at launch. Since 2026-10-08 it is decoded
+    (openlobby contentauth.decode_blob): inside is an MD5 over our own 4:5
+    reply, the login clock and the session key, which the core files when it
+    answers 4:5. A blob whose hash is on file names the POL member with no
+    address involved, and that is what `identify_blob` tries FIRST. Only a
+    miss (no hash filed for this login, or bytes that are not a blob) falls
+    through to the address path below. The lines that follow describe that
+    fallback and are still true of it.
   * The account name in `0xC010 MSG_CERTIFICATION_OK` is whatever WE send. It is
     an output, not an input.
 
-So identity comes from where FMO gets it: `responders.py` writes a `session` row
+Failing the blob, identity comes from where FMO got it: `responders.py` writes a `session` row
 (member_id, nick, peer_ip, created_at) to the account database on every POL
 sign-in, and an FE launch can only follow a POL login from the same box. The
 account database is OpenLobby's PostgreSQL (POL_DATABASE_URL), read through
@@ -118,7 +116,7 @@ LEGACY_ACCOUNT = "TestPlayer"
 #: the wrong member and showed an empty character list, twice in one evening.
 #: `ambiguous` and `contested` stay out: those are guesses, and a remembered
 #: guess is a guess that outlives its evidence.
-REMEMBERABLE = ("sole", "roster")
+REMEMBERABLE = ("sole", "roster", "blob")
 
 #: Off disables POL-member keying and leaves every connection on an address
 #: key. Provided so a capture run can be made hermetic, NOT as a fallback --
@@ -226,6 +224,14 @@ def _accounts():
     import fedb  # noqa: F401  -- puts OpenLobby's services/ on sys.path
     import accounts
     return accounts
+
+
+def _contentauth():
+    """OpenLobby's `contentauth` module (the credential blob decoder and the
+    filed 4:5 hashes), found the same way as `accounts`."""
+    import fedb  # noqa: F401
+    import contentauth
+    return contentauth
 
 
 def _kv():
@@ -349,6 +355,14 @@ def member_for_ip(ip, tag="feident", lookup=None, window=None, roster=None):
                       % (nick, mid,
                          ", FE Content ID %s" % cid if cid else "", at,
                          confidence)}
+
+
+def _nick(acc, conn, member_id):
+    """The member's primary handle (the nick the lobby shows), for the log."""
+    try:
+        return acc.primary_handle(conn, int(member_id)) or None
+    except Exception:                          # noqa: BLE001
+        return None
 
 
 def _content_id(acc, conn, member_id):
@@ -510,6 +524,63 @@ def identify(ip, tag="feident", lookup=None, window=None,
                         "relaunch." % ", ".join(owners)) if owners else "")}
 
 
+def member_for_blob(blob, tag="feident"):
+    """The identity named by a credential blob, or None.
+
+    {key, member_id, nick, content_id, confidence "blob", detail}. A hit is a
+    fact about this login (the hash inside the blob was filed by the lobby
+    when it answered this member's 4:5), so it carries no address at all.
+    Never raises; a decoder that cannot be imported or a store that cannot
+    be read is logged and answered None, so the caller falls through.
+    """
+    if not blob:
+        return None
+    try:
+        ca = _contentauth()
+        mid, row, how = ca.member_for_blob(blob, log=lambda m: _log(tag, m),
+                                           tag="credential blob")
+    except Exception as e:                     # noqa: BLE001
+        _log(tag, "WARN credential blob not checked (%r) - falling back to "
+                  "the address path" % (e,))
+        return None
+    if mid is None:
+        return None
+    nick, cid = None, None
+    try:
+        acc = _accounts()
+        conn = acc.connect()
+        try:
+            cid = _content_id(acc, conn, mid)
+            nick = _nick(acc, conn, mid)
+        finally:
+            conn.close()
+    except Exception as e:                     # noqa: BLE001
+        _log(tag, "WARN member %s named by the blob, but the account database "
+                  "could not decorate it (%r)" % (mid, e))
+    return {"key": "member:%d" % mid, "member_id": mid, "nick": nick,
+            "content_id": cid, "confidence": "blob",
+            "detail": "%s%s [blob]"
+                      % (how, ", FE Content ID %s" % cid if cid else "")}
+
+
+def identify_blob(blob, ip, tag="feident", lookup=None, window=None,
+                  prefer_remembered=None):
+    """Resolve a connection to a store identity: the credential blob first,
+    the address path (`identify`) only when the blob does not decide.
+    Always returns a usable dict and logs which of the two decided."""
+    got = member_for_blob(blob, tag=tag)
+    if got:
+        _log(tag, "%s: the CREDENTIAL BLOB decided: %s (%s); the address was "
+                  "not consulted" % (ip, got["key"], got["detail"]))
+        if IP_MEMORY and ip:
+            _ip_memory_put(ip, got, tag=tag)
+        return got
+    _log(tag, "%s: the credential blob did not decide (%s) - resolving by "
+              "the ADDRESS path" % (ip, "%dB" % len(blob) if blob else "none"))
+    return identify(ip, tag=tag, lookup=lookup, window=window,
+                    prefer_remembered=prefer_remembered)
+
+
 def wire_account(ident, mode="member", fixed=None):
     """The account string to put in 0xC010 MSG_CERTIFICATION_OK.
 
@@ -533,48 +604,16 @@ def wire_account(ident, mode="member", fixed=None):
 
 
 # ---------------------------------------------------------------------------
-# The 0xC007 credential blob -- EVIDENCE GATHERING, not yet a key
+# The 0xC007 credential blob: observation log
 # ---------------------------------------------------------------------------
 #
-# WHY THIS EXISTS, AND WHAT IT IS NOT. The module docstring above says the blob
-# is a constant against our K=0 login and must never be keyed on. WARNING: THAT WAS
-# WRONG, and the correction is the reason this section exists.
-#
-# It came from applying an FMO measurement to the wrong field. fmo.py's 0x0321
-# credentials have TWO identity-shaped things in them:
-#
-#     +0x00  52B  polcore-minted auth blob -- "VARIES PER SESSION"
-#     +0x38  16B  polcore identity        -- stable per install, and MEASURED
-#                                            identical across two machines
-#
-# The "identical across two machines" finding is about **+0x38**, which FE's
-# 0xC007 does not carry at all. What it does carry is 52 bytes from the same
-# `vtable[0xEA0]` call that fills FMO's +0x00 -- the half fmo.py calls "a
-# session token plus a fixed machine/account identity", and whose interesting
-# half "belongs to polcore, whose auth our own server already mints elsewhere".
-#
-# Four captured FE blobs (logs/felobby-live*.log, one machine, one account)
-# agree with that shape: byte 2 and bytes 4..7 are identical in all four, the
-# leading u32 climbs, and the remaining 44 bytes vary completely.
-#
-# WARNING: AND THAT IS EXACTLY AS FAR AS THE EVIDENCE GOES. One machine and one
-# account cannot distinguish "these bytes identify the ACCOUNT" from "these
-# bytes identify the INSTALL", and those want opposite fixes:
-#
-#   per-ACCOUNT  -> key on them directly; no address, no handoff record, and two
-#                   POL accounts on one machine finally get two rosters.
-#   per-INSTALL  -> useless for that case; the answer is instead correlating
-#                   the varying remainder against the session token WE mint.
-#
-# So this records observations and DECIDES NOTHING. Nothing below is consulted
-# when resolving an identity. `tools/fe_blob_verdict.py` reads the file back and
-# says which of the two it is -- once, and only once, two different POL members
-# have each presented a blob.
-#
-# WARNING: DO NOT "SHORTCUT" THIS BY KEYING ON THE FIXED FIELD BEFORE THE VERDICT. If
-# it turns out to be the install, that is one roster per MACHINE -- a smaller
-# version of the bug this whole module exists to fix, and one that would look
-# correct on every single-account test.
+# This section recorded blobs while it was an open question whether they name
+# the account or the install. Settled 2026-10-08: the blob is a cipher record
+# (openlobby contentauth.py has the format) and the 16 bytes at +24 of its
+# plaintext are a hash of this login's 4:5 reply, so it names the LOGIN, which
+# is the account. `identify_blob` above keys on it. The recording stays only
+# because felobby still calls it and a misfiled hash is easier to chase with
+# the raw bytes in the table; the fields below were the old guesses.
 
 #: The observations go to the fe_blob_observation table (migration 1004).
 #: FE_BLOB_LOG names a JSON-lines file to use instead, which is what this
@@ -754,17 +793,46 @@ def _selftest():
     import sys
     sys.path.insert(0, os.path.join(_HERE, os.pardir, "tools"))
     import fepg
-    if fepg.fresh_database() is None:
-        return fepg.skip_or_fail("feident")
-    import festore
-    acc = _accounts()
-    kv = _kv()
-    kv.reset(kv.MemoryKV())
     state = {"ok": True}
 
     def check(label, cond):
         print("%-58s %s" % (label, "ok" if cond else "FAIL"))
         state["ok"] = state["ok"] and bool(cond)
+
+    # ---- the credential blob, no database needed --------------------------
+    # A blob whose hash the lobby filed names the member by itself; one whose
+    # hash nobody filed, and bytes that are not a blob, fall through to the
+    # address path (which, with no account database here, is an address key).
+    kv = _kv()
+    kv.reset(kv.MemoryKV())
+    ca = _contentauth()
+    h = ca.hash_for(b"\0" * 16, 0x68E6A5B8, b"\0" * 8)
+    filed = ca.blob_for_selftest(h)
+    unfiled = ca.blob_for_selftest(b"\x5a" * 16)
+    ca.file_hashes([h], 42, "uFE42", 11, "192.0.2.50")
+    b1 = identify_blob(filed, "192.0.2.50", tag="feident-test", lookup=False)
+    check("a filed credential blob names the member, no address used",
+          b1["key"] == "member:42" and b1["confidence"] == "blob")
+    check("...and remembers that member for the address",
+          (_ip_memory_get("192.0.2.50") or {}).get("key") == "member:42")
+    b2 = identify_blob(unfiled, "192.0.2.51", tag="feident-test", lookup=False)
+    check("an unfiled blob falls back to the address path",
+          b2["key"] == "addr:192.0.2.51")
+    b3 = identify_blob(b"\xff" * 52, "192.0.2.52", tag="feident-test", lookup=False)
+    b4 = identify_blob(b"", "192.0.2.52", tag="feident-test", lookup=False)
+    check("garbage and empty blobs fall back to the address path",
+          b3["key"] == "addr:192.0.2.52" and b4["key"] == "addr:192.0.2.52")
+    check("the blob on its own (member_for_blob) answers None for both twins",
+          member_for_blob(unfiled) is None and member_for_blob(b"\xff" * 52) is None)
+    kv.reset(kv.MemoryKV())
+
+    if fepg.fresh_database() is None:
+        print("\n%s" % ("blob checks passed" if state["ok"] else "SOMETHING FAILED"))
+        return fepg.skip_or_fail("feident") if state["ok"] else 1
+    import festore
+    acc = _accounts()
+    kv = _kv()
+    kv.reset(kv.MemoryKV())
 
     conn = acc.connect()
     m = {}
@@ -924,6 +992,21 @@ def _selftest():
           == "contested")
     check("...and preferring the remembered player resolves it to the owner",
           ident("192.0.2.8", prefer_remembered=True)["key"] == key("REALOWNER"))
+
+    # ---- the credential blob against live session rows -------------------
+    # The blob outranks the address: at 192.0.2.5 the rows name UA4XX8PKP, a
+    # blob filed for OTHERNICK still names OTHERNICK. An unfiled blob at the
+    # same address gives the old answer.
+    ca.file_hashes([h], m["OTHERNICK"], "uFEX", 11, "192.0.2.5")
+    bl = identify_blob(filed, "192.0.2.5", tag="feident-test", lookup=True)
+    check("a filed blob beats the address's session rows",
+          bl["key"] == key("OTHERNICK") and bl["confidence"] == "blob")
+    check("...decorated with the nick from the account database",
+          bl["nick"] == "OTHERNICK")
+    bu = identify_blob(unfiled, "192.0.2.5", tag="feident-test", lookup=True,
+                       window=60)
+    check("an unfiled blob gives the session-row answer at that address",
+          bu["key"] == key("UA4XX8PKP"))
 
     # ---- the felobby -> feworld handoff -----------------------------------
     remember("192.0.2.5", a, "member:%d" % m["UA4XX8PKP"])

@@ -33,4 +33,8 @@ if not os.path.exists("fedata/fe-fet-area.tsv"):
           "your client install for a playable world", file=sys.stderr)
 EOF
 
+# fellb, felobby and feworld bind 54848 and up, nothing privileged, so the
+# services run as the unprivileged uid that owns the /data and /logs bind
+# mounts (the core image creates it).
+USER 1000
 ENTRYPOINT ["python", "feworld.py"]

@@ -611,6 +611,100 @@ def skill_power(skill_id, _depth=0):
     return 0.0
 
 
+def skill_tree():
+    """SKILL_LEARN_DATA (fe-fet-skill_learn.tsv) as the client's skill window
+    holds it: {(class, family): {group: [prereq skill id, ...]}}.
+
+    READ 2026-10-08 off the client. The window's builder (0x050D5E00) files
+    each record [u16 a][u16 family][u8 c][u8 d][u16 prereq] four levels
+    deep -- a at +0, the family at +2, c at +4, d at +5, the prereq at +6 --
+    and the row gate 0x050D5010 looks the pair up with a = the player's
+    class byte [unit+0x3ab] (no entry: the row is not offered), then needs
+    EVERY c group to hold at least ONE owned prereq (0xFFFF = none needed):
+    the inner loop moves to the next d on a miss and fails when a group runs
+    out (0x050D50B0..0x050D5120). So the 56 rows are the whole player tree
+    -- families 0..9 Warrior (class 0), 10..23 Scout (1), 24..38 Sorcerer
+    (2) -- not the "partial table" fefet.py's note took it for."""
+    if "skill_tree" not in _cache:
+        d = {}
+        for r in _rows("skill_learn"):
+            key = (_int(r.get("a", "0")), _int(r.get("skill_id", "0")))
+            grp = d.setdefault(key, {}).setdefault(_int(r.get("c", "1")), [])
+            grp.append(_int(r.get("prereq_skill", "65535"), 0xFFFF))
+        _cache["skill_tree"] = d
+    return _cache["skill_tree"]
+
+
+def skill_tree_ok(cls, skill_id, owned):
+    """(ok, why) for learning `skill_id` as class `cls` holding `owned`,
+    by the window's own rule (skill_tree). An empty table passes."""
+    tree = skill_tree()
+    if not tree:
+        return True, "no skill tree loaded"
+    fam = skills().get(int(skill_id), {}).get("family")
+    groups = tree.get((int(cls), fam))
+    if groups is None:
+        return False, "family %s is not in class %d's tree" % (fam, int(cls))
+    have = set(int(x) for x in owned)
+    for c, pre in sorted(groups.items()):
+        if any(p == 0xFFFF or p in have for p in pre):
+            continue
+        return False, "group %d needs one of %s" % (c, pre)
+    return True, "tree ok"
+
+
+#: EFFECT_DATA bitsC bits whose value is a FLAT amount on top of the power %:
+#: 0x200 against characters, 0x400 against buildings (see skill_flat).
+FLAT_PC, FLAT_BUILDING = 0x200, 0x400
+
+
+def effect_values(x):
+    """{bit: value} for one effects() row: the k-th set bit of the row's stat
+    masks takes vals[k], bitsA first, then bitsB, then bitsC, each bit
+    ascending. READ 2026-10-08 off the client's own reader 0x0505F790: it
+    walks the three masks bit by bit (0x0505F7EF.., 0x0505F81D..,
+    0x0505F84B..), counting set bits, and takes one value per set bit."""
+    out, k, vals = {}, 0, list(x.get("vals") or [])
+    for shift, mask in ((0, x.get("a", 0)), (32, x.get("b", 0)),
+                        (64, x.get("c", 0))):
+        for bit in range(32):
+            if int(mask) & (1 << bit):
+                if k < len(vals):
+                    out[(1 << bit) << shift] = vals[k]
+                k += 1
+    return out
+
+
+def skill_flat(skill_id, _depth=0):
+    """(vs characters, vs buildings): the FLAT damage a skill adds to its
+    power %, from its damage effect's bitsC 0x200 / 0x400 values, following
+    a child record the way skill_power does. Only the summons' attacks and
+    a few item effects carry them (effects 1018/1019 the Knight's Divine
+    Piercing/Thrust: 10%+300, 20%+660; 1021 the Giant's Strong Cannon
+    explosion: 100% + 1600; 1024 the Wraith's Fireball explosion: 350% +
+    650).
+
+    WHICH BIT MEANS WHAT IS A READING (2026-10-08), not a label: no string
+    names them. 0x400 rides only the two anti-building blasts and 0x200 the
+    Knight's lance, and the Giant's +1600 on an 8,000 HP arrow tower is the
+    "fells a tower in about five shots" the 2006 players describe -- the
+    figure the old CHOSEN x8 Giant multiplier was tuned to by hand."""
+    c = skill_combat(skill_id)
+    pc = bld = 0.0
+    for e in c.get("effects", []):
+        x = effects().get(e)
+        if not x:
+            continue
+        v = effect_values(x)
+        pc += float(v.get(FLAT_PC << 64, 0.0) or 0.0)
+        bld += float(v.get(FLAT_BUILDING << 64, 0.0) or 0.0)
+    if not (pc or bld):
+        child = c.get("child", 0xFFFF)
+        if _depth < 3 and child not in (0xFFFF, int(skill_id)):
+            return skill_flat(child, _depth + 1)
+    return pc, bld
+
+
 def item_use(item_id):
     """{"use_skill", "atk", "matk"} for one item (fe-fet-item_use.tsv), or {}.
     use_skill = FE_ITEM_DATA +0x56 (0xFFFF = cannot be used); atk/matk =

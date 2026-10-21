@@ -95,6 +95,24 @@ from . import character, sess, wire
 # answer; `--war-result-values sentinel` puts the probe back for one run.
 WAR_RESULT = (0x1100, "WAR RESULT (unnamed in the NG table -- a NOTIFY)",
               0x05053638)
+# KEY: THE ROWS ARE ITEM RECORDS, NOT PLAYERS (static, 2026-10-08). The four
+# mask-gated sub-decoders the count loop calls (0x05075980 / 0x05075A80 /
+# 0x05075AD0 / 0x05075B80) are the ITEM record's group readers -- 0x05075980
+# writes +0x380 (the type) and +0x3a2.., 0x05075B80 writes +0x4a8/+0x4aa/
+# +0x4ac (count, durability max/cur; feunit's IT4_* names them), and its ten
+# callers include the bag reader and the 0x1006 add arms -- and each row is a
+# 0x4FC-byte item object, the size the window's ctor builds two of. So the
+# count carries REWARD ITEMS (the window's 報酬 strip), which this server
+# never grants, and stays 0. The per-player table the audit asked for is a
+# DIFFERENT message: 0x112A builds the ranking window the View Ranking
+# button shows (fecampaign.WAR_RANKING), pushed right after this one.
+#: 0x112A -- the ranking window: [u16 n] n x {cstr name, u16 kills,
+#: u16 deaths, u16 summons, u16 destroyed, u16 built, u32 score}; row order
+#: is the ranking (the client numbers them), headers from 0x52e5f04.
+WAR_RANKING = (0x112A, "WAR RANKING (the result window's View Ranking)",
+               0x050583f8)
+RANK_NAME_MAX = 0x23          # the row's name slot is 0x24 bytes with its NUL
+RANK_ROWS_MAX = 100
 WAR_RESULT_KINDS = {"desert": 0, "win": 1, "lose": 2}
 # The eleven scalars in WIRE order, named off the live screenshot. The three
 # marked (undrawn) are parsed and discarded by the window -- they still have to
@@ -215,6 +233,47 @@ def war_result_values(args):
 WAR_RESULT_DESTROYED = ("count", "castle")
 
 
+def war_ranking_body(rows):
+    """0x112A exactly as 0x05112e50 reads it: [u16 n] then n x [cstr name]
+    [u16 kills][u16 deaths][u16 summons][u16 destroyed][u16 built][u32 score].
+    `rows` are dicts in RANK ORDER (fecampaign.settle sorts by score); names
+    are clamped to the row's 0x24-byte slot, the count to RANK_ROWS_MAX."""
+    rows = list(rows or [])[:RANK_ROWS_MAX]
+    body = struct.pack(">H", len(rows))
+    for r in rows:
+        name = str(r.get("name") or "charid %s" % r.get("c", "?"))
+        name = name.encode("cp932", "replace")[:RANK_NAME_MAX]
+        u16 = lambda k: max(0, min(0xFFFF, int(r.get(k) or 0)))
+        body += name + b"\0" + struct.pack(">HHHHHI", u16("kills"), u16("deaths"),
+                                           u16("summons"), u16("destroyed"),
+                                           u16("built"),
+                                           max(0, int(r.get("score") or 0)) & 0xFFFFFFFF)
+    return body
+
+
+def war_ranking_push(conn, outbound, mode, be, args, rows):
+    """Push the ranking window (0x112A) the result window's View Ranking
+    button opens (--war-ranking on). Sent right after 0x1100 so the window
+    exists before the button can be pressed; the arm closes a previous one."""
+    if str(getattr(args, "war_ranking", "on") or "off") != "on":
+        return False
+    body = war_ranking_body(rows)
+    mid, name, arm = WAR_RANKING
+    wire.send(conn, outbound, wire.inner_msg(mid, body, wire.unit_id_of(args)),
+              mode, be, args.seq_mode == "echo", args.world_prefix)
+    print("[feworld] -> 0x30 inner 0x%04X %s  %d row(s), %d body bytes (arm "
+          "%08x stores it at [mgr+0xf0]; the View Ranking button shows it)"
+          % (mid, name, min(len(rows or []), RANK_ROWS_MAX), len(body), arm),
+          flush=True)
+    for i, r in enumerate(list(rows or [])[:RANK_ROWS_MAX]):
+        print("[feworld]    #%d %s: kills %s deaths %s summons %s destroyed %s "
+              "built %s score %s (%s)"
+              % (i + 1, r.get("name"), r.get("kills", 0), r.get("deaths", 0),
+                 r.get("summons", 0), r.get("destroyed", 0), r.get("built", 0),
+                 r.get("score", 0), r.get("side")), flush=True)
+    return True
+
+
 def war_result_kind(args):
     """0x1100's kind byte: 1 Win / 2 Lose when this session's war actually
     settled, 0 Desert otherwise ("You left the front. More is expected." --
@@ -252,6 +311,9 @@ def war_result_push(conn, outbound, mode, be, args):
         print("[feworld]    participation %.0f%% of the war (the manual's "
               "参加時間; no field of this window draws it)"
               % (float(w["frac"]) * 100), flush=True)
+    if w and w.get("ranking"):
+        # the View Ranking button's window: the whole war's members by score
+        war_ranking_push(conn, outbound, mode, be, args, w["ranking"])
     sess._SESSION.pop("war_result", None)      # drawn once; the next exit is a desert
     print("[feworld]    now CLOSE the window in-game. Its handler 0x05114FA0 "
           "-> 0x05115000 puts [win+0xAB0] in state 3, and one second later "

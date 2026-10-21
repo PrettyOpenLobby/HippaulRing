@@ -147,7 +147,9 @@ def _args(**kw):
              npc=["Bob:1:1"], npc_base=1000,
              # the one-client TEST shapes this suite drives; the SHIPPED
              # defaults (phantom off, party-only chat) are checked on their own
-             party_phantom="on", party_chat="field")
+             party_phantom="on", party_chat="field",
+             # the 0x1139 HP rows have their own suite (fe_partyloop_test)
+             party_hp="off")
     a.update(kw)
     return types.SimpleNamespace(**a)
 
@@ -232,11 +234,13 @@ def part1():
         out = []
         # invite unit 1000 (our --npc "Bob", no session) -> phantom accept
         _drive(a, [struct.pack(">HI", 0x112E, 1000)], out)
-        check("0x112E to a served unit -> 0x112F then 0x1134",
-              ids(out) == [0x112F, 0x1134], repr(ids(out)))
+        check("0x112E to a served unit -> 0x112F, 0x1134 {self}, 0x1134 {Bob}",
+              ids(out) == [0x112F, 0x1134, 0x1134], repr(ids(out)))
         check("0x112F is header-only (arm 0x050518a0 reads nothing)",
               read_none(out[0][2]))
-        rows = read_add(out[1][2])
+        check("the leader's first 0x1134 is its OWN row (list head = leader)",
+              [r[0] for r in read_add(out[1][2])] == [7])
+        rows = read_add(out[2][2])
         check("0x1134 N=1 {ChrID, 'Bob' from --npc, Class} decodes as the loop",
               len(rows) == 1 and rows[0][1] == "Bob"
               and rows[0][0] >= 0x7F000000, repr(rows))
@@ -292,8 +296,8 @@ def part1():
         # leave (0x2089): Alice + phantom Bob -> Alice 0x1137, party broken up
         out[:] = []
         _drive(a, [struct.pack(">H", 0x2089)], out)
-        check("0x2089 leave -> 0x1137 header-only",
-              ids(out) == [0x1137] and read_none(out[0][2]), repr(out))
+        check("the LEADER's 0x2089 disbands -> 0x1136 header-only",
+              ids(out) == [0x1136] and read_none(out[0][2]), repr(out))
         check("the party is gone (below 2 members)",
               feparty._PARTIES == {} and feparty._MEMBER_OF == {})
 
@@ -352,8 +356,9 @@ def part1():
         with _capturing(out):
             feparty.gm(ctx, "!party add 3")
         names = [read_add(b)[0][1] for _, _, b in out]
-        check("!party add 3 -> three 0x1134 N=1",
-              ids(out) == [0x1134] * 3 and names == ["Fake0", "Fake1", "Fake2"],
+        check("!party add 3 -> 0x1134 {self} then three 0x1134 N=1",
+              ids(out) == [0x1134] * 4
+              and names == ["Alice", "Fake0", "Fake1", "Fake2"],
               repr(names))
         out[:] = []
         with _capturing(out):
@@ -371,7 +376,7 @@ def part1():
         out[:] = []
         with _capturing(out):
             feparty.gm(ctx, "!party fake " + "N" * 100)
-        rows = read_add(out[0][2])
+        rows = read_add(out[-1][2])
         check("a long name is clamped to 0x20 bytes (strcpy on the far side)",
               len(rows[0][1]) == 0x20, repr(rows))
         with _capturing(out):
@@ -536,11 +541,12 @@ def part2():
         check("bob's 0x1134 lists Alice then Bob (N=2, class 3)",
               rows == [(7, "Alice", 3), (8, "Bob", 3)], repr(rows))
         aout = alice_pump()
-        check("alice gets 0x1134 N=1 {Bob} then 0x112F header-only",
-              ids(aout) == [0x1134, 0x112F] and read_none(aout[1][2]),
+        check("alice gets 0x1134 {self}, 0x1134 {Bob}, then 0x112F header-only",
+              ids(aout) == [0x1134, 0x1134, 0x112F] and read_none(aout[2][2]),
               repr(ids(aout)))
-        check("...the N=1 record is Bob",
-              read_add(aout[0][2]) == [(8, "Bob", 3)])
+        check("...her own row first ('Party formed.'), then Bob",
+              read_add(aout[0][2]) == [(7, "Alice", 3)]
+              and read_add(aout[1][2]) == [(8, "Bob", 3)])
         check("model: one party, leader 7, members [7, 8]",
               [p["order"] for p in feparty._PARTIES.values()] == [[7, 8]]
               and list(feparty._PARTIES.values())[0]["leader"] == 7)
@@ -657,7 +663,7 @@ def part2():
 
         # ---- already in a party: Bob+Carol party, Alice invites Bob -> [7]
         cout = carol.run(feparty.gm, "!party fake Zed")
-        check("carol forms a party with a phantom", ids(cout) == [0x1134])
+        check("carol forms a party with a phantom", ids(cout) == [0x1134] * 2)
         bout = bob.run(feparty.gm, "!party fake Yan")
         out[:] = []
         _drive(a, [struct.pack(">HI", 0x112E, 8)], out)

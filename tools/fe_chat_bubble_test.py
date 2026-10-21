@@ -231,7 +231,78 @@ def main():
     finally:
         feworld.chat_send, feworld.blacklist_rows, feworld.nation_of = saved
 
+    wire_level()
     say("\n%d/%d checks passed" % (sum(ok for _, ok in CHECKS), len(CHECKS)))
+
+
+def wire_level():
+    """2026-10-08: the same path with NOTHING stubbed between chat_pump and
+    the socket layer: the frame a peer's /say becomes on this client's wire,
+    and what a blacklisted speaker becomes (nothing). Retail drops a
+    blacklisted line SILENTLY in the receiving client (0x05170e10, no log)
+    and the client's NG table has no chat refusal at all (MSG_PARTY_CHAT_NG
+    0x113D has only system codes 0/1/2/8), so the sender is not told."""
+    import struct
+    import threading
+    say("on the wire: speaker id, layout, clamp, blacklist")
+    frames = []
+    w = feworld.chat.wire
+    saved = (w.send, feworld.blacklist_rows, feworld.nation_of)
+    w.send = (lambda conn, outbound, body, mode, be, echo=True, prefix=4:
+              frames.append(bytes(body)))
+    feworld.blacklist_rows = lambda args: []
+    feworld.nation_of = lambda args: 1
+    try:
+        feworld._TLS.session = {"in_field": True, "field": 5, "charid": 9,
+                                "pres_seen": {7: {}}}
+        feworld._chat_room_join()
+
+        def peer(mid, parts):
+            got = {}
+
+            def run():
+                feworld._TLS.session = {"in_field": True, "field": 5,
+                                        "charid": 7}
+                got["n"] = feworld.chat_relay(mid, parts, field=5)
+            t = threading.Thread(target=run)
+            t.start()
+            t.join()
+            with redirect_stdout_quiet():
+                feworld.chat_pump(None, None, "ecb", False, _args())
+            return got["n"]
+
+        def dec(f):
+            unit, mid = struct.unpack_from(">IH", f, 0)
+            strs = f[6:].split(b"\0")
+            return unit, mid, strs
+
+        peer(SAY, ["Quinn", "hello there"])
+        unit, mid, strs = dec(frames[0]) if frames else (None, None, [])
+        check("a peer's /say -> ONE 0x201A frame on this client",
+              len(frames) == 1 and mid == SAY, repr(frames))
+        check("...header u32 = the speaker's charid 7: the kind-2 avatar "
+              "fepresence draws, so 0x5129890 hangs the balloon on it",
+              unit == 7, repr(unit))
+        check("...body [cstr name][cstr text], nothing after",
+              strs == [b"Quinn", b"hello there", b""], repr(strs))
+        del frames[:]
+        peer(SAY, ["Quinn", "x" * 300])
+        unit, mid, strs = dec(frames[0])
+        check("a 300-byte line is clamped to 0x80 (the 0x81-byte strcpy slot)",
+              len(strs[1]) == 0x80, repr(len(strs[1])))
+        del frames[:]
+        peer(0x2067, ["Bob", "Quinn", "psst"])
+        check("/tell to someone else is not delivered here", frames == [],
+              repr(frames))
+        feworld.blacklist_rows = lambda args: [{"id": 0x40000003,
+                                                "name": "QUINN"}]
+        n = peer(SAY, ["Quinn", "blocked?"])
+        check("a blacklisted speaker: queued (n=1) but NO frame reaches the "
+              "client, and nothing goes back to the sender",
+              n == 1 and frames == [], repr((n, frames)))
+        feworld._chat_room_leave()
+    finally:
+        w.send, feworld.blacklist_rows, feworld.nation_of = saved
 
 
 if __name__ == "__main__":

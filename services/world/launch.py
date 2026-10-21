@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import fedevtool  # noqa: E402  -- the world-building panel (--devtool-port)
+import peercap  # noqa: E402  -- the per-address handler cap
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
 from . import buildings, death, deps, devtool, doors, drops, ext, itemrecords, mapcal, probes, progression, readloop, spawns, staff, territory, zones
 
@@ -750,7 +751,29 @@ def main():
                          "found 2026-09-08 after the other two were measured "
                          "passing. -1:100 (default) is infinite; a real max "
                          "makes the client print its own wear warnings at "
-                         "20%% and nothing here decrements it yet.")
+                         "20%%. Only read while --item-wear is off.")
+    ap.add_argument("--item-wear", default="off", choices=["off", "on"],
+                    help="off (default, RETAIL): SE abolished weapon and "
+                         "armour durability in the 3rd beta (2006-01-27, "
+                         "before launch; fewiki メモ 2006-04 「耐久度はなくなり"
+                         "ました」) -- every item is infinite and the repair "
+                         "window says full. on (OURS, the 2nd-beta rule the "
+                         "tutorial books describe): a per-item current value "
+                         "in the character's `durability` field, worn by casts "
+                         "(--item-wear-cast, the held weapon) and hits taken "
+                         "(--item-wear-hit, every worn armour piece), pushed "
+                         "through 0x2032 so the client prints its own 20%% "
+                         "and 'broke' lines, repaired for --repair-gold per "
+                         "point. world/itemrecords.py has the sources.")
+    ap.add_argument("--item-wear-max", type=int, default=100, metavar="N",
+                    help="--item-wear on: every item's maximum (OURS; "
+                         "FE_ITEM_DATA ships no durability column)")
+    ap.add_argument("--item-wear-cast", type=int, default=1, metavar="N",
+                    help="--item-wear on: points the held weapon loses per "
+                         "cast (OURS; SE's per-skill table did not survive)")
+    ap.add_argument("--item-wear-hit", type=int, default=1, metavar="N",
+                    help="--item-wear on: points each worn armour piece loses "
+                         "per hit taken (OURS)")
     ap.add_argument("--worn-gear-record", default="off", choices=["on", "off"],
                     help="carry the stored worn gear in the self 0x1006's "
                          "mask3. OFF: live 2026-09-08 runs 2/3, the worn-gear "
@@ -1466,15 +1489,17 @@ def main():
                          "is applied: which table column says what an item "
                          "heals is not identified, so this takes the item and "
                          "grants nothing. 'off' restores the hang.")
-    ap.add_argument("--pocket-refill", default="off", choices=["on", "off"],
+    ap.add_argument("--pocket-refill", default="on", choices=["on", "off"],
                     help="when the last of a pocket item is used, move the next "
-                         "of the same item from the bag into that pocket "
-                         "(manual p.45, audit B17): the stored worn entry is "
-                         "replaced in place and the client is sent the same "
-                         "0x107A worn-marker reflection a 0x2098 pocket assign "
-                         "gets. OFF by default: no client has been seen taking a "
-                         "server-initiated pocket fill yet, and whether the "
-                         "client refills on its own is not known.")
+                         "of the same item from the bag into that pocket: the "
+                         "stored worn entry is replaced in place and the client "
+                         "is sent the same 0x107A worn-marker reflection a "
+                         "0x2098 pocket assign gets. ON by default: RETAIL "
+                         "did this -- manual p.45 and SE's own site "
+                         "(3rd-beta notes: a pocketed consumable auto-refills from the "
+                         "bag). The client does not refill on its own (the "
+                         "pocket is a worn slot and only 0x107A re-marks it). "
+                         "Not yet seen on a screen; off is the rollback.")
     ap.add_argument("--room-exit", default="conversation",
                     choices=["conversation", "off"],
                     help="walk the player OUT of a room when a conversation "
@@ -1614,13 +1639,22 @@ def main():
                          "the right setting for one probe run and the wrong one "
                          "for a session a player is actually in.")
     ap.add_argument("--war-result-rows", type=int, default=0,
-                    help="how many per-army records to put in 0x1100. The "
-                         "window constructs EXACTLY TWO (0x05113D07) and the "
-                         "decode loop is unbounded, so this is CLAMPED to 2 in "
+                    help="how many ITEM records to put in 0x1100 (the rows are "
+                         "reward items: their four mask-gated readers are the "
+                         "item record's, 0x05075980..; 2026-10-08). The window "
+                         "constructs EXACTLY TWO (0x05113D07) and the decode "
+                         "loop is unbounded, so this is CLAMPED to 2 in "
                          "war_result_body() -- 3 would write 0x4FC bytes past a "
-                         "0xADC allocation. Default 0: the four masks per record "
-                         "are all-zero anyway, so rows carry no data yet and "
-                         "0 is the smallest thing that decodes.")
+                         "0xADC allocation. Default 0: no item is ever granted, "
+                         "and 0 is the smallest thing that decodes.")
+    ap.add_argument("--war-ranking", default="on", choices=["on", "off"],
+                    help="right after 0x1100, push 0x112A: the ranking window "
+                         "the result window's View Ranking button opens "
+                         "(stored at [mgr+0xf0] by arm 0x050583f8), one row "
+                         "per member of the settled war in score order -- "
+                         "name, kills, deaths, summons, destroyed, built, "
+                         "score, the columns its header table (0x52e5f04) "
+                         "names. off = the button opens nothing, as before.")
     ap.add_argument("--ui-auto", default="ok", choices=["ok", "ng", "off"],
                     help="answer every request in UI_HEADER_ONLY_OK with its "
                          "registered OK, which is the 6-byte header and nothing "
@@ -1709,14 +1743,41 @@ def main():
                          "sit 60+ cells apart inside their own 38-cell "
                          "spheres, so the rule leaves them nearly "
                          "unattackable.")
-    ap.add_argument("--keep-types", default="20:16", metavar="DEF:ATK",
+    ap.add_argument("--keep-types", default="15:16", metavar="DEF:ATK",
                     help="FE_BUILDING_DATA rows for the two bases. Default "
-                         "20 Castle / 16 Keep -- SE warsystem02: the defender's "
+                         "15 Castle / 16 Keep -- SE warsystem02: the defender's "
                          "base IS the castle ('防衛軍の拠点となる建築物') "
                          "and both it and the keep offer the KNIGHT (their "
-                         "+0xde is 954; feunit.SUMMON_BY_TYPE). The old default "
-                         "4 GateOfHades offered the WRAITH (955), which SE's "
+                         "+0xde is 954; feunit.SUMMON_BY_TYPE). Row 15, not "
+                         "20, since 2026-10-08: the in-field war gauge reads "
+                         "the castle's HP bar off a type-0x0f building only "
+                         "(animator 0x05111010), so a type-20 castle left "
+                         "the defenders' bar frozen. The old default 4 "
+                         "GateOfHades offered the WRAITH (955), which SE's "
                          "RoD page never lists as a summon at all.")
+    ap.add_argument("--castle-shield", default="on", choices=["on", "off"],
+                    help="the castle shield (tutorial book 191/266: a nation "
+                         "that loses fields gets a shield around its castle "
+                         "that raises its HP). on (default): 0x1142 bit 0x4 "
+                         "carries the shield percent to [field+0x58] at field "
+                         "entry (the shield_castle model's opacity, type-15 "
+                         "castles only), and a war's castle HP is raised by "
+                         "castle_shield_hp. world/buildings.py has the reading.")
+    ap.add_argument("--castle-shield-base", type=int, default=19, metavar="N",
+                    help="fields a nation must hold to have NO shield (OURS: "
+                         "95 fields / 5 nations); each field below adds 100/N "
+                         "percent")
+    ap.add_argument("--castle-shield-hp", type=int, default=100, metavar="PCT",
+                    help="castle HP bonus at a full shield, in percent of "
+                         "--keep-hp (OURS; 100 = doubled)")
+    ap.add_argument("--culture-level", default="on", choices=["on", "off"],
+                    help="serve m_FormerCultureLevel in the 0x3027 nation "
+                         "record from the nation's holdings (book 174: eight "
+                         "steps by fields held). No screen reads it; the "
+                         "client only logs it. world/campaignview.py.")
+    ap.add_argument("--culture-step", type=int, default=5, metavar="N",
+                    help="fields per culture step: level = 1 + held // N, "
+                         "capped at 8 (OURS)")
     ap.add_argument("--keep-models", default="30:16", metavar="DEF:ATK",
                     help="FE_BUILDING_MODEL_DATA rows. Default 30 castle00_a "
                          "/ 16 b_build06_a. castle00_a ships no `_stand.mdl` "
@@ -1883,16 +1944,22 @@ def main():
     ap.add_argument("--quests", default="on", choices=["on", "off"],
                     help="QUESTS (2026-09-12): the capital's quest givers "
                          "(QUESTS: Cheese at scripts 115/315/515/715/915, "
-                         "Goblin Book at 137/340/536/738/936 -- the 2006 "
+                         "Goblin Book at 137/340/536/738/936, the luck draw "
+                         "at 535/737 -- the 2006 "
                          "fewiki's) play a quest conversation on the event VM: "
                          "offer -> Yes/No menu (op 0x107) -> accepted; later, "
                          "holding the item -> Yes/No -> the item is taken and "
                          "gold paid AFTER the conversation closes. Repeatable "
                          "with a per-character cooldown. 'off' = they say "
                          "their plain townsfolk line, as before.")
-    ap.add_argument("--quest-cooldown-secs", type=int, default=-1, metavar="S",
-                    help="override every quest's cooldown (-1 = each quest's "
-                         "own, one in-game day = 2400 s).")
+    ap.add_argument("--quest-cooldown-secs", type=int, default=2400,
+                    metavar="S",
+                    help="seconds between two hand-ins of one repeatable "
+                         "quest, per character. Default 2400 = one in-game "
+                         "day (an anti-farm rule, OURS; retail Cheese "
+                         "was any number of times). -1 = each quest's own; "
+                         "0 = none. The luck draw is paid per draw and has "
+                         "none.")
     ap.add_argument("--town-file", default=None, metavar="PATH",
                     help="a JSON file for the TOWN instead of the database "
                          "(default: the town row of fe_world_state): per-group "
@@ -2042,6 +2109,12 @@ def main():
                          "and takes the CHAT LOG path. Give a live unit's id "
                          "(e.g. an --npc) to aim the text at that unit instead "
                          "-- that A/B is what proves the reading.")
+    ap.add_argument("--system-log", action="append", default=None,
+                    metavar="LINE",
+                    help="a line served in the 0x302D answer to the client's "
+                         "0x4010 MSG_GET_SYSTEM_LOG_REQUEST (repeatable, at "
+                         "most 20, each clipped to 511 bytes). Default none: "
+                         "an empty list, which still completes the request")
     ap.add_argument("--chat-bubbles", default="all", choices=["all", "say", "off"],
                     help="a SPEECH BALLOON over the player who spoke "
                          "(2026-09-12): a relayed line carries the sender's "
@@ -2366,7 +2439,7 @@ def main():
         "unit_physics": "push", "war_cycle": "on", "war_length_ms": 3600000,
         "war_truce_ms": 600000, "campaign": "on", "war_prep_ms": 65000,
         "declare_accepts": 4, "build_costs": "2006", "keeps": "on",
-        "keep_types": "20:16", "keep_models": "30:16", "obelisk_drain": "on",
+        "keep_types": "15:16", "keep_models": "30:16", "obelisk_drain": "on",
         "build_share": "on", "tower_fire": "on", "base_cannon": "off",
         "influence": "buildings", "keep_hp": 3000, "war_decide": "keeps",
         "capital_staff": "on", "add_self": "on", "field_equip": "on",
@@ -2674,7 +2747,20 @@ def main():
             srv.settimeout(max(1.0, deadline - time.time()))
         try:
             conn, peer = srv.accept()
-        except (OSError, IOError):
+        except socket.timeout:
+            continue
+        except (OSError, IOError) as e:
+            # EMFILE or ECONNABORTED. Without the pause an exhausted
+            # descriptor table spins this loop flat out.
+            print("[feworld] accept failed (%r); listener continues" % (e,),
+                  flush=True)
+            time.sleep(0.1)
+            continue
+        if not peercap.acquire(peer[0]):
+            print("[feworld] %s:%d refused: that address already holds %d "
+                  "connections (POL_MAX_CONNS_PER_IP)"
+                  % (peer[0], peer[1], peercap.MAX_PER_IP), flush=True)
+            conn.close()
             continue
         got += 1
         print("\n[feworld] CONNECT from %s:%d" % peer, flush=True)
@@ -2684,7 +2770,8 @@ def main():
         # connected socket. Every per-session value now lives on _TLS
         # (_SESSION, _OUT_SEQ, _LAST_IN); the character store is felobby's and
         # is written through its atomic save.
-        threading.Thread(target=readloop._serve_one, args=(conn, peer, args),
+        threading.Thread(target=peercap.run,
+                         args=(readloop._serve_one, conn, peer, args),
                          name="feworld-%s-%d" % peer, daemon=True).start()
     srv.close()
     # Wait out sessions in flight -- these are daemon threads, so returning

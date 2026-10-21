@@ -2,6 +2,11 @@
 """fe_blob_verdict.py -- is FE's 0xC007 credential blob per-ACCOUNT or
 per-INSTALL?
 
+SETTLED 2026-10-08: per login, which is per account. The blob is a cipher
+record whose plaintext carries a hash of the login's own 4:5 reply; see
+openlobby/services/contentauth.py (decode_blob) and feident.identify_blob,
+which keys on it. This tool is kept as the record of the experiment.
+
 Run:  python tools/fe_blob_verdict.py
 
 THE QUESTION, AND WHY IT MATTERS

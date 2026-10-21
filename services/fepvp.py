@@ -50,10 +50,13 @@ heartbeat stale. The skill's bad statuses land on the victim (world/
 status.py). --pvp-model flat restores the old flat --pvp-damage /
 --hit-damage and the one --pvp-range sphere for every skill.
 
+RETAIL: NO LEVEL ROW on a player hit. The level
+correction was a MONSTER rule in RoD (fewiki Q&A / memo 2006-05-26), and
+fet_npc_lv_diff_correction read x1.4 between equal levels, x0.05 for a
+low level on a Lv40. --pvp-level-gap on restores it. A summon's attack adds
+its own flat amount (fegamedata.skill_flat). Suite: fe_pvp_test.py.
+
 CHOSEN, NOT MEASURED:
-  * the level-gap row is fet_npc_lv_diff_correction, a MONSTER table: no
-    player-vs-player table ships, so the same row is used with the victim's
-    level in the monster's place (equal levels read 1.4).
   * a hit is refused between players of the SAME nation unless
     `--pvp-friendly on`. RoD was nation-vs-nation; friendly fire is not.
   * the spawn-protection window and the death penalty are the monster rules,
@@ -154,6 +157,17 @@ def add_args(ap):
                          "SKILL_DATA. flat = the old behaviour: --pvp-damage "
                          "(or --hit-damage) for every hit, one --pvp-range "
                          "sphere for every skill. `!pvp model flat` live.")
+    ap.add_argument("--pvp-kill-crystals", type=int, default=3, metavar="N",
+                    help="crystals a war kill pays the killer, up to "
+                         "--crystal-carry-max (RoD fewiki 2006-06-14: +3 a "
+                         "kill whatever the victim carried). 0 = none")
+    ap.add_argument("--pvp-level-gap", default="off", choices=("on", "off"),
+                    help="apply fet_npc_lv_diff_correction (a MONSTER table) "
+                         "to player hits. Default off: in RoD the level "
+                         "correction applied to monsters only (fewiki Q&A "
+                         "and memo, 2006-05-26), and a hit between equal "
+                         "levels read x1.4 under it. on = the 2026-10-01 "
+                         "behaviour")
     ap.add_argument("--pvp-slack", type=float, default=3.0, metavar="UNITS",
                     help="--pvp-model table: added to a skill's reach for a "
                          "peer position up to one heartbeat (~2.5 s) stale "
@@ -233,7 +247,12 @@ def _damage(args, skill=None, victim=None):
             lvl = None
     if lvl is None:
         lvl = int(_staff.char_level(args))
-    return _damage_mod.player_hit_damage(args, {"level": lvl}, skill=skill)
+    # RoD: the level correction is a MONSTER rule (fewiki Q&A and memo,
+    # 2006-05-26: 「レベル補正はモンスターのみ」); --pvp-level-gap on puts the
+    # monster table's row back on player hits
+    return _damage_mod.player_hit_damage(
+        args, {"level": lvl}, skill=skill,
+        gap=getattr(args, "pvp_level_gap", "off") == "on")
 
 
 def _reach(args, skill, targeted):
@@ -507,6 +526,32 @@ def _credit_war(ctx, payload):
         return
     if got is not None:
         _log("   war score: %d PC damage, %d kill(s) this war" % got)
+        if payload.get("dead"):
+            _kill_crystals(ctx)
+
+
+def _kill_crystals(ctx):
+    """RoD: a war kill pays the killer --pvp-kill-crystals (3), whatever the
+    victim carried, up to the carry cap (fewiki WAR/crystal 2006-06-14:
+    kill +3, death -3; the death's -3 is world/death.py's). Runs on the
+    KILLER's thread (the report relay), only after pc_damage counted a war
+    kill. Returns the new total or None."""
+    args = ctx.args
+    n = int(getattr(args, "pvp_kill_crystals", 3) or 0)
+    if n <= 0:
+        return None
+    have = fw._seeded_value(args, "crystal", getattr(args, "crystal", None))
+    if have is None:
+        return None
+    cap = int(getattr(args, "crystal_carry_max", 50) or 50)
+    new = max(int(have), min(cap, int(have) + n))
+    if new == int(have):
+        _log("   kill crystals: already carrying %d (cap %d)" % (int(have), cap))
+        return int(have)
+    fw._store_char_field(args, "crystal", new)
+    fw.crystal_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args, value=new)
+    _log("   kill crystals: %d -> %d" % (int(have), new))
+    return new
 
 
 # ---------------------------------------------------------------------------

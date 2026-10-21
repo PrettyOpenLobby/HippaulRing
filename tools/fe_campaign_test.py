@@ -242,11 +242,14 @@ def main():
         session(in_field=True, field=17, room=-1)   # a fresh session, unarmed
         del sent[:]
         fecampaign.pump(ctx)
+        # 2026-10-08: the war gauge's 0x1176 (fecampaign.war_gauge_push)
+        # follows the 0x1018 once it has landed; it is not what this pins
+        war_ids = lambda: [m for m in ids() if m != fecampaign.WAR_GAUGE]
         check("an unarmed session gets 0x1018 first and the advance is held",
-              ids() == [0x1018] and S.get("campaign_start_due") is True, repr(ids()))
+              war_ids() == [0x1018] and S.get("campaign_start_due") is True, repr(ids()))
         fecampaign.pump(ctx)
         check("...the next pump sends 0x1015 once the window is armed",
-              ids()[:2] == [0x1018, 0x1015] and not S.get("campaign_start_due"),
+              war_ids()[:2] == [0x1018, 0x1015] and not S.get("campaign_start_due"),
               repr(ids()))
 
         say("the keeps")

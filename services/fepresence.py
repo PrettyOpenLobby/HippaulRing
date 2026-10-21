@@ -749,6 +749,20 @@ def build_card(args, key):
             "force": fw.nation_of(args)}
 
 
+def _peer_form(cid):
+    """The summon form word (one-hot, 0x3F bits) peer `cid` is in, or 0."""
+    for ent in fw.ext_sessions():
+        ps = ent["session"]
+        try:
+            if int(ps.get("charid") or 0) != int(cid):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if ps.get("morph"):
+            return int(ps.get("morph_form") or 0) & 0x3F
+    return 0
+
+
 def peer_session(cid):
     """The live session dict of charid `cid` standing in MY (field, room), or
     None -- what fepvp asks before letting a hit land. Read only: the dict
@@ -1213,6 +1227,13 @@ def pump(ctx, now=None):
             st = None
         if st is None:
             _send(ctx, 0x1006, avatar_body(cid, card, pos), cid)
+            # a peer who is SUMMONED shows as the summon (feunit.peer_relay
+            # covers the change itself; this covers drawing them later)
+            word = _peer_form(cid)
+            if word and getattr(args, "summon_seen", "on") == "on":
+                _send(ctx, 0x203D, struct.pack(">IH", 0x10, word), cid)
+                _log("-> 0x203D form 0x%X on peer %d (summoned when drawn)"
+                     % (word, cid))
             # p0/p1 seed the interpolation segment HERE: without them the
             # first real report becomes both ends of the segment, which
             # collapses it and jumps straight to the new position.

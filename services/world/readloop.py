@@ -6,6 +6,86 @@ import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
 import fenet  # noqa: E402
 from . import arrival, bank, buildings, campaignview, character, charsheet, chat, clock, combat, damage, death, doors, drops, entities, equipment, events, ext, extrun, gm, inventory, itemrecords, messages, monsters, movement, populate, probes, progression, sess, shops, skilllist, territory, town, unitstate, wallet, war, warresult, wire, zones
 
+#: Ids an `elif real_id ...` arm in _serve_loop answers (some only under a
+#: condition; the final else logs the case where none did). Kept by hand
+#: beside the chain, like ext._BUILTIN_IDS, which it extends; it only feeds
+#: the log label (handler_of), never the dispatch.
+READLOOP_ARMS = frozenset((
+    0x0020, 0x206A, 0x400A, 0x4015, 0x4011, 0x2018, 0x2084, 0x400B, 0x4006,
+    0x4014, 0x4012, 0x2000, 0x2017, 0x20AC, 0x2046, 0x20A7, 0x20A8, 0x2085,
+    0x2099, 0xE00F, 0x204B, 0x2021, 0x2022, 0x2098, 0x2051, 0x204C, 0x114D,
+    0x20AA, 0x2029, 0x202A, 0x204A, 0x2049, 0x20A0, 0x20A1, 0x20A2, 0x2080,
+    0xF900, 0xF102, 0xA011, 0x209F, 0x2002, 0x2023, 0x400F, 0x4010,
+)) | ext._BUILTIN_IDS
+
+#: The 0x302D MSG_GET_SYSTEM_LOG_OK reader (0x05127f40): [u8 n] then n
+#: cstrs copied into 0x200-byte rows of a 0x2800 block, so at most 20 lines
+#: and each clamped below 0x200 (the cstr reader 0x05045f50 is unbounded).
+SYSTEM_LOG_MAX_LINES = 20
+SYSTEM_LOG_LINE_MAX = 0x1FF
+
+
+def handler_of(real_id):
+    """Who answers an inbound world id, for the log line: 'ext:<module>',
+    'readloop', 'table', 'chat' or None (no arm at all)."""
+    fn = ext.EXT_HANDLERS.get(real_id)
+    if fn is not None:
+        return "ext:%s" % getattr(fn, "__module__", "?")
+    if real_id in READLOOP_ARMS or real_id in bank.BANK_REQUESTS:
+        return "readloop"
+    if (real_id in messages.UI_HEADER_ONLY_OK or real_id in messages.UI_REPLY_BODY
+            or real_id == messages.UI_MOVE_REQUEST[0]):
+        return "table"
+    if real_id in messages._CHAT_IDS:
+        return "chat"
+    return None
+
+
+def inbound_label(real_id):
+    """The name printed beside an inbound id. KEY: any id missing from
+    messages.KNOWN used to print "NOT SEEN BEFORE -- this is the finding",
+    which fired for 18 HANDLED ids (0x400A on every war heartbeat) and so
+    hid a real unknown. Now an id the client is known to send
+    (messages.CLIENT_SENT, all 135 of its send sites) is named with its
+    handler, and only an id outside that inventory gets the finding line."""
+    name = messages.KNOWN.get(real_id) or messages.CLIENT_SENT.get(real_id)
+    if name is None:
+        return ("NOT SEEN BEFORE -- not in the client's send-site inventory "
+                "either; this is the finding")
+    h = handler_of(real_id)
+    return "%s [%s]" % (name, h or "NO ARM -- decoded below")
+
+
+def decode_unanswered(real_id, body):
+    """One readable line for a client id no arm answers (UNANSWERED_DECODE)."""
+    kind = messages.UNANSWERED_DECODE.get(real_id, "hex")
+    if kind == "u8n_u16s" and len(body) >= 1:
+        n = body[0]
+        ids = [struct.unpack_from(">H", body, 1 + 2 * k)[0]
+               for k in range(n) if 3 + 2 * k <= len(body)]
+        tail = len(body) - 1 - 2 * len(ids)
+        return "n=%d effect ids %s%s" % (n, ids, (" (+%d stray bytes)" % tail)
+                                         if tail else "")
+    return "body %s" % (body.hex() or "(empty)")
+
+
+def system_log_lines(args):
+    """OURS: the lines served for 0x4010. Retail's system log content is not
+    known (the request is rarely sent); --system-log LINE (repeatable)
+    supplies them, default none -- an empty, valid list."""
+    lines = list(getattr(args, "system_log", None) or [])
+    out = []
+    for ln in lines[:SYSTEM_LOG_MAX_LINES]:
+        raw = str(ln).encode("cp932", "replace")[:SYSTEM_LOG_LINE_MAX]
+        out.append(raw)
+    return out
+
+
+def system_log_body(args):
+    rows = system_log_lines(args)
+    return bytes([len(rows)]) + b"".join(r + b"\0" for r in rows)
+
+
 def serve(conn, args, session, outbound, mode, be):
     """Read, decode, print. Answers NOTHING -- see the module docstring."""
     print("\n[feworld] --- post-handshake. CAPTURE ONLY: nothing here answers, "
@@ -172,7 +252,7 @@ def _serve_loop(conn, args, session, outbound, mode, be):
         death.spawn_protect_note(real_id)     # an action ends the 15 s protection
         print("\n[feworld] <- 0x30 seq=%d inner id=0x%04X, %d bytes of fields  (%s)"
               % (seq, real_id, max(0, len(inner) - 2),
-                 messages.KNOWN.get(real_id, "NOT SEEN BEFORE -- this is the finding")),
+                 inbound_label(real_id)),
               flush=True)
         print(fenet.hexdump(inner), flush=True)
         if real_id == 0x0020 and args.probe_on_auth:
@@ -1060,6 +1140,8 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 # skill points (earned by level) and a full Pw gauge -- see
                 # the PROGRESSION block
                 progression.progress_entry_push(conn, outbound, mode, be, args)
+                # the castle shield percent of this field's holder (0x1142)
+                buildings.castle_shield_push(conn, outbound, mode, be, args)
                 chat.chat_push(conn, outbound, mode, be, args)
             # WARNING: WE USED TO PUSH 0x1000 MSG_ENTER_AREA_OK HERE. That was wrong,
             # and it is why the live 2026-08-18 run answered with
@@ -2256,7 +2338,7 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                     # entry too, or the next login re-fills the pocket (a
                     # stack that still has some keeps its entry)
                     keep = [tuple(e) for e in equip if int(e[1]) != uid]
-                    if getattr(args, "pocket_refill", "off") == "on":
+                    if getattr(args, "pocket_refill", "on") == "on":
                         # manual p.45 (audit B17): the next of the same item
                         # in the bag moves into the emptied pocket
                         keep, refill_uid = equipment.pocket_refill(
@@ -2584,6 +2666,14 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # say it finished. Answering OK and stopping would move the hang ten
             # seconds later rather than fix it.
             if real_id == 0x209A and mid == ok and args.validate_finish > 0:
+                # System > Logout sends this SAME request (2026-10-08): the
+                # menu's item 15 (label table 0x052df7fc, submenu switch
+                # 0x050a2e40 case 10) opens the validate screen whose state 1
+                # sends 0x209A (0x050ad3aa -> 0x050ace20); on 0x1157 its
+                # finish (0x050AD420) reads the screen's mode [+0x78]: 1 =
+                # LOGOUT (quit flag 0x4ff7ad0, back to the Viewer, no 0x2033
+                # follows), 2 = Field Out. The client itself sends 0x209C
+                # when the player moves or acts during the wait (state 2).
                 # In a CAPITAL it is immediate (manual p.22/23: "In a capital
                 # logout is immediate"). 0x1157's arm calls the exit
                 # (0x050AD420) without looking at the countdown, so a FINISH
@@ -3136,6 +3226,17 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 v = struct.unpack_from(">HH", f, 0) if len(f) >= 4 else None
                 print("[feworld]    0x2002 %s (no reply registered)" % (v,),
                       flush=True)
+        elif real_id == 0x4010:
+            # MSG_GET_SYSTEM_LOG_REQUEST (2026-10-08). Built at 0x05127ef0 with
+            # no body; it registers 0x302D / 0x302E with the task manager
+            # [0x535cec8], so unanswered it stays a pending request. The OK
+            # (c2 arm 0x050249e6 -> reader 0x05127f40) is [u8 n] n x cstr.
+            body = system_log_body(args)
+            wire.send(conn, outbound,
+                 wire.inner_msg(0x302D, body, wire.unit_id_of(args)),
+                 mode, be, args.seq_mode == "echo", args.world_prefix)
+            print("[feworld] -> 0x30 inner 0x302D MSG_GET_SYSTEM_LOG_OK, %d "
+                  "line(s) (--system-log)" % body[0], flush=True)
         elif real_id == 0x400F:
             # MSG_SERVER_UNIT_LOGIN_REQUEST, built at 0x0504859e and named by the
             # client's own log line at 0x52d5260:
@@ -3163,12 +3264,15 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # in the single shared roster happened to carry this charid.
             #
             # resolve_account() turns it into the store key felobby used: the
-            # echo first (free and exact when the client is verbatim, which is
-            # LIKELY but has never been proven byte-for-byte on a live 0x400F),
-            # then felobby's kv handoff by address, then a direct POL member
-            # lookup. It logs which one fired, because a carry that quietly
-            # stopped working looks exactly like one that worked.
-            key = character.resolve_account(acct, wire._peer_ip(conn), args)
+            # credential blob first (it names the POL member by itself, see
+            # feident.identify_blob), then the echo (free and exact when the
+            # client is verbatim, which is LIKELY but has never been proven
+            # byte-for-byte on a live 0x400F), then felobby's kv handoff by
+            # address, then a direct POL member lookup. It logs which one
+            # fired, because a carry that quietly stopped working looks
+            # exactly like one that worked.
+            key = character.resolve_account(acct, wire._peer_ip(conn), args,
+                                            blob=blob)
             sess._SESSION["account"], sess._SESSION["charid"] = key, charid
             sess._SESSION["wire_account"] = acct
             print("[feworld]    blob: %s" % blob.hex(), flush=True)
@@ -3269,6 +3373,14 @@ def _serve_loop(conn, args, session, outbound, mode, be):
             # the world clock, now: logged in, no field loading, the map
             # screen about to draw its clock (--world-clock connect)
             clock.clock_connect_push(conn, outbound, mode, be, args)
+        elif handler_of(real_id) is None and real_id >= 0:
+            # No arm at all for this id. Named + decoded so a client id we
+            # do not answer reads differently from a new one (inbound_label).
+            name = (messages.KNOWN.get(real_id)
+                    or messages.CLIENT_SENT.get(real_id))
+            print("[feworld]    UNHANDLED 0x%04X %s -- %s" % (
+                real_id, name or "(unknown id)",
+                decode_unanswered(real_id, inner[2:])), flush=True)
 
 
 def _serve_one(conn, peer, args):

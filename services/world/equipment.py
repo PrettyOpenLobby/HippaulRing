@@ -112,7 +112,7 @@ def item_add_body(uid, no, slot, count=1, equip=None, kind=0, announce=0):
     """0x107A, the add form (worker 0x0503d540, per-item reader 0x0503d280)."""
     return (struct.pack(">BBI", 1, announce & 0xFF, slot & 0xFFFFFFFF)
             + struct.pack(">I", uid & 0xFFFFFFFF)
-            + itemrecords.item_fields(no, count, slot, equip, kind))
+            + itemrecords.item_fields(no, count, slot, equip, kind, uid=uid))
 
 
 def item_remove_body(slot):

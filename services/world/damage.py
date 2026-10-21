@@ -36,7 +36,8 @@ def player_attack(args):
     return kind, base, weapon, base + weapon
 
 
-def player_hit_damage(args, m, level=None, skill=None, attack=None):
+def player_hit_damage(args, m, level=None, skill=None, attack=None,
+                      gap=True):
     """What ONE of the player's hits takes off monster `m`, and why.
 
     KEY: 2026-09-12, two parts, both off the client's own data:
@@ -70,9 +71,17 @@ def player_hit_damage(args, m, level=None, skill=None, attack=None):
             base = attack * power / 100.0
             why = ("attack %d (%s) x skill %d power %g%%"
                    % (attack, parts, skill, power))
+            # a summon's attack adds its own flat amount (fegamedata.
+            # skill_flat: the Knight's lance +300 / +660)
+            flat_pc = fegamedata.skill_flat(skill)[0]
+            if flat_pc > 0:
+                base += flat_pc
+                why += " + %g flat" % flat_pc
         else:
             why = ("flat --hit-damage %d (skill %d: power %g, attack %d)"
                    % (flat, skill, power, attack))
+    if not gap:
+        return max(1, int(round(base))), why + ", no level row (a player hit)"
     if getattr(args, "mob_level_correction", "on") != "on":
         return max(1, int(round(base))), why
     lv = int(staff.char_level(args) if level is None else level)
@@ -90,6 +99,9 @@ def restore_push(conn, outbound, mode, be, args, stat, amount, why):
     server's while --monster-attack on owns it (as --item-heal always was);
     Pw goes through pw_push, the setter the regen already uses."""
     amount = int(amount)
+    if stat == "st":
+        progression.stamina_restore(conn, outbound, mode, be, args, amount, why)
+        return
     if stat == "pw":
         before = progression.pw_now(args)
         progression.pw_push(conn, outbound, mode, be, args, before + amount,
@@ -133,6 +145,11 @@ def item_use_effect(conn, outbound, mode, be, args, item_no, fx):
     if not fx["total_ms"]:
         restore_push(conn, outbound, mode, be, args, fx["stat"], fx["amount"],
                      "item %d (EFFECT_DATA %d)" % (item_no, fx["effect"]))
+        if fx["stat"] == "hp":
+            # --stamina beta only: the food's HP figure also feeds the gauge
+            # (the data carries no stamina figure; retail had no gauge to fill)
+            progression.stamina_restore(conn, outbound, mode, be, args,
+                                        fx["amount"], "food item %d" % item_no)
         return
     tick = max(0.1, fx["tick_ms"] / 1000.0)
     n = max(1, fx["total_ms"] // max(1, fx["tick_ms"]))

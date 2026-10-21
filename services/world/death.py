@@ -65,9 +65,12 @@ def validate_cancel_on_hit(conn, outbound, mode, be, args, dmg=0):
     """Manual p.22/23: "Being attacked during that time cancels it." When a
     Field Out countdown is pending (readloop armed `validate_due` on the
     0x1154 OK), drop the 0x1157 FINISH and tell the client with 0x1158 code
-    0. --validate-cancel-on-hit off keeps the old behaviour (damage never
-    cancels). Returns True when a cancel went out."""
-    if getattr(args, "validate_cancel_on_hit", "off") != "on":
+    0. Default on; --validate-cancel-on-hit off keeps the old behaviour
+    (damage never cancels). The same countdown serves System > Logout (the
+    validate screen's mode [+0x78] = 1 quits to the Viewer on 0x1157, 2 is
+    Field Out; 0x050AD420), so a hit cancels a logout too. Returns True
+    when a cancel went out."""
+    if getattr(args, "validate_cancel_on_hit", "on") != "on":
         return False
     if sess._SESSION.pop("validate_due", None) is None:
         return False
@@ -120,9 +123,8 @@ def player_hp_max(args):
 #     revived players sortie from that fort" [SE warsystem02]. So the base is
 #     the side's ARRIVAL point: spawn_for(area, tag=side) -- a `!spawn <side>`
 #     row, else the derived point beside that side's keep (derived_spawn).
-#   * OUTSIDE A WAR no source says where a hunting death revives
-#     (research-local-archive: "Outside war: the respawn location is NOT
-#     FOUND"), so it stays what it was: in place. That is OURS, not SE's.
+#   * OUTSIDE A WAR no source says where a hunting death revives,
+#     so it stays what it was: in place. That is OURS, not SE's.
 #   * 15 s PROTECTION after that return or after an area move, ended by any
 #     action other than moving -- "デッドダウンから拠点に復帰したとき、または
 #     エリア移動直後の15秒間…移動以外の行動をとると、即座に効果が切れ"

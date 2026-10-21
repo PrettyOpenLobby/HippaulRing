@@ -1,7 +1,34 @@
 """What the campaign extension says about a field, and the per-field head count."""
 import sys
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import extrun
+from . import extrun, territory
+
+
+# ---------------------------------------------------------------------------
+# CULTURE LEVEL (2026-10-08). Tutorial book 174: "The culture level shows how
+# far a nation's culture has come. There are eight steps, set by how many
+# fields the nation holds"; 249: at 8 capital gear lasts longer and performs
+# better, at 1 it wears out fast. SE's 2nd-beta notes removed the one thing
+# it did to the game (「文化レベルによるショップ販売アイテムの格差がなくなりました」),
+# and nothing in the client reads the value
+# anywhere but its own debug log: the 0x3027 parser (0x05005090) stores it at
+# force+0x5f4 as m_FormerCultureLevel (the only culture field on the wire;
+# there is no m_CultureLevel string in the image), and the force window
+# (0x050c6432..) draws members, territory, wars and wins from the record but
+# never +0x5f4. So this is a served number with no screen behind it. The
+# steps are OURS: 1 + held // --culture-step, capped at 8 -- with 19 fields
+# a nation (95 over 5) starts at 4, the middle of the ladder.
+# ---------------------------------------------------------------------------
+def culture_level(held, args=None):
+    step = max(1, int(getattr(args, "culture_step", 5) or 5))
+    return max(1, min(8, 1 + int(held) // step))
+
+
+def nation_culture_level(args, force_id):
+    """The level `force_id` has from the territory map right now."""
+    held = sum(1 for a in fegamedata.areas()
+               if int(territory.territory_owner(a, args) or 0) == int(force_id))
+    return culture_level(held, args)
 
 def campaign_war_cap(args):
     """The per-side cap a war is fought under (SE warsystem01: 50 v 50), or 0
@@ -193,11 +220,15 @@ def campaign_force_vals(args, force_id, vals):
     wars, wins, population, King's message) instead of zeros; `vals` as-is
     when the module is absent. Same thin lookup as campaign_phase."""
     mod = sys.modules.get("fecampaign")
-    if mod is None or not hasattr(mod, "force_vals"):
-        return vals
-    try:
-        return mod.force_vals(args, force_id, vals)
-    except Exception as e:                             # noqa: BLE001
-        print("[feworld]    nation record: fecampaign.force_vals failed (%s) "
-              "-- served the static row" % e, flush=True)
-        return vals
+    out = vals
+    if mod is not None and hasattr(mod, "force_vals"):
+        try:
+            out = mod.force_vals(args, force_id, vals)
+        except Exception as e:                         # noqa: BLE001
+            print("[feworld]    nation record: fecampaign.force_vals failed (%s) "
+                  "-- served the static row" % e, flush=True)
+            out = vals
+    if str(getattr(args, "culture_level", "on") or "on") == "on":
+        out = dict(out or {})
+        out["FormerCultureLevel"] = nation_culture_level(args, force_id)
+    return out

@@ -446,6 +446,7 @@ def register(feworld):
     fw.register_handler(0x2045, on_metamorphosis_release)
     fw.register_handler(0x20AD, on_recover_from_crystal)
     fw.register_handler(0x20AE, on_20ae)
+    fw.register_handler(0x1036, on_remove_effects)
     fw.register_gm(gm)
     fw.register_args(add_args)
     fw.register_pump(pump)
@@ -558,18 +559,21 @@ def add_args(ap):
                          "pp.38-39): poison/burn HP over time, slow/root/stun "
                          "in the monster AI, no damage from a stunned or "
                          "disarmed attacker, resistance up/down in damage "
-                         "taken, root and Hide broken by a hit, Hide can't be "
-                         "target-locked in PvP. Every status comes from the "
-                         "skill's own EFFECT_DATA rows. Nothing new goes on "
-                         "the wire unless --status-effects-wire on. `!status` live.")
-    ap.add_argument("--status-effects-wire", default="off", choices=("on", "off"),
+                         "taken, root and Hide broken by a hit (and Hide by "
+                         "the hider's own cast), Hide can't be target-locked "
+                         "in PvP. Every status comes from the skill's own "
+                         "EFFECT_DATA rows. The client sees the bits through "
+                         "--status-effects-wire. `!status` live.")
+    ap.add_argument("--status-effects-wire", default="on", choices=("on", "off"),
                     help="ALSO tell the player's own client: the CONDITION "
                          "word (0x2024 maskA 0x100000) carries the status bits "
                          "(poison 0x1, stun 0x10, root 0x20, disarm 0x40, hide "
                          "0x2000, no flinch 0x4000, blind 0x8000, chant "
-                         "0x2000000 -- the client's own bit names). UNPROVEN on "
-                         "a screen: default off. The live check is in "
-                         "world/status.py cond_sync.")
+                         "0x2000000 -- the client's own bit names). Default on "
+                         "since 2026-10-08: the HUD icon loop (0x050cd369, "
+                         "labels 0x052E1D30) reads exactly this word. Not yet "
+                         "seen on a screen; off is the rollback. The live "
+                         "check is in world/status.py cond_sync.")
     ap.add_argument("--hide-presence", default="off", choices=("on", "off"),
                     help="a HIDDEN player is taken off enemy-nation screens "
                          "(fepresence: 0x1004 when hidden, 0x1006 again when "
@@ -583,12 +587,119 @@ def add_args(ap):
                          "read off the client's own cadences: a 0x20AD crystal "
                          "heal, or two 0x2028 regen asks under 2.2 s apart "
                          "(1349 ms crouched vs 3000 ms standing, 0x0507D84B).")
+    ap.add_argument("--summon-seen", default="on", choices=("on", "off"),
+                    help="show a summon to the OTHER players: the 0x203D form "
+                         "and the 0x106C release, re-addressed to the "
+                         "summoner's charid (the avatar every other client "
+                         "draws), and the form with the avatar for a client "
+                         "that draws the summoner later. Default on; off = "
+                         "only the summoner's own client changes (the "
+                         "pre-2026-10-08 behaviour)")
+    ap.add_argument("--dot-floor", type=int, default=1, metavar="HP",
+                    help="poison and burn never take a PLAYER below this HP "
+                         "(RoD, fewiki memo 2006-05-26: 毒・火傷ではHP1以下に"
+                         "ならない). Default 1; 0 lets a DoT kill (the "
+                         "2026-10-01 behaviour). Monsters are not floored.")
+    ap.add_argument("--effect-remove", default="good",
+                    choices=("good", "all", "off"),
+                    help="the client's 0x1036 'remove my effects' (feunit "
+                         "on_remove_effects): good (default) = end the GOOD "
+                         "statuses it names (Hide, chant, Ender Pain, resist "
+                         "up) and echo 0x1036 to the client and to the peers "
+                         "drawing it; a bad status (poison, stun) is left to "
+                         "the server's own timer (CHOSEN: a client must not "
+                         "be able to cure itself). all = every status it "
+                         "names; off = log only, no echo")
     ap.add_argument("--loot-rule", default="damage", choices=("damage", "last"),
                     help="who gets a monster kill (world/combat.py): damage "
                          "(default, manual p.38) = the player or PARTY with "
                          "the most landed damage, first hit on a tie; gold "
                          "split by damage share. last = the old rule, all of "
                          "it to the killing blow.")
+
+
+# ---------------------------------------------------------------------------
+# 0x1036 -- REMOVE EFFECTS (2026-10-08, round 2)
+#
+# READ OFF THE DUMP. Client -> server [u8 n] n x [u16 EFFECT_DATA id], from
+# three senders:
+#   * 0x05038cf5, a skill object's run method (vtable slot shared by 22
+#     classes at 0x05261d3c..): when the player's skill fires, every effect
+#     in the skill's 16-id list (+0x108) whose EFFECT_DATA flag byte +0x68
+#     has bit 0x8 is named, once per skill object ([this+0x48] |= 0x400);
+#   * 0x0506bf20, the unit's per-frame update (0x0507e5ca -> 0x0506bf00):
+#     each effect node of the unit's list [+0x8b4] with [node+0x18] bit 1
+#     set and [node+0xa8] == 0, one id per message;
+#   * 0x0506ce8e (0x0506ce50, called from seven action sites): while the
+#     unit is INVISIBLE ([+0x2b4] & 0x2000), every effect node whose
+#     condition bits [node+0x70] carry 0x2000 -- Hide broken by acting --
+#     then 0x0506ceec clears 0x2000|0x20000 on the unit itself.
+# None of the three ends the node itself: the node stays until the SERVER
+# answers. Server -> client 0x1036 is the c0 arm 0x0503cef0: the HEADER unit
+# id (a class-3 unit: the player's own, or a peer's avatar under its charid)
+# then the same [u8 n] n x [u16 id], each through 0x0506be20, which walks
+# [unit+0x8b4] for [node+0x1c] == id and ends that node. So the answer is
+# the same body echoed to the sender's client and to every client drawing
+# that player.
+# ---------------------------------------------------------------------------
+def decode_remove_effects(f):
+    """[u8 n] n x [u16 id] -> [ids] (a short body yields what is there)."""
+    if not f:
+        return []
+    n = f[0]
+    out = []
+    for i in range(n):
+        if 1 + 2 * i + 2 > len(f):
+            break
+        out.append(struct.unpack_from(">H", f, 1 + 2 * i)[0])
+    return out
+
+
+def remove_effects_body(ids):
+    ids = list(ids)[:255]
+    return struct.pack(">B", len(ids)) + b"".join(
+        struct.pack(">H", int(e) & 0xFFFF) for e in ids)
+
+
+def on_remove_effects(ctx, inner):
+    args = ctx.args
+    ids = decode_remove_effects(inner[2:])
+    s = fw._SESSION
+    mode = getattr(args, "effect_remove", "good")
+    _log("<- 0x1036 remove effects %s from charid %s (--effect-remove %s)"
+         % (ids, s.get("charid"), mode))
+    if mode == "off" or not ids:
+        return True
+    st = _status.table(s)
+    gone = []
+    for e in ids:
+        kinds = {sp["kind"] for sp in _status.effect_specs(e)}
+        kinds |= {k for k, v in st.items() if int(v.get("effect", -1)) == int(e)}
+        for k in sorted(kinds):
+            if k not in st:
+                continue
+            if mode == "good" and k not in _status.GOOD:
+                _log("   %s (effect %d) is a BAD status -- left to the "
+                     "server's timer" % (k, e))
+                continue
+            del st[k]
+            gone.append(k)
+    if gone:
+        _log("   ended: %s" % ", ".join(gone))
+        _status.cond_sync(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+    body = remove_effects_body(ids)
+    ctx.reply(0x1036, body, why="remove effects %s (echo; c0 arm 0x0503cef0 "
+                                "ends each node via 0x0506be20)" % ids)
+    cid = int(s.get("charid") or 0)
+    pres = sys.modules.get("fepresence")
+    key = pres._key(s) if pres is not None else None
+    if cid and key is not None:
+        n = fw.ext_post("presence.mv",
+                        {"cid": cid, "key": key, "mid": 0x1036, "body": body,
+                         "arr": time.monotonic(), "act": -1},
+                        to=lambda ps, _n: pres._key(ps) == key)
+        _log("   relayed to %d peer session(s) under charid %d" % (n, cid))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +748,7 @@ def _gm_status(ctx, rest):
                                        for k, e in sorted(a.items())) or "none",
             _status.bits(s), s.get("status_bits_sent", 0),
             getattr(args, "status_effects", "on"),
-            getattr(args, "status_effects_wire", "off"),
+            getattr(args, "status_effects_wire", "on"),
             _status.crouched(s)))
     return True
 
@@ -785,13 +896,43 @@ def metamorph_push(ctx, word, unit_id=None):
     """0x203D bit 0x10: the u16 form -> [unit+0x3b4]; a one-hot form bit
     rebuilds the model (0x506c7d0), FORM_HUM only rewrites the word. PARTIAL: NEVER
     SEEN ON A SCREEN."""
-    ctx.reply(0x203D, profile_body({PROFILE_FORM_BIT: word}), unit_id=unit_id,
+    body = profile_body({PROFILE_FORM_BIT: word})
+    ctx.reply(0x203D, body, unit_id=unit_id,
               why="UNIT PROFILE form 0x%X (%s) -> [unit+0x3b4]%s"
                   % (word, form_label(word),
                      ", model rebuild 0x506c7d0" if word & 0x3F else
                      " (no form bit: 0x506c7d0 returns early, no model change)"))
     ctx.session["morph_form"] = word
+    if unit_id is None:
+        peer_relay(ctx, 0x203D, body)
     return 0x203D
+
+
+def peer_relay(ctx, mid, body):
+    """THE OTHERS SEE THE SUMMON (2026-10-08). 0x203D and 0x106C act on the
+    unit their HEADER names (a class-3 lookup, 0x04feb9a9 / 0x0503d230), and
+    every other client draws this player as an avatar under its CHARID
+    (fepresence). So the same body, re-addressed to the charid, transforms
+    (or reverts) the avatar on every screen in the field -- until now only
+    the summoner's own client changed, and the enemy fought an infantryman
+    that hit like a Knight. Posted through fepresence's relay, which sends
+    it only to a client that already draws this player; one that draws them
+    later gets the form with the avatar (fepresence.pump). Returns how many
+    sessions it was posted to."""
+    pres = sys.modules.get("fepresence")
+    s = ctx.session
+    cid = int(s.get("charid") or 0)
+    key = pres._key(s) if pres is not None else None
+    if not cid or key is None or getattr(ctx.args, "summon_seen",
+                                         "on") != "on":
+        return 0
+    n = fw.ext_post("presence.mv",
+                    {"cid": cid, "key": key, "mid": int(mid),
+                     "body": bytes(body), "arr": time.monotonic(), "act": -1},
+                    to=lambda ps, _n: pres._key(ps) == key)
+    _log("   0x%04X relayed to %d peer session(s) under charid %d"
+         % (mid, n, cid))
+    return n
 
 
 def form_spec(spec):
@@ -926,7 +1067,7 @@ def summon_building(ctx, bld):
         return None
     k = (s.get("keeps") or {}).get(bld)
     if k is not None:
-        types = fw._pair(getattr(args, "keep_types", None), (20, 16))
+        types = fw._pair(getattr(args, "keep_types", None), (15, 16))
         btype = types[0] if k["side"] == "def" else types[1]
         try:
             grid = (fw.keep_grids(k["area"]) or {}).get(k["side"])
@@ -1187,6 +1328,7 @@ def release_push(ctx, why=""):
     ctx.reply(MSG_RELEASE_OK, b"", why="METAMORPHOSIS RELEASE -> 0x0506c930: HUM "
               "set, human model rebuilt, [player+0x136c]=0%s"
               % ((" " + why) if why else ""))
+    peer_relay(ctx, MSG_RELEASE_OK, b"")
     metamorph_push(ctx, FORM_HUM)
 
 

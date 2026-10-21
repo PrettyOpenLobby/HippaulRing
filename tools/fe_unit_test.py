@@ -568,7 +568,7 @@ def part_status():
 
     # --- a monster: a skill's statuses land, DoT kills pay the applier
     a = _args(combat="on", monster_attack="on", kill_reward="off", drops="off",
-              kill_gold="off", status_effects="on")
+              kill_gold="off", status_effects="on", status_effects_wire="off")
     _KEYS = ("in_field", "charid", "field", "room", "cpos", "mobs", "status",
              "player_hp", "crouch_at", "crouch_pos", "pw_tick_at",
              "crouch_tick_seen", "status_bits_sent", "player_dead")
@@ -652,9 +652,12 @@ def part_status():
                    and struct.unpack_from(">I", o[2], 0)[0] == 0x4]
         check("player poison: -15 HP, pushed as 0x2024 maskA 0x4",
               s["player_hp"] == 85 and len(hp_push) == 1, (s["player_hp"], out))
-        check("...--status-effects-wire off: no CONDITION word goes out",
+        check("...--status-effects-wire off (explicit): no CONDITION word goes out",
               not [o for o in out if o[0] == 0x2024
                    and struct.unpack_from(">I", o[2], 0)[0] == 0x100000])
+        check("the wire is ON by default (2026-10-08: the HUD icon loop "
+              "0x050cd369 reads the CONDITION word)",
+              status.wire_on(type("A", (), {})()))
         aw = _args(combat="on", status_effects="on",
                    status_effects_wire="on", unit_state=0x1E000000)
         del out[:]
@@ -666,6 +669,15 @@ def part_status():
         del out[:]
         status.cond_sync(None, None, "ecb", False, aw)
         check("...sent once per change, not every pump", out == [])
+        status.apply(s, status.good_specs(140))          # Hide L1
+        status.cond_sync(None, None, "ecb", False, aw)
+        del out[:]
+        gone = status.player_cast(None, None, "ecb", False, aw, 20)
+        check("the hider's own cast ends HIDE (the client clears 0x2000 itself, "
+              "0x0506ceec) and the word goes out without it",
+              gone == ["hide"] and not status.has(s, "hide")
+              and out and not (struct.unpack_from(">I", out[-1][2], 8)[0] & 0x2000),
+              (gone, out))
         status.clear(s)
         status.cond_sync(None, None, "ecb", False, aw)
         check("...and cleared when it ends",

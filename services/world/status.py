@@ -52,9 +52,24 @@ from . import sess, wire
 # when the holder is hit; a hidden player can't be target-locked in PvP.
 #
 # WHAT IT DOES NOT: the player's OWN movement and skill bar are the client's.
-# Only --status-effects-wire on tells the client, through the CONDITION word
-# (0x2024 maskA 0x100000, the setter unitstate already uses) -- default OFF, and the
-# live check is written at cond_sync.
+# --status-effects-wire (default ON since 2026-10-08) tells the client, through
+# the CONDITION word (0x2024 maskA 0x100000, the setter unitstate already uses).
+#
+# THE STATIC CHECK BEHIND THE DEFAULT (2026-10-08, read off the dump):
+#   * the HUD's status-icon loop at 0x050cd369..0x050cde46 tests
+#     [unit+0x2b4] one bit at a time (bytes 0x1,0x2,..0x80, then 0x10000..
+#     0x80000000) and labels each from the table at 0x052E1D30, indexed by
+#     bit number: [0] 毒効果, [4]/[5] Stunned, [6] No atk, [12] 無敵,
+#     [13] Invisible, [14] No flinch, [15] Blinded, [23] 死亡, [24] 幽霊状態.
+#     So the icons ARE the CONDITION word, bit for bit as KIND_BITS names it.
+#   * the client owns three bits of that word itself: it sets 0x4000 (No
+#     flinch) while a skill motion plays (0x05069405 `or ch,0x40`, cleared at
+#     0x05042770 / 0x0506ceec) and clears 0x2000 Invisible | 0x20000 Ambush
+#     when the player acts (0x0506ceec `and eax,0xfffddfff`). A full-word push
+#     must therefore never re-assert HIDE after the client dropped it: a cast
+#     ends the server's hide too (player_cast), and the transient 0x4000 is
+#     left alone (we only push on a status CHANGE).
+#   The screen proof is still owed: cond_sync's docstring says what to watch.
 # ---------------------------------------------------------------------------
 
 COND_POISON = 0x1
@@ -87,7 +102,7 @@ def on(args):
 
 
 def wire_on(args):
-    return str(getattr(args, "status_effects_wire", "off") or "off") == "on"
+    return str(getattr(args, "status_effects_wire", "on") or "on") == "on"
 
 
 def _log(msg):
@@ -409,20 +424,21 @@ def cond_word(args, s):
 
 
 def cond_sync(conn, outbound, mode, be, args):
-    """--status-effects-wire on: push the CONDITION word when the status bits
-    change.
+    """--status-effects-wire on (default): push the CONDITION word when the
+    status bits change.
 
-    WARNING: OFF BY DEFAULT, NOT LIVE-TESTED. The setter is the one unitstate
-    and death already use (0x2024 maskA 0x100000 -> 0x0506caa0), and the bit
-    names are the client's own, but nobody has watched the client react to
-    any bit but DEAD. THE LIVE CHECK: `!status poison 10` (or a Venomous
-    bite) with --status-effects-wire on -- the 毒効果 icon should appear on
-    the HUD and clear when the poison ends; `!status root 10` should stop the player
-    walking (STUN1); `!status hide 30` should draw the player semi-
-    transparent. If the icon does not show, the client draws statuses from
-    something else (0x1185's unit list is the candidate) and this stays off.
-    Also unknown: whether the client sets these bits ITSELF when it plays a
-    skill, in which case a push here could clear a bit it owns."""
+    NOT LIVE-TESTED past the DEAD bit. The setter is the one unitstate and
+    death already use (0x2024 maskA 0x100000 -> 0x0506caa0), the bit names
+    are the client's own and the HUD icon loop reads exactly this word (see
+    the header: 0x050cd369, label table 0x052E1D30). THE LIVE CHECK: `!status
+    poison 10` (or a Venomous bite) -- the 毒効果 icon should appear on the
+    HUD and clear when the poison ends; `!status root 10` should stop the
+    player walking (STUN1); `!status hide 30` should draw the player semi-
+    transparent. If the icon does not show, --status-effects-wire off is the
+    rollback. The client's own writers of the word (the 0x4000 no-flinch
+    toggle around a skill motion and the 0x2000|0x20000 clear on an act) are
+    accounted for in the header; player_cast keeps the server's hide in step
+    with the client's clear."""
     if not wire_on(args):
         return False
     s = sess._SESSION
@@ -470,6 +486,29 @@ def player_hit_taken(conn, outbound, mode, be, args, why=""):
     return gone
 
 
+def player_cast(conn, outbound, mode, be, args, skill=None):
+    """The player used a skill: the CLIENT clears Invisible (0x2000) and
+    Ambush (0x20000) on its own unit when the player acts (0x0506ceec `and
+    eax,0xfffddfff`), so the server's hide ends here too -- otherwise the next
+    cond_sync would put the bit back and the hider would turn invisible again
+    mid-attack. The hide-only skills (SKILL_DATA +0xd0 wants 0x2000) are cast
+    FROM hide, so the clear lands after the gate, the same order the client
+    uses. Returns the kinds ended."""
+    if not on(args):
+        return []
+    s = sess._SESSION
+    st = s.get("status") or {}
+    gone = [k for k in ("hide",) if k in st]
+    for k in gone:
+        del st[k]
+    if gone:
+        _log("charid %s: %s ends on the cast%s (the client clears 0x2000 itself)"
+             % (s.get("charid"), ", ".join(gone),
+                "" if skill is None else " of skill %s" % skill))
+        cond_sync(conn, outbound, mode, be, args)
+    return gone
+
+
 def player_dies(conn, outbound, mode, be, args, why):
     """The same death a monster's swing causes (monsters.monster_attack_tick)."""
     from . import death
@@ -503,10 +542,14 @@ def player_pump(conn, outbound, mode, be, args, now=None):
         from . import death
         hpmax = death.player_hp_max(args)
         hp = int(s.get("player_hp", hpmax))
+        # RoD: poison and burn never take a player below 1 HP (fewiki memo,
+        # 2006-05-26: 毒・火傷ではHP1以下にならない). --dot-floor 0 lets
+        # them kill (the 2026-10-01 behaviour).
+        floor = max(0, int(getattr(args, "dot_floor", 1) or 0))
         for kind, amt, _src in ticks:
-            if hp <= 0:
+            if hp <= floor:
                 break
-            hp = max(0, hp - amt)
+            hp = max(floor, hp - amt)
             hurt += amt
         s["player_hp"] = hp
         death.player_hp_push(conn, outbound, mode, be, args, hp)

@@ -40,6 +40,8 @@ def suites():
     # who is on the socket: POL session rows, the roster tie-break, the kv
     # handoff and address memory
     out.append(("feident", [sys.executable, "feident.py"], {}))
+    # the per-address share of the handler threads the three listeners take
+    out.append(("peercap", [sys.executable, "peercap.py"], {}))
     # services/feworld.py is a facade over services/world/: every name a test
     # or an extension rebinds must reach the module that runs it, and the
     # check must be able to fail (--selftest switches the forwarding off)

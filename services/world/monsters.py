@@ -638,6 +638,8 @@ def monster_attack_tick(conn, outbound, mode, be, args):
         hp = max(0, int(sess._SESSION.get("player_hp", death.player_hp_max(args))) - dmg)
         sess._SESSION["player_hp"] = hp
         death.player_hp_push(conn, outbound, mode, be, args, hp)
+        itemrecords.item_wear_hit(conn, outbound, mode, be, args, dmg,
+                                  "hit by %s" % (m["name"] or obj))
         if hp > 0 and status.on(args):
             # the hit ends root/hide, then its OWN skill's bad statuses land
             # (Venomous's bite poisons, Ice Lizard roots: SKILL_DATA +0x108)

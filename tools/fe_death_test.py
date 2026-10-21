@@ -477,8 +477,8 @@ def part_serve(wa):
 def part_validate(wa):
     print("\n4c. Field Out (manual p.22/23): damage cancels the countdown "
           "(0x1158), a capital finishes at once", file=OUT)
-    check("--validate-cancel-on-hit defaults off (0x1158 not seen live yet)",
-          getattr(wa, "validate_cancel_on_hit", None) == "off",
+    check("--validate-cancel-on-hit defaults on (manual: being attacked cancels)",
+          getattr(wa, "validate_cancel_on_hit", None) == "on",
           getattr(wa, "validate_cancel_on_hit", None))
     wa = with_(wa, validate_cancel_on_hit="on")
     check("--validate-capital defaults to instant",

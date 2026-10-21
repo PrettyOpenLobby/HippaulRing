@@ -873,6 +873,17 @@ def raw_relay(a):
           po() == [(0x2023, 8, short)], po())
     out[:] = []
 
+    # an EMOTE (2026-10-08): /greet (emote row 0) plays motion 102 through
+    # action ctor 0x050416d0, whose serializer 0x050418a0 sends 14 bytes
+    # [u32 0xF][u32 start ms][u32 end ms = start + 1500][u16 motion]. The
+    # receiver (0x04fec51e) uses only end - start, so no clock rewrite.
+    emote = struct.pack(">IIIH", 0xF, 700000, 701500, 102)
+    w.do(lambda: send_hb(rb, emote))
+    feworld.ext_pump(ctx)
+    check("an EMOTE (/greet: 0x2023 action 0xF, motion 102) is relayed "
+          "byte-for-byte to obj 8", po() == [(0x2023, 8, emote)], po())
+    out[:] = []
+
     # a CAST (0x1032 SKILL USE, 40 B) handed over by feprog.on_cast ->
     # relay_inner: verbatim, its own message id, under the caster's charid
     cast = (struct.pack(">IIBIIHBII", 520936, 522536, 1, 1, 40, 270, 1, 0, 3001)

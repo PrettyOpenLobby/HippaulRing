@@ -3,10 +3,13 @@ import struct
 import feident  # noqa: E402  -- WHOSE character this is; see its docstring
 from . import sess, wire
 
-def resolve_account(echoed, ip, args):
+def resolve_account(echoed, ip, args, blob=None):
     """The character-store key for this world session.
 
-    Three carries, best first, and the one that fires is LOGGED:
+    The credential blob in 0x400F is tried before any carry: it decodes to a
+    hash the core filed for this login, so a hit is the member itself
+    (feident.member_for_blob). Then three carries, best first, and the one
+    that fires is LOGGED:
 
       1. THE ECHO. `echoed` is the account name felobby put in 0xC010 and the
          client handed back in 0x400F. With `--account-mode member` (felobby's
@@ -30,6 +33,12 @@ def resolve_account(echoed, ip, args):
               "felobby sends a constant -- one roster for every player"
               % echoed, flush=True)
         return echoed
+    by_blob = feident.member_for_blob(blob, tag="feworld") if blob else None
+    if by_blob:
+        print("[feworld]    identity: %s via the 0x400F CREDENTIAL BLOB (%s); "
+              "the echo (%r) and the address were not consulted"
+              % (by_blob["key"], by_blob["detail"], echoed), flush=True)
+        return by_blob["key"]
     got = feident.recall(ip=ip, wire=echoed)
     if got and got.get("via") == "by_wire":
         print("[feworld]    identity: %s via the 0x400F ACCOUNT ECHO (%r), "

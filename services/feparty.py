@@ -1,5 +1,6 @@
 """feparty.py -- Fantasy Earth PARTY: invite, judge, add/del notifies, leave,
-kick, breakup, member-scoped /party chat. PARTIAL: BUILT 2026-09-10, NOT LIVE-TESTED.
+kick, disband, breakup, member-scoped /party chat, the HP rows. BUILT
+2026-09-10, round 2 2026-10-08 (tools/fe_partyloop_test.py), NOT LIVE-TESTED.
 
 Extension module for feworld.py (see THE EXTENSION SEAM there). Registers
 through `register(fw)`; never imports feworld itself.
@@ -107,8 +108,9 @@ OUTBOUND (server -> client), read off each ARM (its typed-read sequence + the he
          0x05051c84..0x05051d44 reads u32/u8/u16/u16/u32/u32 into the member
          record at +0x18/+0x3f/+0x40/+0x42/+0x44/+0x4c (0x05051cf2..0x05051d19)
          and writes w2 (sign-extended) to the window row's +0x6c
-         (0x05051d34). WARNING: WHAT b/w1/w2/d1/d2 MEAN IS NOT MEASURED -- served
-         only by the `!party status` probe with operator-chosen values.
+         (0x05051d34). w1 = HP MAX, w2 = HP NOW (the row's "HP %4d/%4d",
+         0x050ca1ec), d1 = the condition word (the panel's colours,
+         0x050cc0ca); b and d2 are never read. Served by hp_tick.
   0x113A MSG_PARTY_MEMBER_DISBAND_OK        header-only  (0x05051b50: clears
          bit3, msgbox "<P+0x4c name> removed from party."; the ROW IS NOT
          REMOVED here -- a 0x1135 must follow)
@@ -125,11 +127,24 @@ WHAT IS CHOSEN (not measured) -- every one is a knob or documented:
   * any member may invite; only the LEADER may kick (0x113B code 2 exists
     for exactly that refusal); the leader leaving promotes the oldest member;
     a party that drops below 2 members is broken up (0x1136).
-  * the joiner receives the FULL member list in one 0x1134 (N = party size,
-    so the arm says "Joined the party."); existing members receive N=1 with
-    the joiner (the leader's first one says "Party formed."). Whether retail
-    included the joiner's own row in the joiner's list is unknown -- it is
-    included here, so the window shows every member.
+  * EVERY CLIENT'S LIST HOLDS ITSELF AND STARTS WITH THE LEADER (read
+    2026-10-08, no longer a choice): the List menu looks its own ChrID up in
+    the list (0x050cb5e3 -> 0x05051160; no row = no menu at all) and gives
+    the kick/disband entries to the row whose +0x50 is 0, +0x50 being each
+    record's position (0x05051180). So the joiner receives the FULL list in
+    one 0x1134 (leader first; "Joined the party."), and the leader, when the
+    party forms, first gets N=1 {itself} ("Party formed.") and then N=1
+    {joiner}. Until 2026-10-08 the leader's list held only the others: no
+    List menu for the leader.
+  * the LEADER's 0x2089 DISBANDS (manual p.43, and the builder 0x05051400
+    registers 0x1136 among its answers): 0x1136 to everyone. A member's
+    0x2089 leaves. --party-disband leave restores the old leader-leaves.
+  * 0x1139 IS THE HP ROW (read 2026-10-08, see hp_tick): w1 = HP max, w2 =
+    HP now, d1 = the condition word; b and d2 have no reader. Every member
+    posts its own row to the party on a change (--party-hp on).
+  * EXP: no 2006 source gives a party EXP rule (the Netzawar wiki, 05-28:
+    party chat is the only real benefit), so combat.kill_rewards keeps the
+    winning group's EXP split by damage. CHOSEN.
   * a NO from the target maps to 0x1130 code 8 ("target refused"); the
     client's auto-decline reason 7 (blacklisted inviter, or invites turned
     off) maps to code 11 "Partner is busy; can't apply." -- it used to be
@@ -290,7 +305,8 @@ def register(feworld):
                      ("party.del", relay_del),
                      ("party.breakup", relay_breakup),
                      ("party.kicked", relay_kicked),
-                     ("party.chat", relay_chat)):
+                     ("party.chat", relay_chat),
+                     ("party.status", relay_status)):
         fw.register_relay(kind, fn)
     for mid, name in NAMES.items():
         fw.KNOWN.setdefault(mid, name)
@@ -324,6 +340,17 @@ def add_args(ap):
     g.add_argument("--party-phantom-base", type=lambda s: int(s, 0),
                    default=0x7F000000,
                    help="first ChrID handed to phantom members")
+    g.add_argument("--party-disband", choices=("leader", "leave"),
+                   default="leader",
+                   help="what the LEADER's 0x2089 does: leader = disband the "
+                        "party, 0x1136 to every member (manual p.43 'Disband "
+                        "Party' is the leader's entry; default), leave = the "
+                        "leader leaves and the oldest member leads (the "
+                        "pre-2026-10-08 behaviour)")
+    g.add_argument("--party-hp", choices=("on", "off"), default="on",
+                   help="push each member's HP max/HP/condition to the party "
+                        "as 0x1139 (the party window's 'HP %%4d/%%4d' row and "
+                        "bar, 0x050ca1ec). Default on")
     g.add_argument("--party-war-check", type=float, default=2.0,
                    help="seconds between a member's own check that their war "
                         "side is not hostile to the leader's (manual p.43). "
@@ -339,12 +366,14 @@ def add_args(ap):
                         "room). CHOSEN: no retail number is known. 0 = the "
                         "whole field (the pre-2026-10-01 behaviour)")
     w.add_argument("--validate-cancel-on-hit", choices=("on", "off"),
-                   default="off",
-                   help="taking damage while a Field Out countdown is pending "
-                        "sends 0x1158 MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY "
-                        "and drops the 0x1157 FINISH (manual p.22/23: being "
-                        "attacked cancels). The arm 0x050AD1EC was read "
-                        "statically; not yet seen live")
+                   default="on",
+                   help="taking damage while a Field Out or System > Logout "
+                        "countdown is pending sends 0x1158 "
+                        "MSG_START_VALIDATE_SEQUENCE_CANCEL_NOTIFY and drops "
+                        "the 0x1157 FINISH (manual p.22/23: being attacked "
+                        "cancels; the client prints 'Field move cancelled.', "
+                        "arm 0x050AD1EC). Default on (retail); off = damage "
+                        "never cancels")
     w.add_argument("--validate-capital", choices=("instant", "wait"),
                    default="instant",
                    help="Field Out from a capital finishes at once (0x1157 "
@@ -512,6 +541,7 @@ def _add_member(p, rec):
 
 def _remove_member(p, cid):
     p["members"].pop(cid, None)
+    p["gen"] = int(p.get("gen", 0)) + 1
     if cid in p["order"]:
         p["order"].remove(cid)
     _MEMBER_OF.pop(cid, None)
@@ -556,18 +586,38 @@ def _join(ctx, inviter_cid, inviter_name, inviter_cls, joiner_rec,
         if _party_of(joiner_rec["charid"]) is not None:
             return None, NG_ALREADY_IN_PARTY
         p = _party_of(inviter_cid)
+        formed = p is None
         if p is None:
             p = _new_party(_rec(inviter_cid, inviter_name, inviter_cls))
             owner = mine if inviter_cid == _my_charid(ctx) else inviter_session
             if owner is not None:
                 _OWNER[inviter_cid] = owner
         if len(p["order"]) >= _k(ctx.args, "party_max", 5):
+            if formed:
+                _drop_party(p)
             return None, NG_FULL
         existing = list(p["order"])
+        leader_rec = dict(p["members"][p["leader"]])
         _add_member(p, joiner_rec)
         if joiner_is_me:
             _OWNER[joiner_rec["charid"]] = mine
         everyone = _records(p)
+    if formed:
+        # THE LEADER'S OWN ROW FIRST (2026-10-08). The client finds ITSELF in
+        # its member list for the List menu (0x050cb5e3: [player+0x3c0] ->
+        # 0x05051160) and gives the kick/disband entries to the row at
+        # position 0 (0x05051180 writes each record's +0x50 = its index;
+        # 0x050cb629 tests the own record's +0x50 == 0). A leader whose list
+        # held only the joiner could not find itself: no List menu, no
+        # kick, no disband. N=1 {self} on an empty list is also what makes
+        # the arm print "Party formed." (0x050515ff), and the joiner's row
+        # follows as "%s joined the party.".
+        if inviter_cid == _my_charid(ctx):
+            _reply(ctx, 0x1134, add_body([leader_rec]),
+                   why="ADD_NOTIFY N=1 {%s} (the leader's own row, head of "
+                       "the list = leader; 'Party formed.')" % leader_rec["name"])
+        elif not leader_rec.get("phantom"):
+            _post("party.add", {"records": [leader_rec]}, inviter_cid)
     for cid in existing:
         if cid == _my_charid(ctx):
             _reply(ctx, 0x1134, add_body([joiner_rec]),
@@ -775,10 +825,31 @@ def on_canvass_cancel(ctx, inner):
 
 
 def on_leave(ctx, inner):
-    """0x2089 (no body): LEAVE. 0x1137 to me, 0x1135 to the rest, 0x1136 to a
-    last member left alone."""
+    """0x2089 (no body): a member LEAVES (0x1137 to them, 0x1135 to the rest,
+    0x1136 to a last member left alone); the LEADER DISBANDS (0x1136 to every
+    member, the leader included).
+
+    The client sends 0x2089 from both List entries (0x050cb5c4 and the
+    confirm dialog 0x050cacc6); the builder 0x05051400 registers 0x1137,
+    0x1138 AND 0x1136 as its answers, and the manual (p.43) gives the leader
+    "Disband Party" and members "Leave Party". The leader is the head of
+    every client's list (0x05051180), so who sent it decides which."""
     me = _my_charid(ctx)
-    _log("0x2089 MSG_DISBAND_PARTY_REQUEST (leave) from charid=%s" % me)
+    _log("0x2089 MSG_DISBAND_PARTY_REQUEST from charid=%s" % me)
+    with _LOCK:
+        p = _party_of(me) if me is not None else None
+        disband = p is not None and p["leader"] == me             and _k(ctx.args, "party_disband", "leader") == "leader"
+        if disband:
+            rest = [c for c in p["order"] if c != me]
+            _drop_party(p)
+    if disband:
+        _reply(ctx, 0x1136, why="BREAKUP_NOTIFY: the leader disbanded the "
+                                "party (manual p.43)")
+        for cid in rest:
+            _post("party.breakup", {}, cid)
+        _log("   leader %d DISBANDED party %d (%d other member(s))"
+             % (me, p["id"], len(rest)))
+        return
     with _LOCK:
         p = _party_of(me) if me is not None else None
         if p is None:
@@ -1230,6 +1301,7 @@ def tick(ctx):
     if me is None:
         return
     _membership_tick(ctx, me)
+    hp_tick(ctx, me)
     limit = _k(ctx.args, "party_invite_timeout", 35.0)
     now = time.time()
     with _LOCK:
@@ -1242,6 +1314,74 @@ def tick(ctx):
              % (tcid, limit))
         _post("party.judge_cancel", {"inviter": me}, tcid)
         _reply(ctx, 0x1130, err_body(NG_REFUSED), why="NG 8: invite timed out")
+
+
+# ---------------------------------------------------------------------------
+# the party window's HP rows: 0x1139 (2026-10-08)
+#
+# READ OFF THE DUMP: the 0x1139 helper 0x05051c60 stores w1 at the member
+# record's +0x40, w2 at +0x42, d1 at +0x44 (and b at +0x3f, d2 at +0x4c,
+# which nothing reads: no other access in the party code 0x05050000..
+# 0x05052000 or the window code 0x050c9000..0x050cd000). The window row
+# formats "HP %4d/%4d" from (+0x42, +0x40) (0x050ca1ec..0x050ca208, string
+# 0x052e21a0), so w2 = HP NOW and w1 = HP MAX; the member panel 0x050cc151
+# draws the bar as 80 - now*80/max and paints the name by d1's bits (0x8000
+# red, 0x1 green = poison, 0x38 dark = stun/root/disarm) and dark at HP 0
+# (0x050cc0a0) -- d1 is the member's CONDITION word, the same bits as
+# [unit+0x2b4]. Each member's own thread knows its own numbers, so it posts
+# its row to the whole party (itself included: its own row is in its list)
+# when they change or the membership does.
+# ---------------------------------------------------------------------------
+def my_status_row(ctx):
+    """(ChrID, b, hp max, hp now, condition, d2) for THIS session."""
+    s = fw._TLS.session
+    args = ctx.args
+    hpmax = int(fw.death.player_hp_max(args))
+    hp = int(s.get("player_hp", hpmax) if s.get("player_hp") is not None
+             else hpmax)
+    if s.get("player_dead"):
+        hp = 0
+    cond = int(fw.status.bits(s))
+    if s.get("player_dead"):
+        cond |= fw.status.COND_DEAD
+    return (_my_charid(ctx), 0, max(1, min(hpmax, 0xFFFF)),
+            max(0, min(hp, 0xFFFF)), cond & 0xFFFFFFFF, 0)
+
+
+def hp_tick(ctx, me):
+    if _k(ctx.args, "party_hp", "on") != "on":
+        return 0
+    s = fw._TLS.session
+    with _LOCK:
+        p = _party_of(me)
+        if p is None or _OWNER.get(me) not in (None, s):
+            s.pop("party_hp_sent", None)
+            return 0
+        gen = (p["id"], int(p.get("gen", 0)))
+        to = list(p["order"])
+    row = my_status_row(ctx)
+    key = (gen,) + row
+    if s.get("party_hp_sent") == key:
+        return 0
+    s["party_hp_sent"] = key
+    n = 0
+    for cid in to:
+        if cid == me:
+            _reply(ctx, 0x1139, status_body([row]),
+                   why="party STATUS: my row HP %d/%d cond 0x%X"
+                       % (row[3], row[2], row[4]))
+            n += 1
+        elif cid < int(_k(ctx.args, "party_phantom_base", 0x7F000000)):
+            # (a phantom member has no session to post to)
+            n += _post("party.status", {"row": list(row)}, cid)
+    return n
+
+
+def relay_status(ctx, pl):
+    row = tuple(int(v) for v in pl["row"])
+    _reply(ctx, 0x1139, status_body([row]),
+           why="party STATUS ChrID=%d HP %d/%d cond 0x%X"
+               % (row[0], row[3], row[2], row[4]))
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,8 @@ KNOWN = {
     0x2084: "MSG_GET_INFO_OF_PROCLAMATION_OF_WAR_REQUEST [u32 islandId] -- "
             "the war-prep window's 1s heartbeat (screen vtable +0x78, "
             "0x05118900); answered by 0x1127 (arm 0x050581A8)",
-    0x4010: "-> 0x302D / 0x302E (0x05127f09)",
+    0x4010: "MSG_GET_SYSTEM_LOG_REQUEST (no body) -> 0x302D [u8 n] n x cstr "
+            "(<= 20 lines of 0x200) / 0x302E (0x05127ef0; reader 0x05127f40)",
     # ---- THE IN-GAME UI, mapped 2026-08-25 off the command table and the
     # inbound dispatchers (fedisp.py). Every row here is measured; see the
     # handler comments below for the reader-call chain each body came from.
@@ -72,7 +73,8 @@ KNOWN = {
             "/freecam and by the scene update; registers no reply (0x05079f60)",
     0x2002: "[u16][u16] -- gated on [0x5336d1c]+0x4fc and 0x4ff7f70; registers "
             "no reply (0x0507fe15)",
-    0x2023: "outbound telemetry, 14 or 28 B, ~400ms -- fire-and-forget",
+    0x2023: "outbound telemetry, 14 or 28 B, ~400ms -- fire-and-forget "
+            "(28 B action 0 = walk; 14 B action 0xF = an EMOTE, motion 102+i)",
     # KEY: THE DOOR, live 2026-09-05. Walking into one of the capital's minimap
     # doors sends this -- [f32 x][f32 y][f32 z], the door's position -- from
     # the scene at 0x04ffbc7b, which registers ONE reply, 0x1166
@@ -151,7 +153,14 @@ NG_NAMES = {
 # KEY: THE 0xF900 COMMAND VOCABULARY -- the client's own table at 0x052eacc0
 # (0x10-byte rows: {const char* name, handler_a, handler_b, u32 category}),
 # plus the emote-only rows at 0x052eab70. Category 1 = chat, 3 = set/get/sos,
-# 4 = blacklist, 5 = the debug/GM set. Emotes carry no handler at all.
+# 4 = blacklist, 5 = the debug/GM set. The 21 emote rows carry no handler
+# in the table because the dispatcher plays them itself (2026-10-08): row i
+# with category 0 -> 0x05134200 -> task 0x05138dd0 -> motion 102+i (table
+# 0x0528eff4) through action ctor 0x050416d0, whose serializer 0x050418a0
+# sends 0x2023 [u32 0xF][u32 start ms][u32 end ms][u16 motion] (14 bytes).
+# The receiver (0x04fec51e) replays it on the addressed avatar with its own
+# clock (only end - start is used) and prints the emote line when near.
+# fepresence relays every 0x2023 action verbatim, so emotes need no arm.
 #
 # WARNING: THE CHANNEL RUNS BOTH WAYS AND THE RECEIVE SIDE IS A COMMAND EXECUTOR.
 # 0x0517ef60 decodes the payload, then:
@@ -371,4 +380,163 @@ _CHAT_IDS = {
     # 3 where the five above set 2. Which of its three is from/to/text is NOT
     # measured -- serve it with distinct sentinels and read the screen.
     0x2067: ("/tell (3 strings, UNMEASURED order)", 3),
+}
+
+
+# ---------------------------------------------------------------------------
+# KEY: EVERY ID THE CLIENT CAN SEND, so the read loop's "NOT SEEN BEFORE"
+# line fires only for a genuinely unknown id. 135 rows: the send-site
+# inventory (every `push imm` into beginMessage 0x050459c0 plus the schema senders), ids marked out or both.
+# A row here is only a NAME for the log; the read loop asks the handler
+# tables whether anything answers it (readloop.handler_of). KNOWN keeps
+# precedence: a measured description there or from a module's register()
+# is printed first. Lobby (0x7xxx, 0xCxxx) and balancer (0x9000) ids are
+# listed so a stray one on the world port is named, not mistaken for new.
+CLIENT_SENT = {
+    0x0020: 'MSG_AUTH_CODE_NOTIFY',
+    0x1031: 'SKILL USE (the cast record)',
+    0x1032: 'SKILL USE sibling of 0x1031 ([skill+0x100] != 0)',
+    0x1033: 'unnamed cast-shaped record (log only)',
+    0x1036: 'remove my effects [u8 n] n x [u16 effect id] -> echoed (feunit)',
+    0x112E: 'MSG_CANVASS_PARTY_MEMBER_REQUEST',
+    0x113E: 'MSG_CANVASS_PARTY_MEMBER_CANCEL_REQUEST',
+    0x1149: 'MSG_DEPOSIT_GOLD',
+    0x114A: 'MSG_WITHDRAW_GOLD',
+    0x114B: 'MSG_DEPOSIT_ITEM',
+    0x114C: 'MSG_WITHDRAW_ITEM',
+    0x114D: 'MSG_ORGANIZE_ITEM (Stack)',
+    0x2000: 'MSG_ENTER_AREA',
+    0x2002: '[u16][u16] notify (0x0507fe15), no reply',
+    0x2007: 'MSG_BUILD_BUILDING_REQUEST',
+    0x2010: 'ATTACK/HIT notify',
+    0x2014: 'target set (unnamed, no body)',
+    0x2015: 'Return to Base (unnamed, no body, 0x0505e8c0)',
+    0x2016: 'MSG_MOVE_AREA_REQUEST',
+    0x2017: 'MSG_MOVE_FIELD_REQUEST',
+    0x2018: 'MSG_DECIDE_COUNTRY_REQUEST',
+    0x2019: 'building hit (cast-shaped, unnamed)',
+    0x201A: 'MSG_CHAT',
+    0x201B: '/all chat (out 0x05133610, in 0x05053cbe)',
+    0x201E: 'MSG_ITEM_THROW_AWAY',
+    0x201F: 'MSG_ITEM_GATHER_REQUEST',
+    0x2020: 'unnamed clock record (log only)',
+    0x2021: 'MSG_EQUIP_ITEM',
+    0x2022: 'MSG_DISRAM_ITEM',
+    0x2023: 'UNIT_MOVE telemetry: action 0 walk (28 B), 0xF EMOTE (14 B), 5 jump, ...',
+    0x2028: 'Pw regen ask [u32 mask] + ticks',
+    0x2029: 'HUD target/info request (0x2029 family, readloop)',
+    0x202A: 'HUD target/info request, second form',
+    0x2033: 'MSG_CHARA_LEVEL_LIQUIDATION (Field Out settlement)',
+    0x2044: 'MSG_METAMORPHOSIS',
+    0x2045: 'MSG_METAMORPHOSIS_RELEASE',
+    0x2046: 'MSG_NPC_EVENT_ACTION',
+    0x2049: 'MSG_ACQUIRE_SKILL_REQUEST',
+    0x204A: 'MSG_GET_SHOP_ITEM_LIST',
+    0x204B: 'MSG_BUY_SHOP_ITEM',
+    0x204C: 'MSG_SELL_ITEM',
+    0x204D: 'MSG_SHOP_PROCEDURE_START',
+    0x2050: 'MSG_GET_SELL_ITEM_VALUE_REQUEST',
+    0x2051: 'MSG_USE_ITEM',
+    0x2052: 'MSG_TRADE_REQUEST',
+    0x2053: 'MSG_TRADE_REQUEST_PERMISSION',
+    0x2054: 'TRADE ENTRY',
+    0x2055: 'TRADE COMPLETE request',
+    0x2056: 'MSG_TRADE_CANCEL',
+    0x2057: 'MSG_TRADE_REQUEST_CANCEL',
+    0x2059: 'level-up request (empty, from the stat arm 0x05051f1d)',
+    0x2065: '/army chat (out 0x05133730, in 0x05053cbe)',
+    0x2066: '/army chat, second form (out 0x05133730, in 0x05053cbe)',
+    0x2067: '/tell chat (out 0x05133a90, in 0x05053e28 -- THREE strings)',
+    0x206A: 'MSG_GET_FORCE_INFO_REQUEST',
+    0x206B: 'node info request -> 0x3029 / 0x302A',
+    0x2073: 'MSG_GET_SHOP_ITEM_LIST_TOTAL_PAGE',
+    0x2074: 'MSG_ATTACH_ITEM_GET_REQUEST',
+    0x2076: 'unnamed [char[32] cp932] from the /tell window (0x0505e860)',
+    0x2077: 'MSG_ENCHANT_REQUEST',
+    0x2078: 'MSG_ENCHANT_REPLY_OK',
+    0x2079: 'MSG_ENCHANT_REPLY_NG',
+    0x2080: 'MSG_GET_CHARACTER_DISTRIBUTION_INFO_REQUEST',
+    0x2081: 'draw crystal [u32 crystal building] (fecampaign)',
+    0x2082: 'stop drawing crystal (unnamed) no body',
+    0x2084: 'MSG_GET_INFO_OF_PROCLAMATION_OF_WAR_REQUEST',
+    0x2085: 'event-window CLOSED notify [u32 mode]',
+    0x2086: 'MSG_REPAIR_ITEM_REQUEST',
+    0x2087: 'MSG_JUDGE_JOIN_PARTY_REQUEST',
+    0x2088: 'MSG_PARTY_MEMBER_DISBAND_REQUEST',
+    0x2089: 'MSG_DISBAND_PARTY_REQUEST',
+    0x208A: '/party chat (out 0x05133970, in 0x05053cbe)',
+    0x208C: 'MSG_DEBUG_COMMAND',
+    0x2097: 'shop-mode toggle notify (unnamed) no body (0x050eca20 / 0x050f0440)',
+    0x2098: 'MSG_DISRAM_EQUIP_ITEM',
+    0x2099: 'conversation CLOSE [u32] -> 0x1152 / 0x1153',
+    0x209A: 'MSG_START_VALIDATE_SEQUENCE (Field Out / logout)',
+    0x209C: 'MSG_START_VALIDATE_SEQUENCE_CANCEL',
+    0x209E: 'MSG_GET_REPAIR_ITEM_COST_REQUEST',
+    0x209F: 'display-state notify [u32]',
+    0x20A0: 'MSG_SET_BLACKLIST_REQUEST',
+    0x20A1: 'MSG_REMOVE_BLACKLIST_REQUEST',
+    0x20A2: 'MSG_GET_BLACKLIST_REQUEST',
+    0x20A6: 'MSG_MOVE_REQUEST',
+    0x20A7: 'event start [u32 npc][u32 script] -> 0x1172 / 0x1173 (0x5173f70)',
+    0x20A8: 'event ACK [u32][u16 op][u32] (0x5173fd0) -- cues the next command',
+    0x20A9: 'MSG_GET_FORCE_SHOP_ITEM_REQUEST',
+    0x20AA: 'MSG_ITEM_SORT',
+    0x20AB: 'MSG_ITEM_MANUAL_SORT',
+    0x20AC: 'MSG_GOTO_SEARCH',
+    0x20AD: 'MSG_RECOVER_PARAMETER_FROM_CRYSTAL_REQUEST',
+    0x20AE: 'companion of 0x20AD (CONDITION bit 0x80000000)',
+    0x20AF: 'SOS request',
+    0x4006: 'MSG_MOVE_MY_CHARACTER_INFO_TO_AREA_REQUEST',
+    0x400A: 'MSG_REGISTER_DISTRIBUTER_OF_FIELDINFO_REQUEST',
+    0x400B: 'field-info distributer, second request (readloop)',
+    0x400F: 'MSG_SERVER_UNIT_LOGIN_REQUEST',
+    0x4010: 'MSG_GET_SYSTEM_LOG_REQUEST (no body) -> 0x302D / 0x302E',
+    0x4011: 'MSG_GET_GROUP_DETAIL_INFO_REQUEST',
+    0x4012: 'MSG_JOIN_FORCE_REQUEST',
+    0x4013: 'MSG_INVENTORY_STATUS_INFO_REQUEST',
+    0x4014: '0x4014 (readloop arm)',
+    0x4015: '0x4015 (readloop arm)',
+    0x7000: 'MSG_LOBBY_LOGIN_REQ (lobby)',
+    0x7820: 'MSG_LOBBY_JOIN_GAME_REQ (lobby)',
+    0x7830: 'MSG_LOBBY_GET_GAME_INFO_REQ (lobby)',
+    0x9000: 'MSG_LLB_LOGIN_REQ (balancer)',
+    0xA00D: 'MSG_NPC_GENERATE_REQUEST',
+    0xA00E: 'aggro-radius notice',
+    0xA011: 'MSG_NPC_HIT_NOTIFY',
+    0xA050: 'MSG_MAIL_SEND_REQ',
+    0xA060: 'MSG_MAIL_NUM_ALL_QUERY',
+    0xA063: 'MSG_MAIL_NUM_NEW_QUERY',
+    0xA066: 'MSG_MAIL_HEADER_QUERY',
+    0xA069: 'MSG_MAIL_BODY_QUERY',
+    0xA080: 'MSG_MAIL_DEL_REQ',
+    0xC001: 'MSG_CL_GET_CHARACTER_LIST_REQUEST (lobby)',
+    0xC002: 'MSG_CL_ADD_CHARACTER_REQUEST (lobby)',
+    0xC003: 'MSG_CL_DELETE_CHARACTER_REQUEST (lobby)',
+    0xC004: 'MSG_CL_DECIDE_CHARACTER_REQUEST (lobby)',
+    0xC005: 'lobby game-unit info register (lobby)',
+    0xC006: 'MSG_LOGIN_PROCEDURE request (lobby)',
+    0xC007: 'authentication blob (lobby)',
+    0xC009: 'certification / notice request (lobby)',
+    0xE000: 'MSG_DEBUG_COMMAND get pos (debug build verb)',
+    0xE009: 'GM SYSTEM MESSAGE request',
+    0xE00D: 'GM force-move echo (debug)',
+    0xE00F: 'MSG_R_GM_FORCE_MOVE_NG (client NACK)',
+    0xF100: 'popitem (debug)',
+    0xF102: '0xF1xx command-channel frame (readloop arm)',
+    0xF300: 'RequestDamageMap (debug)',
+    0xF303: 'unknown-slash forward [u16 len][text]',
+    0xF500: 'ReplyToBuildKeep [u8]',
+    0xF501: 'CommandBuildKeepForWar',
+    0xF900: 'GM COMMAND CHANNEL [u16 len][ascii]',
+}
+
+#: Client-sent ids that no world arm answers, by design or because the
+#: meaning is unread. The read loop logs these by name with a decoded body
+#: instead of the bare hexdump. (0x4010 is answered since 2026-10-08.)
+UNANSWERED_DECODE = {
+    # (0x1036 left this table 2026-10-08: feunit.on_remove_effects answers it)
+    # debug-build verbs from the client's /command table (0x05136304,
+    # 0x051371e2); a retail server never received them from players.
+    0xE000: "hex",
+    0xE00D: "hex",
 }

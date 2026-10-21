@@ -290,17 +290,25 @@ def main():
     check("a free name passes", felobby.add_character_refusal(on, [], "Lex2") == 0)
     check("a row not saved yet counts too",
           felobby.add_character_refusal(on, [{"name": "Newbie"}], "NEWBIE") == 12)
-    check("2 or 11 characters, '_', full-width: err 11 (can't be used)",
+    check("2 or 11 characters, a symbol, full-width, '_' alone: err 11",
           [felobby.add_character_refusal(on, [], n)
-           for n in ("ab", "abcdefghijk", "Lex_1", "Ｌｅｘ")]
-          == [11, 11, 11, 11])
+           for n in ("ab", "abcdefghijk", "Lex-1", "Ｌｅｘ", "___")]
+          == [11, 11, 11, 11, 11])
+    check("an underscore combined with letters passes (client help text "
+          "0x052e4680)", felobby.add_character_refusal(on, [], "Lex_1") == 0)
+    check("a reserved name is err 11, case blind; --char-name-deny '' frees it",
+          felobby.add_character_refusal(on, [], "Admin") == 11
+          and felobby.add_character_refusal(argparse.Namespace(
+              char_store=store, char_name_check="on", char_name_deny=""),
+              [], "Admin") == 0)
     check("3 and 10 characters are the edges that pass",
           [felobby.add_character_refusal(on, [], n)
            for n in ("abc", "abcdefghij")] == [0, 0])
-    check("--char-name-check off (default) only logs, never refuses",
-          felobby.add_character_refusal(off, [], "lex") == 0
-          and felobby.add_character_refusal(
-              argparse.Namespace(char_store=store), [], "ab") == 0)
+    check("--char-name-check off only logs, never refuses",
+          felobby.add_character_refusal(off, [], "lex") == 0)
+    check("the default (no knob on args) is ON: refuses",
+          felobby.add_character_refusal(
+              argparse.Namespace(char_store=store), [], "ab") == 11)
     print("\n-- the King's message flag, read across accounts (audit B10) " + "-" * 6)
     from world import staff
     saved = felobby._default_store

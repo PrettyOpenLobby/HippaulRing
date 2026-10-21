@@ -15,7 +15,7 @@ def _stat_num(x):
 # (bit, offset, struct code, sentinel). Ascending bit order IS the wire order.
 #
 # DELIBERATELY EXCLUDED, and each for its own reason:
-#   0x1     +0x498  Skill Points -- another worker's --add-stats owns it
+#   0x1     +0x498  Skill Points -- --add-stats already writes it
 #   0x2/0x8/0x10    HP and Pw -- already carry 200/200 and 100/100, so they
 #                   have a writer; a second one would silently drift
 #   0x4             not a setter at all: it drives the damage-number colour

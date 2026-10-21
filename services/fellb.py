@@ -142,6 +142,7 @@ import struct
 import sys
 import threading
 import time
+import peercap  # noqa: E402  -- the per-address handler cap
 
 try:
     # Per-client address (LAN / tailnet / internet-via-edge). See srvcore's
@@ -284,8 +285,22 @@ def main():
     srv.bind(("0.0.0.0", PORT))
     srv.listen(8)
     while True:
-        conn, addr = srv.accept()
-        threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+        # accept() can raise (EMFILE when descriptors run out, ECONNABORTED
+        # when the peer vanishes mid-handshake); either used to end this loop
+        # and leave the port bound and dead.
+        try:
+            conn, addr = srv.accept()
+        except OSError as e:
+            log("accept failed (%r); listener continues" % (e,))
+            time.sleep(0.1)
+            continue
+        if not peercap.acquire(addr[0]):
+            log("%s:%d refused: that address already holds %d connections "
+                "(POL_MAX_CONNS_PER_IP)" % (addr[0], addr[1], peercap.MAX_PER_IP))
+            conn.close()
+            continue
+        threading.Thread(target=peercap.run, args=(handle, conn, addr),
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

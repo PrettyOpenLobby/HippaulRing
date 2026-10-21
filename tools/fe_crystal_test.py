@@ -61,9 +61,10 @@ def check(label, cond, detail=""):
 
 
 def _args(**kw):
-    """Prod's campaign knobs; the crystal ones are left to their DEFAULTS
+    """The campaign knobs; the crystal ones are left to their DEFAULTS
     (read with getattr) so the test sees what a fresh deploy does."""
-    a = dict(campaign="on", campaign_auto="off", war_cap=50, war_prep_ms=60000,
+    # the caps here, with --crystal-pace off so draws come back to back
+    a = dict(crystal_pace="off", campaign="on", campaign_auto="off", war_cap=50, war_prep_ms=60000,
              war_length_ms=60000, war_truce_ms=60000, war_decide="keeps",
              campaign_file=None, territory_file=None, territory="",
              war="offensive", war_fields="0,0,0,0", war_deadline_ms=60000,

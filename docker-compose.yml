@@ -5,17 +5,18 @@
 #
 #   1. python tools/gen_blowfish_tables.py     (once)
 #   2. python tools/fedata_build.py --client <your FE install>   (once)
-#   3. docker compose --project-directory ../openlobby \
-#          -f ../openlobby/docker-compose.yml -f docker-compose.yml \
-#          up -d --build
+#   3. python ../openlobby/tools/stack.py enable fe
+#      python ../openlobby/tools/stack.py compose up -d --build
+#
+# (README.md, "By hand", has the docker compose command step 3 runs.)
 #
 # The image is built on the core image (openlobby:latest, or OPENLOBBY_IMAGE),
 # so build the core before the first FE build. Paths in this file are relative
 # to the core's directory, because that is the project directory.
 #
-# FE_ADVERTISE must be the address game clients reach this host on
-# (empty = 127.0.0.1, same-machine testing only). It is read from the core's
-# .env, since that is the project's.
+# FE_ADVERTISE is the address game clients reach this host on. Empty means
+# the core's POL_ADVERTISE, and 127.0.0.1 (same-machine testing only) when
+# that is empty too.
 
 # fellb owns the image build; the other services consume it with
 # pull_policy: never so parallel builds cannot race on the tag.
@@ -24,7 +25,9 @@ x-app: &app
   pull_policy: never
   restart: unless-stopped
   environment: &feenv
-    POL_ADVERTISE: "${FE_ADVERTISE:-}"
+    POL_ADVERTISE: "${FE_ADVERTISE:-${POL_ADVERTISE:-}}"
+    # the world name, shared with the title plugin (felobby.py default_worlds)
+    POL_FE_WORLD: "${POL_FE_WORLD:-}"
     # the characters, the mail and the world state (festore.py, femail.py,
     # festate.py) live in the core's PostgreSQL database; docs/database.md in
     # OpenLobby has the settings
@@ -55,7 +58,7 @@ services:
     pull_policy: build
     environment:
       <<: *feenv
-      POL_FELLB_IP: "${FE_ADVERTISE:-127.0.0.1}"
+      POL_FELLB_IP: "${FE_ADVERTISE:-${POL_ADVERTISE:-127.0.0.1}}"
       POL_FELLB_PORT: "54848"
       POL_FELLB_LOBBY_PORT: "54849"
     entrypoint: ["python", "fellb.py"]
@@ -72,7 +75,7 @@ services:
     # serving mode: no capture limit, no lifetime, three character slots
     entrypoint: ["python", "felobby.py", "--port", "54849", "--captures", "0",
                  "--life", "0", "--read-window", "300", "--char-slots", "3",
-                 "--world-ip", "${FE_ADVERTISE:-127.0.0.1}", "--world-port", "54850"]
+                 "--world-ip", "${FE_ADVERTISE:-${POL_ADVERTISE:-127.0.0.1}}", "--world-port", "54850"]
     ports:
       - "54849:54849"
     healthcheck: *pyhc

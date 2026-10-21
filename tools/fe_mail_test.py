@@ -26,6 +26,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import types
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -509,6 +510,79 @@ def main():
     check("a `!mail send` line in --gmcmd-file is delivered by gm_pump -> EXT_GM",
           femail.box_count(a, "acct:B/9", INBOX) == before + 1
           and "!mail send -> mail" in log)
+
+    say("the client's own header query, and --mail-notice (OURS)")
+    S = feworld._SESSION
+    S["account"], S["charid"] = "acct:B", 9
+    feworld._self_char = lambda a_: {"name": "Bob", "charid": 9}
+    mid, body, _ = _one(a, req_header(INBOX, 0xFFFFFFFF, 0x7FFFFFFF, me="Bob"))
+    rows = dec_headers(body)
+    check("index 0xFFFFFFFF count 0x7FFFFFFF (0x050c1e28, the only caller) "
+          "returns the whole box, not zero rows",
+          mid == 0xA067 and len(rows) == femail.box_count(a, "acct:B/9", INBOX)
+          and len(rows) >= 3, repr((mid, len(rows))))
+
+    def notices(out):
+        got = []
+        for m, _u, b in out:
+            if m == 0xF900:
+                n = struct.unpack_from(">H", b, 0)[0]
+                got.append(b[2:2 + n].decode("cp932"))
+        return got
+
+    unread = femail.box_count(a, "acct:B/9", INBOX, True)
+    S["field_ready"], S["field_ready_at"] = True, time.monotonic() - 10.0
+    S.pop("mail_noticed", None)
+    out, log = _drive(a, [req_folder(0xA060, SENT, me="Bob")])
+    lines = notices(out)
+    check("field entry (field_ready + 3 s): first line is the unread count, "
+          "as a 0xF900 '@' system line",
+          lines and lines[0] == "@Mail: you have %d unread mail." % unread,
+          repr(lines[:2]))
+    check("--mail-notice full prints each unread mail: from, date, subject, "
+          "then its text", any(x.startswith("@Mail from GM (") and
+                                x.endswith("Welcome") for x in lines)
+          and "@  Enjoy the field." in lines, repr(lines))
+    check("...the gold and item attachments are named",
+          "@  attached: 25 gold" in lines and "@  attached: item 88 x2" in lines,
+          repr(lines))
+    check("...and those mails are now read (the window cannot show them)",
+          femail.box_count(a, "acct:B/9", INBOX, True) == max(0, unread - 5))
+    check("the request that woke the pump is still answered (0xA061 last)",
+          out and out[-1][0] == 0xA061, repr([hex(m) for m, _, _ in out]))
+    out, _ = _drive(a, [req_folder(0xA060, SENT, me="Bob")])
+    check("once per field entry: the next frame prints nothing",
+          notices(out) == [], repr(notices(out)))
+    S["field_ready_at"] = time.monotonic()
+    S.pop("mail_noticed", None)
+    femail.gm(feworld.Ctx(_Conn(), None, "ecb", False, a),
+              "!mail send Bob|Second|later")
+    out, _ = _drive(a, [req_folder(0xA060, SENT, me="Bob")])
+    check("not before NOTICE_DELAY_S after the field is ready",
+          notices(out) == [], repr(notices(out)))
+    S["field_ready_at"] = time.monotonic() - 10.0
+    out, _ = _drive(_args(mail_notice="count"), [req_folder(0xA060, SENT, me="Bob")])
+    check("--mail-notice count: the count line only, nothing marked read",
+          notices(out) == ["@Mail: you have 1 unread mail."]
+          and femail.box_count(a, "acct:B/9", INBOX, True) == 1, repr(notices(out)))
+    S.pop("mail_noticed", None)
+    out, _ = _drive(_args(mail_notice="off"), [req_folder(0xA060, SENT, me="Bob")])
+    check("--mail-notice off: nothing on screen", notices(out) == [])
+    # a mail arriving LIVE: the relay receiver prints at once
+    sent = []
+    ctx_b = feworld.Ctx(_Conn(), None, "ecb", False, a)
+    real_reply = feworld.Ctx.reply
+    feworld.Ctx.reply = lambda self, mid, body=b"", unit_id=None, why="": \
+        sent.append((mid, body))
+    try:
+        femail.on_relay_new(ctx_b, {"subject": "Second", "from": "GM", "id": 0})
+    finally:
+        feworld.Ctx.reply = real_reply
+    live = notices([(m, 0, b) for m, b in sent])
+    check("a live 'mail.new' relay prints 'New mail' and the mail at once",
+          live[:1] == ["@New mail: you have 1 unread mail."]
+          and "@  later" in live, repr(live))
+    S["field_ready"] = False
 
     say("relay")
     # Bob's live session gets a log line on ITS thread: this thread plays Bob,

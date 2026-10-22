@@ -785,14 +785,26 @@ def raw_relay(a):
           == ("raw", "all", "arrival"),
           (d.presence_relay, d.presence_relay_actions, d.presence_clock))
     _stub_store()
-    ra = _args(presence_relay="raw")
-    rb = _args(presence_relay="raw")
+    # the shipped clock (arrival), so the A:B check below measures what it
+    # says it measures
+    ra = _args(presence_relay="raw", presence_clock="arrival")
+    rb = _args(presence_relay="raw", presence_clock="arrival")
     out = _out()
     out[:] = []
     for k in ("pres_seen", "pres_at", "pres_mv", "pres_mv_n", "pres_mv_t",
               "pres_mv_b", "pres_mv_arr", "pres_raw_n", "pres_raw_early"):
         feworld._SESSION.pop(k, None)
     enter(7, 11)
+    ctx = ctx_of(ra)
+    # This is the first ext_pump of the run, and the first call of some other
+    # module's pump does one-time setup. With a database configured (CI), the
+    # mail pump applies the schema to a fresh database there, and on a slow
+    # runner that took longer than the 10 s --presence-stale window: Bob,
+    # quiet since his first heartbeat, was dropped as gone and never added.
+    # Run that setup here, before anyone's clock starts, with no heartbeat of
+    # Lex's yet so presence itself has nothing to do.
+    feworld.ext_pump(ctx)
+    out[:] = []
     w = _Worker()
     w.start()
     w.do(_stub_store)
@@ -801,13 +813,14 @@ def raw_relay(a):
     w.do(lambda: [feworld._SESSION.pop(k, None) for k in
                   ("pres_seen", "pres_at", "pres_mv", "pres_mv_n", "pres_mv_t",
                    "pres_mv_b", "pres_mv_arr", "pres_raw_n", "pres_raw_early")])
-    ctx = ctx_of(ra)
     # ext_pump runs EVERY extension's pump, so other modules' pushes (EXP,
     # campaign...) land in `out` too; only presence's three ids are judged
     po = lambda: [(m, u, b) for m, u, b in out if m in (0x1006, 0x2023, 0x1004)]
 
     # Lex's own clock sample: B = 100000 at "now"; Bob's first heartbeat
+    lex_t0 = time.monotonic()
     send_hb(ra, hb(0, 100000, (1300, 0), (0, 0, 0)))
+    lex_t1 = time.monotonic()
     w.do(lambda: send_hb(rb, hb(0, 555000, (1300, 0), (10.0, 20.5, -30.0))))
     w.do(lambda: pump(rb))                  # Bob builds his card, his thread
     # a heartbeat that arrives BEFORE Lex draws Bob is dropped, not queued
@@ -824,9 +837,13 @@ def raw_relay(a):
     out[:] = []
 
     # Bob walks: state 0, spd (1300, 250), tail 0x00080000 -> VERBATIM
-    t0 = time.monotonic()
+    # a real gap since Lex's sample, so a B that ignored it (the "map"
+    # clock) falls below the window and fails
+    time.sleep(0.05)
+    bob_t0 = time.monotonic()
     w.do(lambda: send_hb(rb, hb(0, 555400, (1300, 250), (12.0, 20.5, -28.0),
                                 state=0, tail=0x00080000)))
+    bob_t1 = time.monotonic()
     feworld.ext_pump(ctx)
     mv = decode_move(po()[0][2]) if po() and po()[0][0] == 0x2023 else None
     check("Bob's heartbeat -> ONE 0x2023 to obj 8 on Lex's thread",
@@ -835,10 +852,13 @@ def raw_relay(a):
           mv is not None and mv["act"] == 0 and mv["state"] == 0
           and mv["spd"] == (1300, 250) and near(mv["pos"], (12.0, 20.5, -28.0))
           and mv["tail"] == 0x00080000, mv)
-    el = (time.monotonic() - t0) * 1000.0
+    # both arrivals were stamped inside the windows measured around them, so
+    # the mapped B is bounded by those windows however slow the machine is
+    lo = 100000 + int((bob_t0 - lex_t1) * 1000.0) - 1
+    hi = 100000 + int((bob_t1 - lex_t0) * 1000.0) + 1
     check("...A:B = the sender's clock at arrival (100000 + ms since its sample), A 0",
           mv is not None and mv["ticks"][0] == 0
-          and 100000 <= mv["ticks"][1] <= 100000 + el + 1500, (mv, el))
+          and lo <= mv["ticks"][1] <= hi, (mv, lo, hi))
     check("...the pump's own state follows (pos = the relayed target)",
           near(feworld._SESSION["pres_seen"][8]["pos"], (12.0, 20.5, -28.0)))
     out[:] = []
@@ -1025,8 +1045,13 @@ def hide():
                                     {"key": -2, "session": ally, "name": "a"}]
     try:
         on = _args(hide_presence="on")
-        status.apply(peer, status.good_specs(140))
-        status.apply(ally, status.good_specs(140))
+        # the Hide status itself, not the skill that grants it: which skill
+        # carries "hide" comes from the client's EFFECT_DATA table
+        # (services/fedata/fe-fet-effect.tsv), which a clean checkout does
+        # not have, and then good_specs(140) is empty and nobody is hidden
+        hide_spec = [{"kind": "hide", "ms": 60000, "effect": 0}]
+        status.apply(peer, hide_spec)
+        status.apply(ally, hide_spec)
         got = fepresence.visible_peers(me, (11, -1), now, on)
         check("--hide-presence on: the hidden ENEMY (8) is not drawn, the "
               "hidden ALLY (9) still is", sorted(got) == [9], sorted(got))

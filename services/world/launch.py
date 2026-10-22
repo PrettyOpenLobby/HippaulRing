@@ -2541,7 +2541,8 @@ def main():
                         args.devtool_token,
                         lambda area=None: devtool.devtool_state(args, area),
                         lambda op: devtool.devtool_edit(args, op),
-                        floor_fn=lambda area: devtool.devtool_floor(args, area))
+                        floor_fn=lambda area: devtool.devtool_floor(args, area),
+                        routes=devtool.admin_routes(args))
         print("[feworld] world-building panel on http://%s:%d/%s"
               % (args.devtool_bind, args.devtool_port,
                  "?t=" + args.devtool_token if args.devtool_token else ""),

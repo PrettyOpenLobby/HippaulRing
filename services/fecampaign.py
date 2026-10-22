@@ -687,6 +687,40 @@ def declare(args, area, attacker=None, now=None, grid=None, members=None):
     return row
 
 
+def admin_declare(args, area, attacker, actor=""):
+    """The admin panel's Start a war: `!campaign declare AREA NATION`, with
+    the rules a player's keep vote passes (can_declare) and no `force`.
+    `area` and `attacker` are ints the caller has already checked are
+    numbers. -> (ok, message). The sessions standing in that field are shown
+    War Prep by their own pump (_present_here), as for a keep vote."""
+    if getattr(args, "campaign", "off") != "on":
+        return False, "The campaign is off on this server, so no war can start."
+    try:
+        names = fw.fegamedata.area_names_en()
+    except Exception:                                  # noqa: BLE001
+        names = {}
+    field = names.get(area) or "field %d" % area
+    forces = getattr(args, "force_table", None) or {}
+    if forces and attacker not in forces:
+        return False, "There is no nation %d." % attacker
+    nation = (forces.get(attacker) or {}).get("name") or "nation %d" % attacker
+    code, why = can_declare(args, area, attacker)
+    if code is not None:
+        print("[fecampaign] admin declare%s area %d nation %d: REFUSED "
+              "(0xF504 code %d): %s" % (" by " + actor if actor else "",
+                                        area, attacker, code, why), flush=True)
+        return False, "%s cannot attack %s: %s." % (nation, field, why)
+    row = declare(args, area, attacker)
+    if row is None:
+        return False, "%s cannot attack %s." % (nation, field)
+    secs = _ms(args, "war_prep_ms") / 1000.0
+    print("[fecampaign] admin declare%s area %d: War Prep for %.0fs, attacker "
+          "nation %d" % (" by " + actor if actor else "", area, secs, attacker),
+          flush=True)
+    return True, "%s is in War Prep: %s attacks, the war starts in %.0f seconds." % (
+        field, nation, secs)
+
+
 def _ms(args, name, default=60000):
     try:
         return float(getattr(args, name, default) or default)

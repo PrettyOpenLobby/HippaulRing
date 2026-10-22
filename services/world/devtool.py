@@ -1,5 +1,6 @@
 """The world-building panel's state and edits (served by fedevtool.py)."""
 import math
+import sys
 import threading
 import fedevtool  # noqa: E402  -- the world-building panel (--devtool-port)
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
@@ -512,3 +513,91 @@ def devtool_edit(args, op):
         return fail("missing or bad field %s" % e)
     except (KeyError, TypeError) as e:
         return fail("missing field %s" % e)
+
+
+# ---------------------------------------------------------------------------
+# The admin panel's actions (OpenLobby adminmodules/fe.py), POSTed through its
+# proxy with the same token as every other request on this port. Each answers
+# {"ok", "msg"}, the msg a sentence the panel shows as it is.
+#: The banner is one line on a small window; longer text is refused rather
+#: than cut, so the sender knows what players will read.
+SYSMSG_MAX = 200
+
+
+def _number(v, lo, hi):
+    """A whole number lo..hi from a JSON value, or None. Digits only: no sign,
+    no spaces, no 0x, so nothing but the number reaches the game."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        n = v
+    elif isinstance(v, str) and 0 < len(v) <= 3 and v.isdigit() and v.isascii():
+        n = int(v)
+    else:
+        return None
+    return n if lo <= n <= hi else None
+
+
+def _ext(name):
+    return sys.modules.get(name)
+
+
+def admin_sysmsg(args, body, actor):
+    text = body.get("text")
+    if not isinstance(text, str):
+        return 400, {"ok": False, "msg": "A system message needs text."}
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    if not text:
+        return 400, {"ok": False, "msg": "A system message needs text."}
+    if len(text) > SYSMSG_MAX:
+        return 400, {"ok": False, "msg": "A system message can be at most %d "
+                                         "characters." % SYSMSG_MAX}
+    if text == "@clear@":
+        return 400, {"ok": False, "msg": "That text closes the banner instead "
+                                         "of showing it."}
+    fegm = _ext("fegm")
+    if fegm is None:
+        return 503, {"ok": False, "msg": "The GM module is not loaded on this "
+                                         "server."}
+    n = fegm.announce(text, actor=actor)
+    if not n:
+        return 200, {"ok": True, "msg": "Nobody is in Fantasy Earth right now, "
+                                        "so nobody saw it."}
+    return 200, {"ok": True, "msg": "System message sent to %d player%s."
+                                    % (n, "" if n == 1 else "s")}
+
+
+def admin_war(args, body, actor):
+    area = _number(body.get("area"), 1, 999)
+    nation = _number(body.get("nation"), 1, 99)
+    if area is None:
+        return 400, {"ok": False, "msg": "The field must be a field number."}
+    if nation is None:
+        return 400, {"ok": False, "msg": "The nation must be a nation number."}
+    if area not in fegamedata.areas():
+        return 400, {"ok": False, "msg": "There is no field %d." % area}
+    if area in zones.CAPITAL_GROUP_IDS:
+        return 400, {"ok": False, "msg": "Field %d is a capital, and a capital "
+                                         "is never attacked." % area}
+    camp = _ext("fecampaign")
+    if camp is None:
+        return 503, {"ok": False, "msg": "The campaign module is not loaded on "
+                                         "this server."}
+    ok, msg = camp.admin_declare(args, area, nation, actor=actor)
+    return 200, {"ok": ok, "msg": msg}
+
+
+def admin_routes(args):
+    """fedevtool.start(routes=...): fn(JSON body, actor) -> (status, body).
+    Every call is printed with who asked, refusals included, so the server
+    log answers "who started that war" without the panel's own log."""
+    def logged(name, fn):
+        def run(body, actor):
+            status, res = fn(args, body, actor)
+            print("[devtool] admin %s%s -> %s%s" % (
+                name, " by " + actor if actor else "",
+                "" if res.get("ok") else "REFUSED: ", res.get("msg")), flush=True)
+            return status, res
+        return run
+    return {("POST", "/admin/sysmsg"): logged("sysmsg", admin_sysmsg),
+            ("POST", "/admin/war"): logged("war", admin_war)}

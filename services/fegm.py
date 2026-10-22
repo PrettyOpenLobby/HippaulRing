@@ -620,6 +620,18 @@ def on_relay_sysmsg(ctx, p):
     sysmsg_push(ctx, p["title"], p["text"])
 
 
+def announce(text, title="Server", actor=""):
+    """The admin panel's system message: the 0xE00B banner a GM's sub-0
+    0xE009 sends, relayed to every session in the world. Safe from any
+    thread (ext_post only queues; each session pushes on its own thread).
+    Returns how many sessions it was queued for."""
+    n = fw.ext_post("gm.sysmsg", {"title": title, "text": text, "sub": 0,
+                                  "field": None}, include_me=True)
+    _log("admin system message%s %r/%r -> 0xE00B queued for %d session(s)"
+         % (" by " + actor if actor else "", title, text, n))
+    return n
+
+
 # ---------------------------------------------------------------------------
 # 0xA00D  MSG_NPC_GENERATE_REQUEST -> spawn through feworld.npc_send
 def decode_npc_generate(f):

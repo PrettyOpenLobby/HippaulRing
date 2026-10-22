@@ -728,6 +728,71 @@ def _ms(args, name, default=60000):
         return default
 
 
+def calendar(args, lo, hi):
+    """Every war under way, as the admin panel's calendar entries in [lo, hi)
+    ({"id", "title", "start", "end", "kind", "about"}, unix seconds).
+
+    A war has no schedule ahead of its keep vote, so this is the phase each
+    field is in now, from when it began to its `until`, then the phases
+    still to come at their configured lengths (war_prep_ms, war_length_ms,
+    war_truce_ms, the same _advance uses). A War Prep began `war_prep_ms`
+    before its end, a Truce `war_truce_ms` before its end; a war began at
+    `war_at`. A war ends early when a keep falls, and with --war-decide
+    manual it runs until `!campaign win`, so its end is the latest it can
+    be, said in its about."""
+    lens = {PREP: _ms(args, "war_prep_ms"), WAR: _ms(args, "war_length_ms", 600000),
+            TRUCE: _ms(args, "war_truce_ms", 120000)}
+    lens = {k: v / 1000.0 for k, v in lens.items()}
+    try:
+        names = fw.fegamedata.area_names_en()
+    except Exception:                                  # noqa: BLE001
+        names = {}
+    forces = getattr(args, "force_table", None) or {}
+
+    def nation(n):
+        return (forces.get(int(n or 0)) or {}).get("name") or "nation %d" % int(n or 0)
+    with _LOCK:
+        rows = sorted((a, dict(r)) for a, r in _STATE.items()
+                      if r["phase"] in lens and r["until"])
+    manual = getattr(args, "war_decide", "signups") == "manual"
+    out = []
+    for area, r in rows:
+        field = names.get(area) or "Field %d" % area
+        try:
+            holder = fw.territory_owner(area, args)
+        except Exception:                              # noqa: BLE001
+            holder = 0
+        who = "%s attacks %s's %s" % (nation(r["atk"]), nation(holder), field) if holder \
+            else "%s attacks %s" % (nation(r["atk"]), field)
+        until = float(r["until"])
+        if r["phase"] == WAR and r.get("war_at"):
+            began = float(r["war_at"])
+        else:
+            began = until - lens[r["phase"]]
+        key = "%d-%d" % (area, int(began))
+        steps = [(r["phase"], began, until)]
+        for ph in (WAR, TRUCE):
+            if ph > steps[-1][0]:
+                steps.append((ph, steps[-1][2], steps[-1][2] + lens[ph]))
+        for i, (ph, a, b) in enumerate(steps):
+            if ph == PREP:
+                title, kind = "War Prep: %s" % field, "war prep"
+                about = "%s. Players sign up for a side; the war starts when it ends." % who
+            elif ph == WAR:
+                title, kind = "War: %s" % field, "war"
+                about = "%s. %s" % (who, "It runs until a GM settles it." if manual else
+                                    "It ends here at the latest; a fallen keep ends it sooner.")
+            else:
+                title, kind = "Truce: %s" % field, "truce"
+                about = "%s. The field is at peace again when it ends." % (
+                    "The war is over" if i == 0 else who)
+            if i:
+                about += " Expected, from the configured lengths."
+            out.append({"id": "%s-%s" % (kind.replace(" ", ""), key), "title": title,
+                        "start": int(a), "end": int(b), "kind": kind, "about": about})
+    return [e for e in out if e["end"] > lo and e["start"] < hi]
+
+
 def sign_up(args, area, side, who=None):
     """Record one player choosing a side. `side` is "atk" or "def".
 

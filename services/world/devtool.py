@@ -587,8 +587,33 @@ def admin_war(args, body, actor):
     return 200, {"ok": ok, "msg": msg}
 
 
+#: the widest range one calendar.json request may ask for, in seconds
+CALENDAR_SPAN = 400 * 86400
+
+
+def admin_calendar(args, query, actor):
+    """GET calendar.json?from=&to= (unix seconds): the wars under way and the
+    phases still ahead of them (fecampaign.calendar), for the admin panel's
+    Calendar. Reads only."""
+    try:
+        lo, hi = int(query["from"][0]), int(query["to"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 400, {"ok": False, "msg": "calendar.json needs from= and to=, in "
+                                         "unix seconds."}
+    if hi <= lo or hi - lo > CALENDAR_SPAN:
+        return 400, {"ok": False, "msg": "Ask for a range of up to %d days."
+                                         % (CALENDAR_SPAN // 86400)}
+    camp = _ext("fecampaign")
+    events = []
+    if camp is not None and getattr(args, "campaign", "off") == "on":
+        events = sorted(camp.calendar(args, lo, hi),
+                        key=lambda e: (e["start"], e["end"], e["id"]))
+    return 200, {"ok": True, "from": lo, "to": hi, "events": events}
+
+
 def admin_routes(args):
-    """fedevtool.start(routes=...): fn(JSON body, actor) -> (status, body).
+    """fedevtool.start(routes=...): fn(JSON body, or a GET's query, actor) ->
+    (status, body).
     Every call is printed with who asked, refusals included, so the server
     log answers "who started that war" without the panel's own log."""
     def logged(name, fn):
@@ -600,4 +625,5 @@ def admin_routes(args):
             return status, res
         return run
     return {("POST", "/admin/sysmsg"): logged("sysmsg", admin_sysmsg),
-            ("POST", "/admin/war"): logged("war", admin_war)}
+            ("POST", "/admin/war"): logged("war", admin_war),
+            ("GET", "/calendar.json"): lambda q, actor: admin_calendar(args, q, actor)}

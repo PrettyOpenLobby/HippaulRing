@@ -9,6 +9,10 @@ GM paths they end in:
     Start a war     -> devtool.admin_war -> fecampaign.admin_declare ->
                        can_declare + declare (`!campaign declare AREA NATION`)
 
+and the panel's Calendar: the module's tool_calendar reads calendar.json
+(devtool.admin_calendar -> fecampaign.calendar), the war's current phase and
+the ones still ahead of it,
+
 and that bad war input is refused by the panel before any request is made,
 and by the tool port before fecampaign is asked, when it is sent directly.
 
@@ -96,6 +100,16 @@ def _post(port, path, body, token=TOKEN, actor="Wren"):
         return e.code, json.loads(e.read() or b"{}")
 
 
+def _get(port, path, token=TOKEN):
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                 headers={"X-Devtool-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
 def tool_port(args, port, ctx, sent, asked):
     import fecampaign
     print("tool port: System message")
@@ -151,6 +165,15 @@ def tool_port(args, port, ctx, sent, asked):
     st, res = _post(port, "/admin/war", {"area": "17", "nation": "9"})
     check("a nation the server does not have is refused",
           not res.get("ok") and fecampaign.phase_of(17) == fecampaign.PEACE, repr(res))
+
+    print("tool port: calendar.json")
+    st, res = _get(port, "/calendar.json?from=0&to=86400", token="wrong")
+    check("calendar.json without the port's token is refused (403)", st == 403, repr(st))
+    for q in ("", "?from=5", "?from=a&to=9", "?from=9&to=5", "?from=0&to=%d" % (401 * 86400)):
+        st, res = _get(port, "/calendar.json" + q)
+        check("calendar.json%s is refused (400)" % q, st == 400 and not res.get("ok"), repr((st, res)))
+    st, res = _get(port, "/calendar.json?from=0&to=%d" % (300 * 86400))
+    check("all quiet: 200 and no events", st == 200 and res.get("events") == [], repr(res))
 
 
 def panel(args, port, ctx, sent, asked):
@@ -219,8 +242,67 @@ def panel(args, port, ctx, sent, asked):
         ok, msg = war.run(m, {"area": "17", "nation": "3"}, "Wren")
         check("a second declaration on the same field is refused with the reason",
               not ok and "already" in msg, msg)
+
+        print("panel: Calendar")
+        calendar(args, port, m, calls)
     finally:
         admingames.forward = real
+
+
+def calendar(args, port, m, calls):
+    """Field 17 is in War Prep (Start a war above): the panel's Calendar shows
+    that phase to its end, then the war and the truce at their lengths."""
+    import time
+    import fecampaign
+    saved = (args.war_length_ms, args.war_truce_ms)
+    args.war_length_ms, args.war_truce_ms = 3600000, 600000
+    try:
+        row = fecampaign.state_of(17)
+        until = int(row["until"])
+        lo, hi = int(time.time()) - 86400, int(time.time()) + 86400
+        calls[:] = []
+        ents = m.calendar(m, lo, hi)
+        got = [(e["kind"], e["start"], e["end"]) for e in ents]
+        check("the module asks the tool port for calendar.json, once",
+              calls == ["calendar.json"], repr(calls))
+        check("War Prep to its end, then the war and the truce at their lengths",
+              got == [("war prep", until - 65, until), ("war", until, until + 3600),
+                      ("truce", until + 3600, until + 4200)], repr(got))
+        check("...titled by the field, naming the attacking nation",
+              ents and ents[0]["title"].startswith("War Prep: ") and "Elsord attacks" in ents[0]["about"]
+              and "Expected" in ents[1]["about"] and "Expected" not in ents[0]["about"],
+              repr(ents[:1]))
+        ents = m.calendar(m, until + 3600, until + 3700)
+        check("only what touches the range: the truce alone",
+              [e["kind"] for e in ents] == ["truce"], repr(ents))
+        # the same war once it is under way, and then in its truce
+        now = time.time()
+        with fecampaign._LOCK:
+            fecampaign._STATE[17].update(phase=fecampaign.WAR, war_at=now - 600, until=now + 3000)
+        got = [(e["kind"], e["start"], e["end"]) for e in m.calendar(m, lo, hi)]
+        check("at war: from war_at to its end at the latest, then the truce",
+              got == [("war", int(now - 600), int(now + 3000)),
+                      ("truce", int(now + 3000), int(now + 3600))], repr(got))
+        with fecampaign._LOCK:
+            fecampaign._STATE[17].update(phase=fecampaign.TRUCE, until=now + 300)
+        got = [(e["kind"], e["start"], e["end"]) for e in m.calendar(m, lo, hi)]
+        check("in its truce: the truce alone, its length back from its end",
+              got == [("truce", int(now + 300 - 600), int(now + 300))], repr(got))
+        with fecampaign._LOCK:
+            fecampaign._STATE[17].update(phase=fecampaign.PREP, until=row["until"], war_at=0.0)
+        args.campaign = "off"
+        check("with the campaign off there is nothing on the calendar",
+              m.calendar(m, lo, hi) == [])
+        args.campaign = "on"
+        real = os.environ.pop("POL_ADMIN_GAME_FE_URL")
+        try:
+            check("a panel with no FE tools set up has no FE calendar, and asks nothing",
+                  m.calendar(m, lo, hi) == [])
+        finally:
+            os.environ["POL_ADMIN_GAME_FE_URL"] = real
+    finally:
+        args.war_length_ms, args.war_truce_ms = saved
+        args.campaign = "on"
 
 
 def main():

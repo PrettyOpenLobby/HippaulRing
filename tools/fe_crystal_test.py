@@ -152,7 +152,7 @@ def got(cid, mid, unit=None):
 
 
 def crystal_adds(cid):
-    """(obj, type, model, cur, max, gx, gz) of every type-1 0x1006 of type 7
+    """(obj, type, model, cur, max, gx, gz, side) of every type-1 0x1006 of type 7
     this session was sent, decoded in the type-1 arm's read order."""
     out = []
     for c, u, m, b in SENT:
@@ -161,11 +161,11 @@ def crystal_adds(cid):
         n, obj, kind = struct.unpack_from(">HIB", b, 0)
         if kind != 1:
             continue
-        btype, model, _f384, _side = struct.unpack_from(">HHIB", b, 7)
+        btype, model, _f384, side = struct.unpack_from(">HHIB", b, 7)
         cur, mx = struct.unpack_from(">ii", b, 16)
         gx, _gy, gz = struct.unpack_from(">HHH", b, 24)
         if btype == 7:
-            out.append((obj, btype, model, cur, mx, gx, gz))
+            out.append((obj, btype, model, cur, mx, gx, gz, side))
     return out
 
 
@@ -263,6 +263,10 @@ def main():
               and all(a[1] == 7 and a[2] == 6 for a in adds), repr(adds))
         check("...each holding 700/700 (+0x778 current, +0x774 max)",
               all(a[3] == 700 and a[4] == 700 for a in adds), repr(adds))
+        # 2026-10-23: +0x94 is the war side; a deposit is nobody's (it was
+        # 0, the attackers', so every defender read it as an enemy building)
+        check("...each NEUTRAL: side byte 2", all(a[7] == 2 for a in adds),
+              repr([a[7] for a in adds]))
         g = feworld.keep_grids(17)
         hmap = fegamedata.areas()[17]["hmap"]
         pool = {(feworld.world_to_grid(p[0]), feworld.world_to_grid(p[2]))

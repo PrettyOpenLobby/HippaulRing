@@ -46,7 +46,7 @@ EXT_RELAY = {}
 #: raises, because a feature silently missing looks exactly like a client hang.
 EXT_MODULES = ("feparty", "femail", "fetrade", "feunit", "fewar", "feitems",
                "feforce", "fegm", "fecampaign", "feprog", "fepresence",
-               "fepvp", "femap")
+               "fepvp", "femap", "fewarbots")
 _EXT_LOADED = set()
 #: ids answered by a hard-coded `elif real_id == ...` in _serve_loop. Kept by
 #: hand (grep "elif real_id" to refresh); it is a guard against two owners,

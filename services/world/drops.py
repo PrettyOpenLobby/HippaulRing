@@ -6,7 +6,7 @@ import threading
 import time
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
 import random as _random_mod                               # noqa: E402
-from . import character, combat, deps, entities, equipment, ext, extrun, inventory, itemrecords, monsters, progression, sess, wallet, wire
+from . import character, combat, deps, entities, equipment, ext, extrun, inventory, itemrecords, monsters, progression, sess, timedevents, wallet, wire
 
 #: 2026-09-11 (second pass): kills pay by the monster's LEVEL, the RoD way
 DEFAULT_KILL_GOLD = "rod"
@@ -170,14 +170,22 @@ def drop_roll(args, m, sex, rng=None):
     rng = rng or _DROP_RNG
     name, lvl = str(m.get("name") or ""), int(m.get("level") or 0)
     mult = float(getattr(args, "drop_rate_mult", 1.0) or 0.0)
-    hits = []
+    hits, boosted = [], {}
     for r in drop_table(getattr(args, "drop_table", None)):
         if not fnmatch.fnmatchcase(name, r["family"]):
             continue
         if not (r["lo"] <= lvl <= r["hi"]) or r["sex"] not in ("-", sex):
             continue
-        if rng.random() * 1000000.0 < r["ppm"] * mult:
+        # a running drop_rate event (timedevents: SE's 2006 drop boost and
+        # Double Up) multiplies on top of --drop-rate-mult
+        ev, on = timedevents.multiplier(args, "drop_rate", item=r["item"])
+        if on and ev != 1.0:
+            boosted[timedevents.tags(on)] = ev
+        if rng.random() * 1000000.0 < r["ppm"] * mult * ev:
             hits.append(r)
+    for tag, ev in boosted.items():
+        print("[feworld]    %s: drop rate x%g for %s (L%d)" % (tag, ev, name, lvl),
+              flush=True)
     if not hits:
         return None
     best = min(r["ppm"] for r in hits)

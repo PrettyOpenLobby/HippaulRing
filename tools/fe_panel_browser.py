@@ -331,6 +331,10 @@ def main(argv):
 
     tmp = tempfile.mkdtemp(prefix="fe-panel-")
     args = build_world(tmp, area=91, pos=(-5.0, 20.0, -75.0))
+    # the nations as feworld serves them by default (--forces)
+    args.force_table = feworld.parse_forces(
+        "1:Netzawar,2:Cathedira,3:Elsord,4:Holdein,5:Gebrand")
+    from world.devtool import capital_nation as devtool_nation
     port = free_port()
     srv = fedevtool.start(port, "127.0.0.1", "tok",
                           lambda area=None: feworld.devtool_state(args, area),
@@ -343,6 +347,11 @@ def main(argv):
         shot(b, "01-loaded", "#mapcard")
         check("the page loads with NO JavaScript errors", not b.errors,
               "; ".join(b.errors))
+        b.goto("http://127.0.0.1:%d/?t=tok&theme=light" % port, settle=1.5)
+        check("?theme=light pins the light colours (the panel's switch, unframed)",
+              b.js("document.documentElement.dataset.theme") == "light"
+              and b.js("getComputedStyle(document.body).backgroundColor") == "rgb(244, 245, 248)")
+        b.goto("http://127.0.0.1:%d/?t=tok" % port)
 
         # ---- the page-wide bugs the first look found ----------------------
         check("the placer is HIDDEN until a map click (hidden beat display)",
@@ -633,13 +642,22 @@ def main(argv):
             if fegamedata.capital_ground(62, wx, wz) is not None:
                 dest = (npx[0] + dpx, npx[1] + dpy, wx, wz); break
         check("the fixture found floor to drag the NPC onto", dest)
-        b.drag(*b.map_point(*npx), *b.map_point(dest[0], dest[1]))
+        start = b.map_point(*npx)
+        rel = b.map_point(dest[0], dest[1])
+        # the browser delivers WHOLE viewport pixels (truncated), so the drop
+        # is where that pointer was -- up to a third of an art pixel from
+        # `dest`, about 0.8 world units: compare against the pointer
+        want_d = b.js("p2w(cur(), ...evPix({clientX:%d,clientY:%d}))"
+                      % (int(rel[0]), int(rel[1])))
+        b.drag(*start, *rel)
         b.pump(1.0)
         r_ = feworld.town_get(args, 62, "npcs")[0]
         check("dragging the NPC moves it -- stored, on the new spot's floor",
-              abs(r_["x"] - dest[2]) < 0.6 and abs(r_["z"] - dest[3]) < 0.6
+              abs(r_["x"] - want_d[0]) < 0.11 and abs(r_["z"] - want_d[1]) < 0.11
+              and abs(r_["x"] - dest[2]) < 1.5 and abs(r_["z"] - dest[3]) < 1.5
               and abs(float(r_["y"]) - fegamedata.capital_ground(62, r_["x"], r_["z"])) < 0.01,
-              repr(r_))
+              "%r want %r / %s" % (r_, want_d,
+                                   b.js("document.querySelector('#editmsg').textContent")))
         # change its type from the dropdown
         b.js("document.querySelector('#npcrole').value='Bank_Keeper'")
         b.click_el("#npcretype")
@@ -654,6 +672,54 @@ def main(argv):
         check("Remove asks once, then deletes the NPC",
               len(b.dialogs) == nd0 + 1 and not feworld.town_get(args, 62, "npcs"),
               "dialogs %d -> %d" % (nd0, len(b.dialogs)))
+        # ---- whose capital, what each NPC is for, one-click placing ----------
+        caps = b.js("[...document.querySelectorAll('#capbtns button')]"
+                    ".map(e=>[e.dataset.cap,e.textContent])")
+        want_n = {str(c): (devtool_nation(args, c) or {}).get("name") for c in (21, 39, 57, 62, 78)}
+        check("each capital button names its nation (dat.pak + --forces)",
+              caps and len(caps) == 5 and all(want_n[c] and want_n[c] in t for c, t in caps),
+              repr(caps))
+        check("...and the map heading wears the shown capital's nation",
+              want_n["62"] in (b.js("document.querySelector('#mapnat').textContent") or ""))
+        b.click_el('#capbtns button[data-cap="57"]')
+        b.pump(1.5)
+        check("a capital button switches the map", b.js("cur().area") in (57, 93),
+              repr(b.js("cur() && cur().area")))
+        b.click_el('#capbtns button[data-cap="62"]')
+        b.pump(1.5)
+        b.js("HALF=halves(MAPST).findIndex(h=>h.area===62);drawMap(MAPST)")
+        b.click_el('#plist button[data-arm="Bank_Keeper"]')
+        b.pump(0.2)
+        check("a missing role in the list arms it (and says what to do)",
+              b.js("ARMED") == "Bank_Keeper"
+              and not b.js("document.querySelector('#armbar').hidden"))
+        b.click(*b.map_point(floor[0], floor[1]))
+        b.pump(1.5)
+        rows = feworld.town_get(args, 62, "npcs")
+        check("...and one click on the floor places it there -- stored, then selected",
+              len(rows) == 1 and rows[0]["name"] == "Bank_Keeper"
+              and b.js("selNpc() && selNpc().name") == "Bank_Keeper",
+              "%r / SELN %r" % (rows, b.js("SELN")))
+        check("the placed bank keeper is coloured as a Bank, in the list and the panel",
+              b.js("selNpc().fn") == "bank"
+              and "Bank" in (b.js("document.querySelector('#npcdetail').textContent") or ""))
+        b.key("Escape", "Escape", 27)
+        check("Esc clears the selection", b.js("SELN") is None)
+        b.click_el('#fnkey button[data-fn="bank"]')
+        bx, by = b.js("(()=>{const n=cur().npcs[0];return w2p(cur(),n.x,n.z)})()")
+        check("the legend hides a kind: a hidden Bank cannot be clicked",
+              b.js("hit(%f,%f)" % (bx, by)) is None)
+        b.click_el('#fnkey button[data-fn="bank"]')
+        check("...and shows it again", (b.js("hit(%f,%f)" % (bx, by)) or {}).get("kind") == "npc")
+        b.js("(()=>{const s=document.querySelector('#psearch');s.value='bank';"
+             "s.dispatchEvent(new Event('input'))})()")
+        check("the people search finds it by kind",
+              b.js("[...document.querySelectorAll('#plist button[data-sel]')].length") == 1)
+        b.js("(()=>{const s=document.querySelector('#psearch');s.value='';"
+             "s.dispatchEvent(new Event('input'))})()")
+        shot(b, "05b-bank-placed", "#mapcard")
+        feworld.devtool_edit(args, {"op": "remove", "area": 62, "idx": 0})
+        b.pump(1.3)
         # facing lines point the right way: a north-facing NPC's line goes UP
         feworld.devtool_edit(args, {"op": "place", "area": 62, "x": floor[2],
                                     "z": floor[3], "role": role, "yaw": 0})
@@ -813,6 +879,100 @@ def main(argv):
         rows39 = feworld.town_get(args, 39, "npcs")
         for i_ in range(len(rows39) - 1, -1, -1):
             feworld.town_del(args, 39, "npcs", i_)
+
+        # ---- hotkeys, ghosts, bulk shops, undo, doors in the list -----------
+        print("\nhotkeys, missing shop spots, place-all, undo")
+        b.js("document.activeElement && document.activeElement.blur()")
+        b.key("1", "Digit1", 49)
+        b.pump(1.4)
+        check("key 1 opens the first capital (Beinwatt)", b.js("cur().area") in (21, 91),
+              repr(b.js("cur().area")))
+        b.key("2", "Digit2", 50)
+        b.pump(1.4)
+        a0 = b.js("cur().area")
+        check("key 2 opens the second (Azurwood)", a0 in (39, 92), repr(a0))
+        b.key("h", "KeyH", 72)
+        b.pump(0.3)
+        check("H switches to the other half", b.js("cur().area") == (92 if a0 == 39 else 39),
+              repr(b.js("cur().area")))
+        if b.js("cur().area") != 92:
+            b.key("h", "KeyH", 72)
+            b.pump(0.3)
+        check("the session-only tools sit together under In game",
+              b.js("!!document.querySelector('#ingame #checklist')"
+                   " && !!document.querySelector('#ingame #where')"
+                   " && !document.querySelector('#mapcard #checklist')"))
+        check("the door list is part of the people list",
+              b.js("!!document.querySelector('#peoplebox #doorlist button[data-portal]')"))
+        from world import devtool as wdev
+        spots = [s_ for s_ in wdev.shop_spots(args, 92) if s_["y"] is not None]
+        check("92's ghosts are its unplaced painted shop spots",
+              sorted(b.js("cur().ghosts.map(g=>g.name)") or [])
+              == sorted(s_["name"] for s_ in wdev.shop_spots(args, 92)))
+        lone = b.js("(()=>{const h=cur();for(const g of h.ghosts){if(g.y==null)continue;"
+                    "const [a,c]=ghostPix(h,g);const t=hit(a,c);"
+                    "if(t&&t.kind==='ghost'&&t.name===g.name)return [g.name,a,c,g.x,g.z]}})()")
+        check("the fixture found a ghost nothing else covers", lone)
+        b.click(*b.map_point(lone[1], lone[2]))
+        b.pump(0.3)
+        check("clicking a ghost opens the placer on its spot, its role chosen",
+              b.js("getComputedStyle(document.querySelector('#placer')).display") != "none"
+              and b.js("document.querySelector('#placerole').value") == lone[0]
+              and abs(b.js("PICK[0]") - lone[3]) < 0.01 and abs(b.js("PICK[1]") - lone[4]) < 0.01)
+        b.click_el("#placego")
+        b.pump(1.5)
+        r92 = feworld.town_get(args, 92, "npcs")
+        check("...and place puts it there -- stored -- and selects it",
+              len(r92) == 1 and r92[0]["name"] == lone[0] and r92[0]["x"] == round(lone[3], 1)
+              and b.js("selNpc() && selNpc().name") == lone[0], repr(r92))
+        check("...and it is no longer a ghost",
+              lone[0] not in (b.js("cur().ghosts.map(g=>g.name)") or []))
+        b.js("document.activeElement && document.activeElement.blur()")
+        for kind in ("rawKeyDown", "keyUp"):
+            b.call("Input.dispatchKeyEvent", type=kind, key="z", code="KeyZ",
+                   windowsVirtualKeyCode=90, nativeVirtualKeyCode=90, modifiers=2)
+        b.pump(1.5)
+        check("Ctrl+Z undoes the placement -- stored",
+              feworld.town_get(args, 92, "npcs") == []
+              and "Undone" in (b.js("document.querySelector('#editmsg').textContent") or ""),
+              repr(feworld.town_get(args, 92, "npcs")))
+        nd = len(b.dialogs)
+        b.click_el("#shopsgo")
+        b.pump(1.5)
+        r92 = feworld.town_get(args, 92, "npcs")
+        check("'Place N on their icons' asks once, naming them, then places them all",
+              len(b.dialogs) == nd + 1 and spots and all(
+                  s_["name"].replace("_", " ") in b.dialogs[-1] for s_ in spots)
+              and sorted(r["name"] for r in r92) == sorted(s_["name"] for s_ in spots),
+              "%r / %r" % (b.dialogs[-1:], [r["name"] for r in r92]))
+        check("...and the shop bar then offers nothing more",
+              not b.js("!!document.querySelector('#shopsgo')"))
+        check("the Undo button names what it would undo",
+              "shopkeepers" in (b.js("document.querySelector('#undobtn').title") or ""))
+        b.click_el("#undobtn")
+        b.pump(1.5)
+        check("...and one click takes the whole placement back -- stored",
+              feworld.town_get(args, 92, "npcs") == [])
+        # a door row, zoomed in, brings the door into view
+        b.js("VZ=8;VX0=0;VY0=0;clampView();drawMap(MAPST);SELP=null")
+        far = b.js("(()=>{const h=cur(),s=256/VZ;for(const g of h.gates){const [x,y]=w2p(h,g.x,g.z);"
+                   "if(x>s||y>s)return g.portal}})()")
+        b.click_el('#doorlist button[data-portal="%d"]' % far)
+        b.pump(0.3)
+        check("clicking a door in the list, zoomed in, centres the map on it",
+              b.js("(()=>{const h=cur(),g=selGate(),[x,y]=w2p(h,g.x,g.z),s=256/VZ;"
+                   "return x>=VX0&&x<=VX0+s&&y>=VY0&&y<=VY0+s})()") and b.js("SELP") == far)
+        b.click_el("#zfit")
+        b.js("(()=>{const s=document.querySelector('#psearch');s.value='#%d';"
+             "s.dispatchEvent(new Event('input'))})()" % far)
+        check("the search finds a door by its number",
+              b.js("[...document.querySelectorAll('#doorlist button')].map(e=>+e.dataset.portal)")
+              == [far])
+        b.js("(()=>{const s=document.querySelector('#psearch');s.value='';"
+             "s.dispatchEvent(new Event('input'))})()")
+        check("the townsfolk bar says how many have no recorded lines",
+              "no recorded lines" in (b.js("document.querySelector('#tfbar').textContent") or ""))
+        shot(b, "08-in-this-half", "#mapcard")
 
         check("no JavaScript error at any point", not b.errors,
               "; ".join(b.errors))

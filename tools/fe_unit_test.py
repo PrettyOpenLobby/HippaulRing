@@ -640,6 +640,12 @@ def part_status():
         s["pw_tick_at"] = 14.35
         status.crouch_watch(s, 14.35)
         check("...3 s apart = standing", s.get("crouch_at") is None)
+        s["morph"] = {"form": 1}
+        s["pw_tick_at"] = 15.7
+        status.crouch_watch(s, 15.7)
+        check("...but a summon (a flying Dragon, live 10-23) is never read as crouched",
+              s.get("crouch_at") is None)
+        s.pop("morph", None)
 
         # --- the player: poison ticks the HP down; wire off sends no CONDITION
         s["player_hp"] = 100

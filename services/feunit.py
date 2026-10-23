@@ -277,12 +277,14 @@ answers the client's own NG code; nothing is invented on the wire.
     summon at 0 HP is a death (fewiki/Netz: base damage as for an infantry
     death) -- feworld's DEAD and return-to-base run, and the form ends.
 """
+import math
 import random
 import struct
 import sys
 import time
 
 from world import status as _status
+from world import timedevents as _timed
 
 fw = None   # the feworld module, handed in by register()
 
@@ -948,13 +950,38 @@ def form_spec(spec):
     return out
 
 
-def summon_cost(args, fid):
-    """(crystal, gold) one summon of form `fid` costs under --summon-cost."""
+def summon_cost(args, fid, factor=1.0):
+    """(crystal, gold) one summon of form `fid` costs under --summon-cost;
+    `factor` is fecampaign's --pop-scale factor for the summoner's side (the
+    crystal price only, rounded up, never below 1 when it costs anything)."""
     spec = getattr(args, "summon_cost", "2006")
     if str(spec).strip().lower() == "2006":
         spec = SUMMON_COST_2006
     row = form_spec(spec).get(int(fid)) or [0]
-    return max(0, row[0]), max(0, row[1] if len(row) > 1 else 0)
+    crystal = max(0, row[0])
+    if crystal and factor < 1.0:
+        crystal = max(1, int(math.ceil(crystal * factor)))
+    return crystal, max(0, row[1] if len(row) > 1 else 0)
+
+
+def cost_factor(args, area=None, side=None):
+    """The --pop-scale factor for summon prices: 1.0 unless the campaign is
+    on, scaling covers `summon`, and this session has a side in a war."""
+    camp = _camp()
+    if camp is None or not _campaign_on(args) or not hasattr(camp, "pop_scales")             or not camp.pop_scales(args, "summon"):
+        return 1.0
+    if area is None:
+        area = fw._SESSION.get("field")
+    if area is None:
+        return 1.0
+    try:
+        if camp.phase_of(int(area)) not in (camp.PREP, camp.WAR):
+            return 1.0
+        if side not in ("atk", "def"):
+            side = camp._my_side(args, int(area))
+        return camp.pop_factor(args, int(area), side)
+    except Exception:                                  # noqa: BLE001
+        return 1.0
 
 
 def summon_hp(args, fid):
@@ -986,9 +1013,10 @@ def carry_hp(cur, old_max, new_max):
     return max(1, min(int(new_max), int(round(int(new_max) * frac))))
 
 
-def _cost_rows(args):
+def _cost_rows(args, factor=1.0):
     """0x1070 rows (form, gold, crystal): --metamorphosis-cost verbatim when
-    given, else one per summonable form from --summon-cost."""
+    given, else one per summonable form from --summon-cost (times the
+    --pop-scale `factor`)."""
     out = []
     for spec in (getattr(args, "metamorphosis_cost", "") or "").split(","):
         spec = spec.strip()
@@ -1001,7 +1029,7 @@ def _cost_rows(args):
     if str(getattr(args, "summon_cost", "2006")).strip().lower() == "off":
         return []
     for fid in SUMMONABLE:
-        crystal, gold = summon_cost(args, fid)
+        crystal, gold = summon_cost(args, fid, factor)
         out.append((fid, gold, crystal))
     return out
 
@@ -1016,8 +1044,9 @@ def cost_notify_body(rows):
     return body
 
 
-def cost_notify_push(ctx):
-    rows = _cost_rows(ctx.args)
+def cost_notify_push(ctx, rows=None):
+    if rows is None:
+        rows = _cost_rows(ctx.args, cost_factor(ctx.args))
     if not rows:
         return None
     ctx.reply(0x1070, cost_notify_body(rows),
@@ -1098,6 +1127,11 @@ def alive_count(area, side, fid):
         if m and m.get("area") == area and m.get("side") == side \
                 and m.get("form") == fid:
             n += 1
+    # WAR BOTS' summons stand for their side too (fewarbots phase 3), so
+    # the alive caps hold across players and bots alike
+    wb = sys.modules.get("fewarbots")
+    if wb is not None and hasattr(wb, "summons_alive"):
+        n += wb.summons_alive(area, side, fid)
     return n
 
 
@@ -1208,14 +1242,14 @@ def summon_check(ctx, skill, bld):
         code, why = _war_rules(ctx, camp, area, side, fid)
         if code is not None:
             return code, why, None
-    item = (items.get(fid) or [None])[0]
+    item = dragon_item(args) if fid == 1 else (items.get(fid) or [None])[0]
     if item:
         if not _has_item(args, item):
             return NG_CONDITIONS, "the %s needs item %d" % (FORM_NAME[fid], item), None
     elif fid in (1, 2):
         _log("   (the %s needed an item in 2006; none ships in FE_ITEM_DATA and "
              "--summon-items names none -- not required)" % FORM_NAME[fid])
-    crystal, gold = summon_cost(args, fid)
+    crystal, gold = summon_cost(args, fid, cost_factor(args, area, side))
     have = fw._seeded_value(args, "crystal", getattr(args, "crystal", None))
     if crystal > 0 and have is not None and int(have) < crystal:
         return NG_CONDITIONS, ("costs %d crystal, carries %d" % (crystal, have)), None
@@ -1261,6 +1295,13 @@ def _war_rules(ctx, camp, area, side, fid):
     args = ctx.args
     done = camp.summon_count(area, side, fid)
     cap = form_spec(getattr(args, "summon_alive_cap", "")).get(fid)
+    feast = _timed.dragon_feast(args) if fid == 1 else None
+    if feast is not None:
+        # SE's 2006 Dragon feast (timedevents): both armies from the war's
+        # start, whatever the war situation, up to `value` per army. Read as
+        # the alive cap, the way SE's 6/8 "3" was (the notice does not say
+        # whether 5 is at a time or per war).
+        cap = (int(feast["value"]),)
     if cap and cap[0] > 0:
         n = alive_count(area, side, fid)
         if n >= cap[0]:
@@ -1272,7 +1313,11 @@ def _war_rules(ctx, camp, area, side, fid):
         return NG_CONDITIONS, ("the %s side has summoned %d %s this war "
                                "(--summon-war-cap %d)"
                                % (side, done, FORM_NAME[fid], wcap[0]))
-    if fid == 1:
+    if fid == 1 and feast is not None:
+        _log("   %s: the Dragon is open to the %s side, no losing-side rule, "
+             "%d of %d standing" % (feast["tag"], side, alive_count(area, side, fid),
+                                    cap[0]))
+    elif fid == 1:
         ok, why = dragon_losing(ctx, camp, area, side)
         if not ok:
             return NG_CONDITIONS, why
@@ -1317,6 +1362,65 @@ def morph_begin(ctx, fid, bld=None, side=None, area=None, bound=False, why="",
          "the model and the movement row from [+0x3b4] itself"
          % (FORM_NAME.get(fid), 1 << int(fid), hp, mx, side,
             (" " + why) if why else ""))
+    form_skills_push(ctx, fid)
+
+
+#: THE SUMMON'S OWN SKILLS (2026-10-23, AN EXPERIMENT, --summon-skills on; the
+#: admin panel's Summon test mode turns it on). LIVE 10-23: the first Dragon
+#: attacked with the human palette's skill 270 (wand basic magic) and T-posed --
+#: a human motion its skeleton does not have. The client ships summon-only
+#: skills with combat rows (fe-fet-skill_combat: 978 引っ掻き claw, 979..981
+#: lightning / fire / ice), and no client code maps a form to them, so they can
+#: only reach a summon as server data: the skill list (0x1075, served as owned,
+#: never stored) and the palette (0x2029), the human set back on the release.
+#: WHICH ids per form, READ 2026-10-23 off the client's own data (each skill's
+#: motion must exist in the form's model and its shot group must carry points,
+#: or the attack plays and nothing leaves): 979..981 are the CHIMAIRA's (shot
+#: groups 1..3, which the Dragon's model has none of -- the first Dragon cast
+#: them and nothing fired); the Dragon's own attack is 984 Fireball (motion 49,
+#: shot group 0), whose explosion 985 follows by itself, so 985 is owned
+#: (FORM_FOLLOWUPS) but never on the palette.
+FORM_SKILLS = {0: (975, 977), 1: (984, 978), 2: (978, 979, 980, 981),
+               3: (973, 972), 4: (982, 983)}
+FORM_FOLLOWUPS = {1: (985,)}
+
+
+def form_skills_push(ctx, fid):
+    args, s = ctx.args, ctx.session
+    sk = FORM_SKILLS.get(int(fid))
+    if not sk or getattr(args, "summon_skills", "off") != "on" or not hasattr(ctx, "conn"):
+        return False
+    from world import skilllist as _sl
+    _sl.skill_list_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args,
+                        extra=tuple(sk) + FORM_FOLLOWUPS.get(int(fid), ()))
+    rows = [(i, sid) for i, sid in enumerate(sk)]
+    _sl.palette_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args, rows,
+                     "the %s's own skills (FORM_SKILLS, --summon-skills)"
+                     % FORM_NAME.get(fid))
+    spare = [i for i in range(_sl.PALETTE_SLOTS) if i >= len(sk)]
+    if spare:
+        ctx.reply(0x202A, _sl.palette_clear_body(spare),
+                  why="the human skills in palette slots %s cleared while transformed" % spare)
+    if s.get("morph") is not None:
+        s["morph"]["skills"] = list(sk)
+    return True
+
+
+def form_skills_restore(ctx, m):
+    """The human skill list and palette back after a summon that had its own."""
+    if not m.get("skills") or not hasattr(ctx, "conn"):
+        return False
+    from world import skilllist as _sl
+    args = ctx.args
+    _sl.skill_list_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+    rows = _sl.palette_rows(args)
+    gone = [i for i in range(_sl.PALETTE_SLOTS) if i not in {r[0] for r in rows}]
+    if gone:
+        ctx.reply(0x202A, _sl.palette_clear_body(gone),
+                  why="the summon's skills cleared from palette slots %s" % gone)
+    _sl.palette_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args, rows,
+                     "the human palette back after the summon")
+    return True
 
 
 def release_push(ctx, why=""):
@@ -1354,6 +1458,7 @@ def morph_end(ctx, why, restore_hp=True):
         s["player_hp"] = hp
         hp_push(ctx, hp, mx, why="(the %s's %d/%d carried back as a percentage)"
                 % (FORM_NAME.get(m["form"]), cur, m["hp_max"]))
+    form_skills_restore(ctx, m)
     _log("UNSUMMONED: the %s ends -- %s" % (FORM_NAME.get(m["form"]), why))
     return m
 
@@ -1435,11 +1540,36 @@ def on_metamorphosis_release(ctx, inner):
          "'Unsummon', the bound building torn down, or GHOST set")
     if getattr(ctx.args, "metamorphosis", "rules") == "off":
         return
-    if not ctx.session.get("morph"):
+    m = ctx.session.get("morph")
+    if not m:
         _log("   no summon on this session -- not answered (a 0x106C would "
              "rebuild a human's model for nothing)")
         return
+    # LIVE (prod log 09-24..10-08, 7 times): the client sends 0x2045 about a
+    # second after EVERY revive. A Dragon risen from death (dragon_on_death)
+    # comes back through that same alive push, so the first 0x2045 inside
+    # RISE_GRACE seconds of the rise is the revive's, not an Unsummon, and is
+    # not taken. INFERRED (no Dragon has risen on a console yet).
+    rose = m.pop("rose_at", None)
+    if rose is not None and time.monotonic() - rose < RISE_GRACE:
+        _log("   the client's 0x2045 %.1f s after the Dragon rose: the revive's, "
+             "not an Unsummon -- kept" % (time.monotonic() - rose))
+        return
     morph_end(ctx, "0x2045 from the client")
+
+
+#: seconds after a Dragon rises from death in which the client's revive 0x2045 is ignored
+RISE_GRACE = 3.0
+
+
+def dragon_item(args):
+    """The item a Dragon needs: a running Dragon feast's own (its row's
+    items column, timedevents) or --summon-items DRAGON=. None = no item
+    is named, and then there is no Dragon at all, feast or not."""
+    feast = _timed.dragon_feast(args)
+    if feast is not None and feast["items"]:
+        return min(feast["items"])
+    return (form_spec(getattr(args, "summon_items", "")).get(1) or [None])[0]
 
 
 def dragon_on_death(ctx):
@@ -1454,7 +1584,7 @@ def dragon_on_death(ctx):
         return False
     s["dragon_rolled"] = death
     odds = float(getattr(args, "summon_dragon_death", 0.25) or 0)
-    item = (form_spec(getattr(args, "summon_items", "")).get(1) or [None])[0]
+    item = dragon_item(args)
     if odds <= 0 or not item or not _campaign_on(args) \
             or getattr(args, "metamorphosis", "rules") != "rules":
         return False
@@ -1483,6 +1613,8 @@ def dragon_on_death(ctx):
     morph_begin(ctx, 1, None, side=side, area=int(area), bound=False, full=True,
                 why="(rose from death with the Dragon Soul; the %s side's #%d)"
                     % (side, n))
+    if s.get("morph") is not None:
+        s["morph"]["rose_at"] = time.monotonic()     # on_metamorphosis_release's grace
     return True
 
 
@@ -1733,12 +1865,33 @@ def pump(ctx):
         s.pop("dragon_rolled", None)          # the next death rolls again
     if not s.get("in_field"):
         s.pop("morphcost_sent", None)
+        s.pop("morphcost_rows", None)
         return
+    if getattr(ctx.args, "metamorphosis", "rules") == "off":
+        return
+    # the table goes once per field entry, and again whenever the side's
+    # --pop-scale price changes (checked every few seconds): the Summon
+    # Window's OK gate compares the crystals carried against THIS table
     if s.get("morphcost_sent"):
-        return
+        if getattr(ctx.args, "pop_scale", "off") != "on":
+            return
+        now = time.monotonic()
+        if now - float(s.get("morphcost_at") or 0) < 5.0:
+            return
+        s["morphcost_at"] = now
+        rows = _cost_rows(ctx.args, cost_factor(ctx.args))
+        if rows == s.get("morphcost_rows", rows):
+            s["morphcost_rows"] = rows
+            return
+    else:
+        s["morphcost_at"] = time.monotonic()
+        rows = _cost_rows(ctx.args, cost_factor(ctx.args))
     s["morphcost_sent"] = True
-    if getattr(ctx.args, "metamorphosis", "rules") != "off":
-        cost_notify_push(ctx)
+    s["morphcost_rows"] = rows
+    if rows:
+        _log("summon prices for this side: %s" % ", ".join(
+            "%s %d" % (FORM_NAME.get(k, k), c) for k, _g, c in rows))
+    cost_notify_push(ctx, rows)
 
 
 # ---------------------------------------------------------------------------

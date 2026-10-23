@@ -995,7 +995,7 @@ def main():
                          "(0x0507e7f0). POLARITY UNMEASURED -- test with "
                          "/stealth in the game's own chat first.")
     ap.add_argument("--add-submask", type=lambda v: int(v, 0),
-                    default=0x82FF,
+                    default=0x83FF,
                     help="the mask1-bit0 sub-record mask. 0xFF = name + all "
                          "seven appearance fields (bits 0..7 -> unit+0x389, "
                          "+0x3aa sex, +0x3ab, +0x3b0, +0x3b4, +0x3b6, +0x3b7, "
@@ -1006,9 +1006,13 @@ def main():
                          "sentinel -- while the stored character has force 1. "
                          "A client with no nation is why it then sends "
                          "'army choice req sent : 0' on 0x2018 and why "
-                         "+0x94 reads 0. Bit 0x100 (+0x94, ARMY, one byte) is "
-                         "in the table but LEFT OFF: the client picks its own "
-                         "army and overriding that is unmeasured. Every width "
+                         "+0x94 reads 0. KEY: bit 0x100 (+0x94, ARMY, one byte) "
+                         "IS ON SINCE 2026-10-23 (0x83FF): +0x94 is the WAR "
+                         "SIDE (0 attack, 1 defence), the byte the Summ target "
+                         "filter and the friend/foe check compare against a "
+                         "building's; nothing else ever set it on the player, "
+                         "so Summ never showed on your own base. Served from "
+                         "buildings.player_war_side. Every width "
                          "here is pinned to a reader's stream advance -- a "
                          "wrong one desynchronises the record, it does not "
                          "just draw a wrong number.")
@@ -2010,6 +2014,11 @@ def main():
                          "NPCs, keeps, buildings and peers).")
     ap.add_argument("--drop-table", default=None, metavar="PATH",
                     help="the drop table (default fedata/fe-drops.tsv).")
+    ap.add_argument("--timed-events", default="table", metavar="table|off|PATH",
+                    help="SE's 2006 timed events, every year on SE's dates "
+                         "(world/timedevents.py): drop boosts, the Double Up "
+                         "campaign, the Dragon feast, the shop sale. 'table' = "
+                         "fedata/fe-timed-events.tsv, 'off' = none, else a path.")
     ap.add_argument("--spawn-layout", default="scatter",
                     choices=["scatter", "spiral"],
                     help="how a point's population stands (2026-09-12). "

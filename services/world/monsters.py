@@ -1,5 +1,6 @@
 """Shared monsters: one copy per field, relayed between sessions, and their AI."""
 import struct
+import sys
 import threading
 import time
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
@@ -93,6 +94,37 @@ def field_players(args):
             if s is not sess._SESSION and ok(s):
                 out.append((s, s["cpos"]))
     return out
+
+
+def living_mobs(gid, now=None):
+    """[(obj, (x, y, z))] of field `gid`'s living shared monsters, where the
+    screens have them (mob_pos). [] for a field with no shared set (never
+    creates one). For fewarbots, which reads it outside its own lock."""
+    if gid is None:
+        return []
+    now = time.monotonic() if now is None else now
+    with _MOB_LOCK:
+        fm = _FIELD_MOBS.get(int(gid))
+        if not fm:
+            return []
+        return [(int(o), tuple(mob_pos(m, now)))
+                for o, m in sorted(fm["mobs"].items()) if not m.get("dead")]
+
+
+def _war_bots():
+    """fewarbots when loaded, else None (a top-level module, not world's)."""
+    return sys.modules.get("fewarbots")
+
+
+def field_bots(args):
+    """[(bot id, (x, y, z))] of the living WAR BOTS in this session's monster
+    field (fewarbots.monster_targets): targets for the shared monsters
+    alongside the real players. [] in solo mode or --war-bot-monsters off."""
+    gid = sess._SESSION.get("mobs_field")
+    wb = _war_bots()
+    if gid is None or wb is None or not mobs_shared(args):
+        return []
+    return wb.monster_targets(args, gid)
 
 
 def mob_relay(args, kind, payload):
@@ -371,9 +403,11 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body=None):
     """
     if getattr(args, "combat", "off") != "on":
         return
-    if getattr(args, "monster_chase", "on") != "on":
-        return
     if not sess._SESSION.get("in_field"):
+        return
+    # WAR BOTS: the field's driver swings at bots in reach (own gates)
+    monster_attack_bots(args)
+    if getattr(args, "monster_chase", "on") != "on":
         return
     if client_body is not None and len(client_body) != movement._MV_LEN:
         return
@@ -386,7 +420,10 @@ def monster_chase_tick(conn, outbound, mode, be, args, client_body=None):
         # field -- this session's own player may be dead, the field is not
         if not mob_driver(args):
             return
-        targets = [p for _s, p in field_players(args)]
+        # ...and the WAR BOTS standing in the field count alongside them
+        # (fewarbots, MONSTERS AND BOTS; --war-bot-monsters)
+        targets = ([p for _s, p in field_players(args)]
+                   + [p for _b, p in field_bots(args)])
     else:
         if sess._SESSION.get("player_dead") or not sess._SESSION.get("cpos"):
             return
@@ -673,6 +710,92 @@ def monster_attack_tick(conn, outbound, mode, be, args):
             return
 
 
+def _swing_reach(args, m, rng, every):
+    """(reach, period) of monster `m`'s swing: its own melee skill's under
+    --monster-timing table, else --monster-range / --monster-interval."""
+    m_rng, m_every = rng, every
+    if (getattr(args, "monster_timing", "table") == "table"
+            and m.get("type_id") is not None):
+        if "atk_skill" not in m:
+            m["atk_skill"] = fegamedata.npc_attack_skill(m["type_id"], 0)
+        sk = m["atk_skill"]
+        if sk.get("range"):
+            m_rng = sk["range"]
+        if sk.get("period"):
+            m_every = max(0.2, sk["period"])
+    return m_rng, m_every
+
+
+def monster_attack_bots(args, now=None):
+    """The field's monsters hit WAR BOTS (fewarbots, MONSTERS AND BOTS),
+    on the ONE session that drives the field's monsters (mob_driver), so a
+    bot is never swung at from two threads.
+
+    The same rules as monster_attack_tick's on a player: --combat on and
+    --monster-attack on, the monster's own reach and period, ONE swing per
+    period whoever it lands on (m["swing_at"] under _MOB_LOCK), none while
+    stunned or disarmed. A real player in its reach comes first: that
+    player's own session swings at them. No height gate (a bot's Y is the
+    map's median estimate, like a y_guess spawn's), no armour (a bot wears
+    none that counts). The damage is monster_swing_damage, taken off the bot
+    by fewarbots.hit_bot with the monster as the source; a bot at 0 falls
+    and respawns as any felled bot does.
+
+    KEY: NOTHING IS DRAWN FOR THE SWING ITSELF. A monster's hit on a real
+    player sends only that player's own 0x2024 HP (player_hp_push): no
+    record under the monster's id, none naming a target. So the equivalent
+    for a bot is its 0x2024 HP, which fewarbots' _draw sends inside the
+    budget, and nothing else is sent here. Returns [(obj, bot, dmg, dead)]."""
+    if getattr(args, "combat", "off") != "on":
+        return []
+    if getattr(args, "monster_attack", "off") != "on":
+        return []
+    wb = _war_bots()
+    if wb is None or not wb.monsters_on(args):
+        return []
+    if _mob_mode(args) != "shared":
+        return []
+    gid = int(sess._SESSION["mobs_field"])
+    bots = wb.monster_targets(args, gid)
+    if not bots or not mob_driver(args):
+        return []
+    now = time.monotonic() if now is None else now
+    players = [p for _s, p in field_players(args)]
+    rng = float(getattr(args, "monster_range", 8.0) or 8.0)
+    every = max(0.2, float(getattr(args, "monster_interval", 2.0) or 2.0))
+    swings = []
+    with _MOB_LOCK:
+        for obj, m in sorted((sess._SESSION.get("mobs") or {}).items()):
+            if m.get("dead"):
+                continue
+            mx, _my, mz = mob_pos(m, now)
+            m_rng, m_every = _swing_reach(args, m, rng, every)
+            if any(((p[0] - mx) ** 2 + (p[2] - mz) ** 2) ** 0.5 <= m_rng
+                   for p in players):
+                continue
+            near = sorted((((p[0] - mx) ** 2 + (p[2] - mz) ** 2) ** 0.5, b)
+                          for b, p in bots)
+            near = [x for x in near if x[0] <= m_rng]
+            if not near:
+                continue
+            if now - m.get("swing_at", 0) < m_every:
+                continue
+            if status.on(args) and m.get("status") and status.mob_refusal(m, now):
+                continue
+            m["swing_at"] = now
+            dmg, _why = damage.monster_swing_damage(args, m)
+            swings.append((obj, m.get("name") or "monster %d" % obj,
+                           near[0][1], int(dmg), near[0][0]))
+    out = []
+    for obj, name, bid, dmg, d in swings:
+        res = wb.hit_bot(args, bid, dmg, area=gid,
+                         by="monster %d (%s) at %.1fu" % (obj, name, d),
+                         mob=obj, now=now)
+        if res is not None:
+            out.append((obj, bid, dmg, bool(res.get("dead"))))
+    return out
+
+
 def motion_refresh_push(conn, outbound, mode, be, args, rows, why=""):
     """0x2004 worn-gear carrying what is ALREADY worn -- for the MOTION SET.
 
@@ -788,7 +911,8 @@ def monster_wander_pump(conn, outbound, mode, be, args):
     aggro = float(getattr(args, "monster_aggro", 15.0) or 15.0)
     pos = sess._SESSION.get("cpos")
     # every player in the field holds a monster still, not only this one
-    near = ([p for _s, p in field_players(args)] if mm == "shared"
+    near = ([p for _s, p in field_players(args)]
+            + [p for _b, p in field_bots(args)] if mm == "shared"
             else ([pos] if pos else []))
     rng = sess._SESSION.get("wander_rng")
     if rng is None:

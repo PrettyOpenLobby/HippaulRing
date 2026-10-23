@@ -473,6 +473,9 @@ def main():
     import fewar
     import feunit
     wa = feworld_args()
+    # the RoD numbers, not SE's timed events: with the shipped table the
+    # kill EXP checks would double on Double Up dates (fe_timed_test pins those)
+    wa.timed_events = "off"
     for name, fn in (("exp", lambda: part_exp(wa)), ("kills", lambda: part_kills(wa)),
                      ("sp", lambda: part_sp(wa)), ("inn", lambda: part_inn(wa)),
                      ("death", lambda: part_death(wa))):

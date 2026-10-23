@@ -26,7 +26,8 @@ from . import combat, extrun, sess, territory, town, wire, zones
 #     [u16 -> +0x380]  building TYPE   -> data_FE_BUILDING_DATA.dat (30 rows)
 #     [u16 -> +0x382]  building MODEL  -> data_FE_BUILDING_MODEL_DATA.dat (32)
 #     [u32 -> +0x384]  unread by anything found; 0
-#     [u8  -> +0x94 ]  the SIDE byte (the avatar's ARMY/nation slot). WARNING: The
+#     [u8  -> +0x94 ]  the WAR SIDE byte (the avatar's ARMY slot: 0 attack,
+#                      1 defence, 2 neutral; NOT a nation, see SIDE_ATK). WARNING: The
 #                      static README's table MISSED this read; sending its
 #                      ten fields would have been one byte short.
 #     [i32 -> +0x778]  \  the pair 0x5111010 ratios as a gauge -- HP-shaped.
@@ -229,29 +230,118 @@ def parse_buildings(specs):
     return out
 
 
+# KEY: THE u8 AT +0x94 IS THE WAR SIDE, NOT A NATION (static, 2026-10-23).
+# Every reader in the client compares it as an army of the war:
+#   * the target menu's filter 0x05153652..0x051536c9 keeps a building only
+#     if building[+0x94] == player[+0x94] (with the war phase byte == 2, a
+#     finished building, real summon rows and an untransformed player), so
+#     Summ is offered on YOUR SIDE'S buildings and nowhere else;
+#   * the friend/foe check 0x050e0396 calls 0xFF or 2 neutral, two equal
+#     values friendly and anything else an enemy;
+#   * the texture pick 0x0506c838 takes the blue "b" variant for nonzero and
+#     the plain one for 0, falling back when no "b" file exists.
+# SE's books draw the attackers red and the defenders blue (赤=攻撃 /
+# 青=防衛). We used to put the NATION here: the attacker's keep went out
+# with 1 and the castle with 3 on 10-23, the player's own byte was never
+# served (0 from the constructor), and so Summ never showed on your own base
+# and an attacker could swing at their own keep. The nation still lives in
+# the session's keep registry and the war row, where the server needs it.
+SIDE_ATK = 0
+SIDE_DEF = 1
+SIDE_NEUTRAL = 2
+SIDE_NONE = 0xFF
+WAR_SIDE = {"atk": SIDE_ATK, "def": SIDE_DEF}
+
+
+def war_side_byte(side):
+    """"atk"/"def" -> the +0x94 byte; anything else (no side, a town) is
+    SIDE_NEUTRAL, which the friend/foe check treats as nobody's."""
+    return WAR_SIDE.get(side, SIDE_NEUTRAL)
+
+
 def _building_side(args):
-    """The u8 at +0x94: the entered field's DEFENDER, i.e. the town's own
-    nation, so a shop is 'ours'. 0 when the contest is unset."""
-    grp = sess._SESSION.get("field")
-    for island in range(1, int(getattr(args, "islands", 5)) + 1):
-        if grp in zones.group_ids_for(island, args):
-            c = territory.field_contest(island, args)
-            return c[0] if c else 0
-    return 0
+    """The u8 at +0x94 for a building that belongs to no war (the town file,
+    --building, !build): SIDE_NEUTRAL. It used to be the field's defending
+    nation, which the friend/foe check read as an ENEMY of every player
+    (their byte is 0 or 1, never a nation id)."""
+    return SIDE_NEUTRAL
+
+
+def player_war_side(args):
+    """The u8 at the PLAYER's +0x94: SIDE_ATK or SIDE_DEF while the field they
+    stand in is at PREP or WAR and they are on a side of it (the side they
+    signed up on, else their nation's, the rule the summon gate and the keep
+    swing already use), otherwise SIDE_ATK.
+
+    CHOSEN: 0 OUTSIDE A WAR, and for a player who is on neither side. It is
+    what the unit constructor leaves there and what every player has carried
+    since the first field, so nothing that works today at peace or in a town
+    changes; town buildings and crystals are SIDE_NEUTRAL, which the
+    friend/foe check treats as neutral whatever the player's byte is, and
+    the Summ filter also wants the war phase byte at 2, so a match outside a
+    war offers nothing. 0xFF (the client's own 'none') would be the exact
+    value for an outsider, but how the rest of the client reads 0xFF on a
+    PLAYER unit is unread; the server gates every summon and swing by side
+    on its own anyway."""
+    mod = sys.modules.get("fecampaign")
+    area = sess._SESSION.get("field")
+    if mod is None or getattr(args, "campaign", "off") != "on" or area is None:
+        return SIDE_ATK
+    try:
+        area = int(area)
+        if mod.phase_of(area) not in (mod.PREP, mod.WAR):
+            return SIDE_ATK
+    except Exception:                                  # noqa: BLE001
+        return SIDE_ATK
+    return WAR_SIDE.get(_my_war_side(mod, args, area), SIDE_ATK)
+
+
+def army_push(conn, outbound, mode, be, args, side, why=""):
+    """0x2004 [u32 mask=2][u8 side] to the player's own unit: the record's
+    bit 1 (0x0503aaa0 -> 0x0503c740) reads one byte and stores it at
+    [unit+0x94] for object kinds ([obj+0x24]) 1 (the player), 2 (a served
+    peer) and 0x7d0, and does nothing else (the worn-gear motion pick is
+    bit 0, so this is safe while transformed)."""
+    body = struct.pack(">IB", 0x2, side & 0xFF)
+    wire.send(conn, outbound, wire.inner_msg(0x2004, body, wire.unit_id_of(args)),
+              mode, be, args.seq_mode == "echo", args.world_prefix)
+    sess._SESSION["war_army"] = side & 0xFF
+    print("[feworld] -> 0x30 inner 0x2004 ARMY (+0x94) = %d (%s)%s"
+          % (side & 0xFF, {SIDE_ATK: "attack", SIDE_DEF: "defence"}.get(
+              side & 0xFF, "?"), (" " + why) if why else ""), flush=True)
+
+
+def army_sync(conn, outbound, mode, be, args, why=""):
+    """Push the player's side when it differs from the one their unit holds
+    (war_army: set by the self record at field entry, and by army_push).
+    Idempotent; does nothing before the self record went out or outside a
+    field, where there is no unit to address."""
+    s = sess._SESSION
+    if "war_army" not in s or not s.get("in_field"):
+        return False
+    want = player_war_side(args)
+    if int(s["war_army"]) == want:
+        return False
+    army_push(conn, outbound, mode, be, args, want, why=why)
+    return True
 
 
 def building_send(conn, outbound, mode, be, args, obj, btype, model, gx, gz,
-                  why="", hp=None, age_ms=None):
+                  why="", hp=None, age_ms=None, side=None):
     """`hp` = (cur, max) for this building (fewar's --build-hp for a war
     build); None = --building-hp.
 
     `age_ms` = how long this building has stood, in ms; None (the default)
     means FINISHED, which is right for everything that is being re-placed
     rather than raised. Only a build the player is paying for right now
-    passes 0. See building_age."""
+    passes 0. See building_age.
+
+    `side` = the +0x94 war side byte (war_side_byte); None = a building of no
+    war, SIDE_NEUTRAL."""
     if hp is None:
         hp = getattr(args, "building_hp", (100, 100))
-    side = _building_side(args)
+    if side is None:
+        side = _building_side(args)
     age = building_age(args, btype, age_ms)
     body = building_record(obj, btype, model, gx, gz, side=side, hp=hp,
                            stamp=age)
@@ -513,8 +603,10 @@ def keep_push(conn, outbound, mode, be, args, area, keeps, nations,
         # every field entry raised the enemy keep from a construction site in
         # front of the player. (The Castle's own +0xac is 0, so only the keep
         # ever showed it.) building_age(None) = finished.
+        # the WAR SIDE, not the nation (see SIDE_ATK): the castle is the
+        # defenders' (1) even at peace, the keep the attackers' (0)
         body = building_record(obj, types[i], models[i], gx, gz,
-                               side=int(nations.get(side) or 0) & 0xFF,
+                               side=war_side_byte(side),
                                hp=(int(hp[0]), int(hp[1])),
                                stamp=building_age(args, types[i]))
         wire.send(conn, outbound, wire.inner_msg(0x1006, body, obj), mode, be,
@@ -523,11 +615,13 @@ def keep_push(conn, outbound, mode, be, args, area, keeps, nations,
                     "nation": int(nations.get(side) or 0)}
         out[side] = obj
         print("[feworld] -> 0x30 inner 0x1006 type 1 KEEP (%s) id=%d type=%d "
-              "(%s) model=%d (%s) grid=(%d,%d) -> world (%g, ?, %g) nation=%s "
-              "hp=%d/%d -- CHECK THE CLIENT LOG for 'Building %d ... TYPE=%d'"
+              "(%s) model=%d (%s) grid=(%d,%d) -> world (%g, ?, %g) side=%d "
+              "nation=%s hp=%d/%d -- CHECK THE CLIENT LOG for 'Building %d ... "
+              "TYPE=%d'"
               % (side, obj, types[i], BUILDING_TYPES.get(types[i], "?"),
                  models[i], BUILDING_MODELS.get(models[i], "?"), gx, gz,
-                 grid_to_world(gx), grid_to_world(gz), nations.get(side),
+                 grid_to_world(gx), grid_to_world(gz), war_side_byte(side),
+                 nations.get(side),
                  int(hp[0]), int(hp[1]), obj, types[i]), flush=True)
     return out
 

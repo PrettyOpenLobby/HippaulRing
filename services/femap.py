@@ -923,6 +923,30 @@ def read_board():
     return _kv().get_json(BOARD_KEY)
 
 
+#: Fantasy Earth's own scheduled events for the news: OpenLobby's
+#: services/gamenews.py reads EVENTS_KEY and posts each to the Viewer's FE tab
+#: and to Discord. The entries are the admin Calendar's (world/timedevents.py,
+#: from the table this world runs), written with the board at most once every
+#: EVENTS_PERIOD seconds and kept EVENTS_TTL, so a world that stops leaves no
+#: stale list for long.
+EVENTS_KEY = "fe:events"
+EVENTS_PERIOD = 60.0
+EVENTS_TTL = 6 * 3600
+EVENTS_AHEAD = 45 * 86400
+_EVENTS_AT = [0.0]
+
+
+def publish_events(args, now=None, kv=None):
+    """Write EVENTS_KEY: the timed events on or coming in the next EVENTS_AHEAD."""
+    from world import timedevents
+    now = time.time() if now is None else now
+    lo, hi = int(now) - 86400, int(now) + EVENTS_AHEAD
+    (kv or _kv()).set_json(EVENTS_KEY, {"at": int(now),
+                                        "events": timedevents.calendar(args, lo, hi,
+                                                                       news=True)},
+                           ttl=EVENTS_TTL)
+
+
 def publish_board(args, snap):
     """Publish board_snapshot: to the kv key with --map-board on, and to
     --map-board-file (written atomically) when one is named. Best-effort: a
@@ -942,6 +966,12 @@ def publish_board(args, snap):
             _kv().set_json(BOARD_KEY, board, ttl=BOARD_TTL)
         except Exception:                              # noqa: BLE001
             ok = False
+        if time.time() - _EVENTS_AT[0] >= EVENTS_PERIOD:
+            _EVENTS_AT[0] = time.time()
+            try:
+                publish_events(args)
+            except Exception:                          # noqa: BLE001 -- the news is an extra
+                pass
     if path:
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

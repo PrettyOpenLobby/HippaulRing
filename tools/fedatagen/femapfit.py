@@ -20,9 +20,11 @@ least squares on the inliers. A half is only emitted when at least two painted
 doors agree on one projection.
 
 WARNING: Two inliers is an EXACT fit with zero residual, which is not evidence of
-quality -- it is the absence of a test. map02 is in that state; feworld's
-solver notices the anchors are 29 px apart, takes the offset and refuses the
-scale. Read the `worst` column with the inlier count beside it.
+quality -- it is the absence of a test. map02 was in that state: feworld's
+solver saw the anchors were 29 px apart, took the offset, refused the scale,
+and Liberberg drew at the wrong scale. So a half with fewer than
+REG_MIN_INLIERS is now also registered on its collision floor (femapreg.py)
+and shipped from that when the floor fit is decisively better.
 """
 
 import argparse
@@ -53,6 +55,10 @@ def load_rows(path=DEFAULT_ICONS):
 
 
 TOL = 2.5          # px, an inlier
+#: a half with fewer painted doors than this is checked against its floor
+REG_MIN_INLIERS = 3
+#: ...and shipped from the floor when that scores this many times better
+REG_WIN = 1.5
 MIN_DX = 20.0      # world units the two seed pairs must differ by
 MIN_DZ = 5.0
 
@@ -147,6 +153,9 @@ def main(argv=None):
     ap.add_argument("--out",
                     help="also write the anchor rows as fe-minimap-cal.tsv "
                          "at this path")
+    ap.add_argument("--no-register", action="store_true",
+                    help="doors only: skip registering weakly fitted halves "
+                         "on their collision floor (femapreg.py)")
     args = ap.parse_args(argv)
     load_rows(args.icons)
 
@@ -166,6 +175,41 @@ def main(argv=None):
               (area, stem, r["n_icons"], len(r["inliers"]),
                r["ax"], r["cx"], r["az"], r["cz"], r["worst"]))
         out[stem] = r
+
+    # KEY: A HALF THE DOORS CANNOT PIN IS REGISTERED ON ITS FLOOR (2026-10-23).
+    # Fewer than REG_MIN_INLIERS painted doors is an exact fit with no test,
+    # and on Liberberg (map02) it left the art at the wrong scale. For such a
+    # half, fit the collision floor onto the art (femapreg.py) and ship that
+    # instead -- but only when it is DECISIVE: REG_WIN times the edge score
+    # of the projection the doors (or the shipped constants) give. On the
+    # low-contrast halves the search's peak is not trustworthy, and it does
+    # not clear that bar.
+    reg = {}
+    if not args.no_register:
+        import femapreg
+        from world import mapcal
+        for area in sorted(G.MINIMAP_FILE):
+            stem = G.MINIMAP_FILE[area]
+            r = out.get(stem)
+            if r and len(r["inliers"]) >= REG_MIN_INLIERS:
+                continue
+            e, pts = femapreg.edge_map(stem), femapreg.floor_boundary(stem)
+            if not e or not pts:
+                continue
+            rows = [{"x": gx, "z": gz, "px": ipx, "py": ipy}
+                    for gx, gz, ipx, ipy, _ in (r["inliers"] if r else [])]
+            p = mapcal.proj_from_rows(rows, stem)
+            s0 = femapreg.score(e, pts, p["ax"], p["cx"], p["az"], p["cz"])
+            fr = femapreg.register(stem, e, pts)
+            win = fr and fr["score"] >= REG_WIN * max(s0, 1e-9)
+            print("%-10s floor registration: ax=%.4f cx=%.2f cz=%.2f score %.2f; "
+                  "%s fit scores %.2f -> %s"
+                  % (stem, fr["ax"], fr["cx"], fr["cz"], fr["score"],
+                     "the doors'" if r else "the shipped", s0,
+                     "SHIP IT" if win else "keep"))
+            if win:
+                reg[stem] = (fr, s0, pts)
+                out.pop(stem, None)
 
     print()
     print("=== anchors to ship (world -> pixel, from the inliers) ===")
@@ -190,6 +234,19 @@ def main(argv=None):
                 fh.write("%s\t%.2f\t%.2f\t%.2f\t%.2f\t"
                          "shipped door %d, painted on the art; %d inliers\n"
                          % (stem, gx, gz, ipx, ipy, pid, n))
+            # a registered half: its projection, as four anchors at the
+            # corners of its floor (far apart, so the solver takes the scale)
+            for stem in sorted(reg):
+                fr, s0, pts = reg[stem]
+                xs = [x for x, _ in pts]
+                zs = [z for _, z in pts]
+                for x, z in ((min(xs), min(zs)), (max(xs), min(zs)),
+                             (min(xs), max(zs)), (max(xs), max(zs))):
+                    fh.write("%s\t%.2f\t%.2f\t%.2f\t%.2f\t"
+                             "floor registered on the art (score %.2f, the "
+                             "doors' fit %.2f)\n"
+                             % (stem, x, z, x / fr["ax"] + fr["cx"],
+                                z / fr["az"] + fr["cz"], fr["score"], s0))
         print("wrote", args.out)
     return 0
 

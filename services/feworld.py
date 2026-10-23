@@ -91,6 +91,7 @@ from world import (  # noqa: E402,F401
     unitstate,
     events,
     shops,
+    timedevents,
     itemrecords,
     equipment,
     inventory,
@@ -116,7 +117,7 @@ if False:                                             # pragma: no cover
     # KEEP THIS LIST == EXT_MODULES (tools/fe_map_test.py checks it).
     import feparty, femail, fetrade, feunit, fewar, feitems  # noqa: F401,E401
     import feforce, fegm, fecampaign, feprog, fepresence  # noqa: F401,E401
-    import fepvp, femap  # noqa: F401,E401
+    import fepvp, femap, fewarbots  # noqa: F401,E401
 
 
 # Which world module owns each name that `feworld.<name>` reaches.
@@ -255,6 +256,10 @@ _OWNERS = {
     'SHIPPED_ROOMS': 'zones',
     'SHOP_CLASS_PREFIX': 'shops',
     'SHOP_SLOTS': 'shops',
+    'SIDE_ATK': 'buildings',
+    'SIDE_DEF': 'buildings',
+    'SIDE_NEUTRAL': 'buildings',
+    'SIDE_NONE': 'buildings',
     'SKILL_ARRAY_MAX': 'skilllist',
     'SKILL_LIST': 'skilllist',
     'SKILL_MASK_BIT': 'skilllist',
@@ -271,6 +276,7 @@ _OWNERS = {
     'WAR_RESULT_FIELDS': 'warresult',
     'WAR_RESULT_KINDS': 'warresult',
     'WAR_RESULT_SENTINELS': 'warresult',
+    'WAR_SIDE': 'buildings',
     'WAR_START_NOTIFY_IDS': 'war',
     'WEAPON_SLOT_TYPES': 'staff',
     'WORN_FIXED': 'equipment',
@@ -402,6 +408,8 @@ _OWNERS = {
     'add_entities': 'entities',
     'apply_force_targets': 'territory',
     'argparse': 'deps',
+    'army_push': 'buildings',
+    'army_sync': 'buildings',
     'arrival_dir': 'arrival',
     'arrive_set': 'doors',
     'bag_capacity': 'inventory',
@@ -639,6 +647,7 @@ _OWNERS = {
     'player_hp_max': 'death',
     'player_hp_push': 'death',
     'player_resistance': 'damage',
+    'player_war_side': 'buildings',
     'prize_clerk_line': 'staff',
     'progress_entry_push': 'progression',
     'protect_flag_sync': 'death',
@@ -759,6 +768,7 @@ _OWNERS = {
     'wallet_charge': 'wallet',
     'wallet_credit': 'wallet',
     'wallet_push': 'wallet',
+    'war_side_byte': 'buildings',
     'wear_forget': 'itemrecords',
     'wear_set': 'itemrecords',
     'wallet_short': 'wallet',

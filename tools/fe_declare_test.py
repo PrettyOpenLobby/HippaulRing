@@ -242,6 +242,28 @@ def main():
             fecampaign._STATE.pop(29, None)
         for p in (bob, carol, dave):
             p.goto(18)
+        # LIVE 2026-10-23: a builder without the King's message declared a war
+        # they were then refused at; the keep itself is refused now, explained
+        staff = sys.modules["world.staff"]
+        had = getattr(staff, "king_message_heard", None)
+        staff.king_message_heard = lambda cid: False
+        args.king_gate = "on"
+        try:
+            del SENT[:]
+            alice.send(fecampaign.F_BUILD_KEEP, keep_body(16, far[0], far[1]))
+            check("--king-gate, the King's message not heard: the keep is refused "
+                  "(code 11) with a banner saying where to hear it, no war",
+                  [parse_err(b)[0] for b in got(11, 0xF504)] == [11]
+                  and any(b"Manager" in b for b in got(11, 0xE00B))
+                  and fecampaign.phase_of(17) == fecampaign.PEACE
+                  and 17 not in fecampaign._VOTES, repr(SENT))
+        finally:
+            args.king_gate = "off"
+            if had is None:
+                del staff.king_message_heard
+            else:
+                staff.king_message_heard = had
+            alice.session.pop("king_banner", None)
         del SENT[:]
         alice.send(fecampaign.F_BUILD_KEEP, keep_body(16, far[0], far[1]))
         check("alone with --declare-accepts 4 -> code 3 (not enough members)",
@@ -470,11 +492,17 @@ def main():
             args.king_gate = "on"
             del SENT[:]
             ivan.send(0x2018, struct.pack(">I", 0))
-            check("not heard: 0x1021 code 20 'Can't join defenders', no sign-up",
-                  [(m, b) for c, m, b in SENT if c == 19]
+            check("not heard: 0x1021 code 20 'Can't join defenders', no sign-up, "
+                  "and a banner saying to see the capital's Manager",
+                  [(m, b) for c, m, b in SENT if c == 19 and m == 0x1021]
                   == [(0x1021, struct.pack(">I", 20))]
+                  and any(b"Manager" in b for b in got(19, 0xE00B))
                   and "acct-Ivan|19" not in fecampaign.state_of(17)["members"],
                   repr(SENT))
+            del SENT[:]
+            ivan.send(0x2018, struct.pack(">I", 3))      # the client's retry
+            check("...the client's retry on the other side: refused, no second "
+                  "banner", got(19, 0x1021) and not got(19, 0xE00B), repr(SENT))
             heard.add(19)
             del SENT[:]
             ivan.send(0x2018, struct.pack(">I", 0))

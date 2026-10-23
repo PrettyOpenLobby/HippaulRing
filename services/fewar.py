@@ -582,6 +582,11 @@ def on_build(ctx, inner):
     # war's own sequence and registers the building so every session serves it
     # (fecampaign._buildings_present) and anybody can damage it.
     hp = build_hp(args, btype) or (0, 0)   # (0, 0) = --build-hp off, no channel
+    if hp[1] and camp is not None and hasattr(camp, "pop_scales")             and camp.pop_scales(args, "hp"):
+        f = camp.pop_factor(args, ctx.session.get("field"), side)
+        if f < 1.0:
+            hp = tuple(max(1, int(round(h * f))) for h in hp)
+            _log("   --pop-scale x%.2f: built at %d/%d HP" % (f, hp[0], hp[1]))
     obj = None
     if camp is not None and hasattr(camp, "building_add"):
         obj = camp.building_add(args, ctx.session.get("field"), side, btype,
@@ -607,7 +612,12 @@ def on_build(ctx, inner):
                      btype, model, gx, gz,
                      why="(0x2007 real build; cost %d crystal%s)"
                          % (crystal_cost, ", %d HP (--build-hp)" % hp[0]
-                            if hp[1] else ""), hp=hp if hp[1] else None, age_ms=0)
+                            if hp[1] else ""), hp=hp if hp[1] else None, age_ms=0,
+                     # +0x94 = the BUILDER's war side (0 attack, 1 defence),
+                     # what the client's Summ filter matches against the
+                     # player's own byte; no side = neutral 2
+                     side=fw.war_side_byte(side) if side in ("atk", "def")
+                     else None)
     # this session has it on screen already -- do not let the reconciler send
     # a second 0x1006 for the same object
     if obj is not None:

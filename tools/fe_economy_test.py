@@ -182,6 +182,36 @@ def buying():
               out.ids() == [0x107E]
               and struct.unpack(">I", out.box[0][2])[0] == feworld.BUY_NG_NO_RINGS
               and STORE["ring"] == 0 and len(STORE["items"]) == 4)
+        # a running Dragon feast sells its item (the Ruby) at the Ring Shop:
+        # one, and only to a player holding none
+        from world import shops as _shops
+        real_feast = _shops.feast_items
+        _shops.feast_items = lambda args, now=None: [45]
+        try:
+            STORE["ring"] = 20
+            _open_shop(a, "Warrior_Ring_Shop", wtype=4)
+            out.clear()
+            U._dispatch(a, struct.pack(">HIIH", 0x204B, 500, 45, 1))
+            check("the feast's Ruby is sold at the Ring Shop, for one Ring",
+                  out.ids()[0] == 0x107D and STORE["ring"] == 19
+                  and STORE["items"][-1][1] == 45, (STORE.get("ring"), [hex(m) for m in out.ids()]))
+            out.clear()
+            U._dispatch(a, struct.pack(">HIIH", 0x204B, 500, 45, 1))
+            check("...but not a second to a player already holding one",
+                  out.ids() == [0x107E] and STORE["ring"] == 19
+                  and [r[1] for r in STORE["items"]].count(45) == 1)
+            _open_shop(a, "Warrior_Ring_Shop", wtype=4)
+            check("...and a holder is not offered it any more (the client's only refusal "
+                  "text is 'Bad item ID')", 45 not in [r[0] for r in S["shop"]["stock"]],
+                  S["shop"]["stock"][-3:])
+            STORE["items"] = [r for r in STORE["items"] if r[1] != 45]
+            _open_shop(a, "Warrior_Ring_Shop", wtype=4)
+            check("...and is again once it is gone", 45 in [r[0] for r in S["shop"]["stock"]])
+            out.clear()
+            U._dispatch(a, struct.pack(">HIIH", 0x204B, 500, 45, 2))
+            check("...nor two at once", out.ids() == [0x107E] and STORE["ring"] == 19)
+        finally:
+            _shops.feast_items = real_feast
         # an item of another class is not in the Warrior's stock
         _open_shop(a, "Warrior_Weapon_Shop")
         out.clear()

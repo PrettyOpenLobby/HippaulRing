@@ -430,6 +430,31 @@ def main():
               and hp_of(out) == {0x2: 1000} and not alice.session.get("morph"))
         out = alice.pump()
         check("...and the same death does not roll the Dragon again", out == [])
+        # --summon-skills on (an experiment, 2026-10-23): the Dragon's own skills
+        args.summon_skills = "on"
+        CHARS[("acct-Alice", 11)]["items"] = [[70004, 901, 1, 1]]
+        alice.session["revive_at"] = time.monotonic() + 9
+        alice.session["player_dead"] = True
+        out = alice.pump()
+        pal = b"".join(body(out, 0x2029))
+        owned = b"".join(body(out, 0x1075))
+        check("--summon-skills on: the risen Dragon gets its own skills -- served as owned "
+              "(0x1075, 984 Fireball + 978 claw + 985 the explosion), on the palette "
+              "(0x2029 984, 978), the human slots cleared (0x202A)",
+              form_of(out) == 0x2 and 0x1075 in ids(out) and 0x202A in ids(out)
+              and all(struct.pack(">H", s) in pal for s in (984, 978))
+              and struct.pack(">H", 985) not in pal
+              and all(struct.pack(">H", s) in owned for s in (984, 978, 985)),
+              repr(ids(out)))
+        check("...and none of the Chimaira's breaths (979..981: shot groups the "
+              "Dragon's model has no points in, LIVE 10-23 nothing fired)",
+              not any(s in feunit.FORM_SKILLS[1] for s in (979, 980, 981)))
+        alice.session["player_dead"] = True
+        out = alice.pump()
+        check("...and the human list and palette come back when it ends",
+              0x106C in ids(out) and ids(out).count(0x1075) == 1
+              and not alice.session.get("morph"), repr(ids(out)))
+        args.summon_skills = "off"
         alice.session["player_dead"] = False
         alice.session["player_hp"] = 1000
         args.summon_items = ""

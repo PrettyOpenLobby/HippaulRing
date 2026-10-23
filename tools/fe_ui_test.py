@@ -733,12 +733,10 @@ def part3():
         assert r.u8() == 4                       # 0x020 -> +0x3b6
         assert r.u8() == 5                       # 0x040 -> +0x3b7
         assert r.u8() == 1                       # 0x080 -> +0x3b8
-        # WARNING: 0x2FF IS bits 0..7 PLUS BIT 9. Bit 8 (0x100, +0x94 ARMY) is
-        # deliberately CLEAR -- 0x2FF = 0b10_1111_1111 -- because the client
-        # picks its own army and overriding it is unmeasured. The army row
-        # exists in _AVATAR_SUB with its width pinned, ready for the day
-        # that gets measured; it must NOT appear on the wire today.
-        assert 0x2FF & 0x100 == 0, "0x100 must stay clear in the default"
+        # 0x2FF IS bits 0..7 PLUS BIT 9: bit 8 (0x100, +0x94 ARMY) is clear
+        # in THIS mask, so no army byte sits between 0x080 and 0x200. The
+        # served default has carried it since 2026-10-23 (0x83FF, below).
+        assert 0x2FF & 0x100 == 0
         assert r.u32() == 1                      # 0x200 -> +0x3bc NATION
         assert r.u32() == 0x1                    # mask2: position only
         # WARNING: and the facing must never be all zero when mask2 bit 2 is set --
@@ -746,6 +744,34 @@ def part3():
         assert r.u32() == 0 and r.u32() == 0 and r.u32() == 0   # spawn pos
         assert r.u32() == 0                      # mask3: no parts
         r.done()
+        assert fw5._SESSION.get("war_army") == 0, "no army served, 0 held"
+
+        # KEY: +0x94 IS THE WAR SIDE (2026-10-23). With bit 0x100 the self
+        # record carries buildings.player_war_side: 0 outside a war (the
+        # constructor's value), 1 for a defender. The Summ filter compares
+        # it with the building's +0x94, so without it Summ never showed on
+        # the player's own base. The stored "army" is NOT what is served.
+        from world import buildings as _b5
+        saved_side = _b5.player_war_side
+        for side in (0, 1):
+            outbox_local[:] = []
+            _b5.player_war_side = lambda a, _v=side: _v
+            feworld.add_entities(None, None, 0, False,
+                                 _args(add_self="on", add_type=0, add_mask1=0x1,
+                                       add_submask=0x3FF, add_mask2=0x1,
+                                       add_parts="", add_stats={},
+                                       spawn_xyz=(0.0, 0.0, 0.0),
+                                       spawn_dir_xyz=(0.0, 0.0, 1.0),
+                                       unit_id="1"))
+            mid, unit, body = outbox_local[-1]
+            r = Reader(body)
+            assert (r.u16(), r.u32(), r.u8(), r.u32(), r.u32()) ==                 (1, 1, 0, 0x1, 0x3FF)
+            assert r.cstr() == "Lex"
+            r.u8(); r.u8(); r.u32(); r.u16(); r.u8(); r.u8(); r.u8()
+            assert r.u8() == side, "0x100 -> +0x94 the WAR SIDE"
+            assert r.u32() == 1                  # 0x200 -> +0x3bc NATION
+            assert fw5._SESSION.get("war_army") == side,                 "the session remembers what the unit holds (army_sync)"
+        _b5.player_war_side = saved_side
     finally:
         fw5._self_char = saved5
 
@@ -2178,6 +2204,19 @@ def part14():
             [hex(m) for m, _, _ in outbox]
         assert outbox[0][2] == b"", "0x102A is header-only, it reads no body"
         assert STORE["equip"] == [[2, 7001]], STORE["equip"]
+        # ...but never while TRANSFORMED (2026-10-23): 0x2004's motion pick is a
+        # human weapon set, and on a summon's skeleton (the Dragon) that T-poses
+        del outbox[:]
+        _dispatch(a, inner)
+        assert 0x2004 in [m for m, _, _ in outbox], \
+            ("the control: the same equip as a human restates", [hex(m) for m, _, _ in outbox])
+        del outbox[:]
+        feworld._SESSION["morph"] = {"form": 1}
+        try:
+            _dispatch(a, inner)
+            assert 0x2004 not in [m for m, _, _ in outbox], [hex(m) for m, _, _ in outbox]
+        finally:
+            feworld._SESSION.pop("morph", None)
 
         # the 0x107A body, read exactly as 0x0503d540 reads it
         r = Reader(outbox[1][2])

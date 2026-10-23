@@ -119,6 +119,7 @@ import threading
 import time
 
 import festate  # noqa: E402  -- the world state in PostgreSQL
+from world import timedevents  # noqa: E402  -- SE's timed events (Double Up)
 
 fw = None       # the feworld module, handed in by register()
 
@@ -262,7 +263,11 @@ def _row_from(v):
                                    "gx": int(b["gx"]), "gz": int(b["gz"]),
                                    "side": b.get("side"),
                                    "hp": [int(b["hp"][0]), int(b["hp"][1])],
-                                   "by": b.get("by")}
+                                   "by": b.get("by"),
+                                   # put up by a WAR BOT (fewarbots phase 3):
+                                   # credits nobody, its drain and its shots
+                                   # stop at --war-bot-keep-floor
+                                   "bot": bool(b.get("bot", False))}
                           for o, b in (v.get("buildings") or {}).items()},
             "build_seq": int(v.get("build_seq", 0) or 0),
             # SE's rank entry cost committed per side (--rank-cost)
@@ -403,6 +408,115 @@ def war_cap(args):
         return max(1, int(getattr(args, "war_cap", 50) or 50))
     except (TypeError, ValueError):
         return 50
+
+
+# ---------------------------------------------------------------------------
+# OURS: POPULATION SCALING (2026-10-23, --pop-scale). RoD was tuned for wars
+# of dozens a side; a world with a handful online cannot pay a 40-crystal
+# Knight or wear down a 3000 HP keep. Each side gets a factor, its players /
+# --pop-scale-full, between --pop-scale-floor and 1.0, so at full strength
+# every value is SE's own. Scaling only ever makes a small side's war easier.
+# ---------------------------------------------------------------------------
+#: the DEFAULT set. "length" is left out (operator 2026-10-23): a shorter war
+#: only hurts the attacker, who needs the time to reach and break the castle
+#: while the defender wins by waiting -- a solo 20-minute war timed out with
+#: the castle untouched. --pop-scale-values summon,hp,length,crystal brings
+#: it back.
+POP_SCALE_VALUES = ("summon", "hp", "crystal")
+
+
+def _pop_extra(args, side):
+    """--pop-scale-extra ATK:DEF (or one N for both): players counted on a
+    side that are not there -- the admin panel's way to try a big war."""
+    spec = str(getattr(args, "pop_scale_extra", "") or "").strip()
+    if not spec:
+        return 0
+    parts = spec.split(":")
+    try:
+        v = int(parts[0] if side == "atk" or len(parts) == 1 else parts[1])
+    except (TypeError, ValueError, IndexError):
+        return 0
+    return max(0, v)
+
+
+def _live_charids():
+    out = set()
+    for ent in fw.ext_sessions():
+        cid = ent["session"].get("charid")
+        if cid is not None:
+            out.add(int(cid))
+    return out
+
+
+def side_players(args, area, side):
+    """Players on `side` of `area`'s war who are ONLINE now: its enlisted
+    members with a live session, else (before anybody has enlisted, e.g. at
+    the declare) that side's nation online. Plus --pop-scale-extra."""
+    r = state_of(area)
+    live = _live_charids()
+    n = 0
+    enlisted = False
+    for m in (r.get("members") or {}).values():
+        # KEY: WAR BOTS ARE NOT PLAYERS (fewarbots, 2026-10-23): a bot's row
+        # neither counts nor makes a side "enlisted"; a bigger war on paper
+        # is --pop-scale-extra's job, not theirs
+        if m.get("side") != side or m.get("bot"):
+            continue
+        enlisted = True
+        try:
+            if int(m.get("c")) in live:
+                n += 1
+        except (TypeError, ValueError):
+            pass
+    if not enlisted:
+        nation = int(r.get("atk") or 0) if side == "atk" else \
+            int(fw.territory_owner(area, args) or 0)
+        n = _nation_online(nation) if nation else 0
+    return n + _pop_extra(args, side)
+
+
+def pop_factor(args, area, side, n=None):
+    """1.0 at or above --pop-scale-full players, down to --pop-scale-floor."""
+    if getattr(args, "pop_scale", "off") != "on" or area is None \
+            or side not in ("atk", "def"):
+        return 1.0
+    try:
+        full = max(1, int(getattr(args, "pop_scale_full", 20) or 20))
+        floor = max(0.05, min(1.0, float(getattr(args, "pop_scale_floor", 0.34))))
+    except (TypeError, ValueError):
+        full, floor = 20, 0.34
+    if n is None:
+        n = side_players(args, int(area), side)
+    return max(floor, min(1.0, float(n) / full))
+
+
+def pop_scales(args, what):
+    """True when --pop-scale is on and `what` is in --pop-scale-values."""
+    if getattr(args, "pop_scale", "off") != "on":
+        return False
+    vals = str(getattr(args, "pop_scale_values", ",".join(POP_SCALE_VALUES)) or "")
+    return what in {v.strip() for v in vals.split(",")}
+
+
+def war_length_s(args, area):
+    """--war-length-ms, shortened by --pop-scale for a small war: the factor
+    of the two sides' AVERAGE, so 3 v 1 counts as 2 a side."""
+    ms = _ms(args, "war_length_ms", 600000)
+    if pop_scales(args, "length"):
+        n = (side_players(args, area, "atk") + side_players(args, area, "def")) / 2.0
+        f = pop_factor(args, area, "atk", n=n)
+        if f < 1.0:
+            print("[fecampaign] area %d: war length %.0f min (%.1f players a "
+                  "side, --pop-scale x%.2f)" % (area, ms * f / 60000.0, n, f),
+                  flush=True)
+        ms *= f
+    return ms / 1000.0
+
+
+def pop_scale_report(args, area):
+    """{side: (players, factor)} for the admin panel and the logs."""
+    return {side: (side_players(args, area, side), pop_factor(args, area, side))
+            for side in ("atk", "def")}
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +794,21 @@ def declare(args, area, attacker=None, now=None, grid=None, members=None):
             row["spent"][m["side"]] = int(row["spent"].get(m["side"], 0)) + cost
     if getattr(args, "keeps", "off") == "on":
         hp = max(1, min(32767, int(getattr(args, "keep_hp", 3000) or 3000)))
-        row["keeps"] = {"def": [fw.castle_shield_hp(args, holder, hp)] * 2, "atk": [hp, hp]}
+        sides = {"atk": hp, "def": hp}
+        if pop_scales(args, "hp"):
+            # nobody has enlisted yet: each side is its nation online now
+            for side, nat in (("atk", attacker), ("def", holder)):
+                n = _nation_online(int(nat)) + _pop_extra(args, side)
+                f = pop_factor(args, area, side, n=n)
+                sides[side] = max(1, int(round(hp * f)))
+                if f < 1.0:
+                    print("[fecampaign] area %d: the %s keep at %d HP (%d of "
+                          "%d players, --pop-scale x%.2f)" % (
+                              area, side, sides[side], n, int(getattr(
+                                  args, "pop_scale_full", 20) or 20), f),
+                          flush=True)
+        row["keeps"] = {"def": [fw.castle_shield_hp(args, holder, sides["def"])] * 2,
+                        "atk": [sides["atk"]] * 2}
     with _LOCK:
         _STATE[area] = row
     save(args)
@@ -793,14 +921,19 @@ def calendar(args, lo, hi):
     return [e for e in out if e["end"] > lo and e["start"] < hi]
 
 
-def sign_up(args, area, side, who=None):
+def sign_up(args, area, side, who=None, persist=True):
     """Record one player choosing a side. `side` is "atk" or "def".
 
     `who` = {"key", "a", "c", "n"} makes the sign-up a MEMBERSHIP: counted
     once however many times the client re-sends 0x2018 (it sends one per
     battle start, and every re-entry used to count again), and remembered
     for the reward and the one-war rule. Without it (`!campaign join`) it is
-    a bare count, as before."""
+    a bare count, as before.
+
+    `who["bot"]` marks a WAR BOT's row (fewarbots): counted like anyone, and
+    skipped by everything that reaches a stored character or a session.
+    `persist=False` leaves the save to the caller (a batch of bots saves
+    once, not once a bot)."""
     area = int(area)
     if side not in ("atk", "def"):
         return None
@@ -836,7 +969,55 @@ def sign_up(args, area, side, who=None):
                                    "destroyed": 0,
                                    "name": who.get("name"),
                                    "t": time.time()}
-    save(args)
+            if who.get("bot"):
+                members[who["key"]]["bot"] = True
+    if persist:
+        save(args)
+    return n
+
+
+def member_sides(area):
+    """{charid: side} of the REAL players enlisted in `area`'s war (bots
+    left out) -- copied under _LOCK, for a reader on another thread."""
+    out = {}
+    with _LOCK:
+        r = _STATE.get(int(area))
+        for m in ((r or {}).get("members") or {}).values():
+            if m.get("bot"):
+                continue
+            try:
+                out[int(m.get("c"))] = m.get("side")
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def drop_bot_members(args, area, only=None, keep=None):
+    """Withdraw WAR BOT sign-ups from `area`'s war (fewarbots): every bot
+    row, or those whose id is in `only`, never those in `keep`. Each one
+    leaves its side's count. Returns how many went."""
+    n = 0
+    with _LOCK:
+        r = _STATE.get(int(area))
+        if not r:
+            return 0
+        members = r.get("members") or {}
+        for k in [k for k, m in members.items() if m.get("bot")]:
+            try:
+                cid = int(members[k].get("c"))
+            except (TypeError, ValueError):
+                cid = None
+            if only is not None and cid not in only:
+                continue
+            if keep and cid in keep:
+                continue
+            side = members.pop(k).get("side")
+            su = r.get("signups") or {}
+            if side in su:
+                su[side] = max(0, int(su[side]) - 1)
+            n += 1
+    if n:
+        save(args)
     return n
 
 
@@ -964,7 +1145,7 @@ def join_side(args, area, army=None):
     return side, None
 
 
-def keep_damage(args, area, side, dmg, of=None):
+def keep_damage(args, area, side, dmg, of=None, credit=True, floor=None):
     """Take `dmg` off `side`'s keep in `area`. Returns the new hp, or None
     when there is no war on there (peace/prep/truce) or no such keep. The
     damage is credited to the hitting session's member row -- the one score
@@ -976,8 +1157,16 @@ def keep_damage(args, area, side, dmg, of=None):
     scaled onto this keep's --keep-hp. The fraction under one point is
     carried per side (r["keep_carry"]), so a swing worth 0.05 of a point
     still counts once twenty of them have landed. The member is credited the
-    UNSCALED damage then, the same units building_damage credits."""
-    key = _me()[0]
+    UNSCALED damage then, the same units building_damage credits.
+
+    `credit=False` credits nobody -- a war bot's swing (fewarbots), which
+    runs on whichever session drives the bots and is not that player's.
+
+    `floor` (OURS, operator 2026-10-23: players decide the war): a fraction
+    of the keep's max HP this damage never takes it below -- a war bot's
+    swing passes --war-bot-keep-floor (0.5). A keep already under it takes
+    nothing. Players, summons and buildings pass none."""
+    key = _me()[0] if credit else None
     with _LOCK:
         r = _STATE.get(int(area))
         if not r or r["phase"] != WAR:
@@ -986,16 +1175,20 @@ def keep_damage(args, area, side, dmg, of=None):
         if not k:
             return None
         before = int(k[0])
+        low = 0
+        if floor:
+            low = min(before, int(math.ceil(max(0.0, min(1.0, float(floor)))
+                                            * int(k[1]))))
         if of:
             carry = r.setdefault("keep_carry", {})
             total = (max(0.0, float(dmg)) * int(k[1]) / float(of)
                      + float(carry.get(side, 0.0)))
             whole = int(total)
             carry[side] = total - whole
-            k[0] = max(0, before - whole)
+            k[0] = max(low, before - whole)
             credit = int(round(max(0.0, float(dmg)))) if before > 0 else 0
         else:
-            k[0] = max(0, before - int(dmg))
+            k[0] = max(low, before - int(dmg))
             credit = before - k[0]
         new = k[0]
         m = (r.get("members") or {}).get(key)
@@ -1160,8 +1353,17 @@ def base_dots(args, cause):
     return max(0, int(table.get(cause, 0)))
 
 
+def bot_floor(args):
+    """--war-bot-keep-floor as a fraction 0..1 (0 = no floor)."""
+    try:
+        return max(0.0, min(1.0, float(getattr(args, "war_bot_keep_floor", 0.5)
+                                       or 0.0)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def base_hit(args, area, side, cause, conn=None, outbound=None, mode=None,
-             be=None, dots=None):
+             be=None, dots=None, floor=None, include_me=False):
     """`side`'s BASE (its keep/castle) loses what `cause` costs -- the keep's
     max HP (--keep-hp) x dots/480, at least 1 when the cause costs anything.
     No member is credited (nobody swung). Shown on this session's client
@@ -1169,10 +1371,21 @@ def base_hit(args, area, side, cause, conn=None, outbound=None, mode=None,
     Returns the new hp, or None (no war, no keeps, a free cause).
 
     `dots` overrides the --base-dots table for a cause that is not a fixed
-    price -- the obelisk drain, whose size is the territory share."""
+    price -- the obelisk drain, whose size is the territory share.
+
+    `floor` (a fraction of the max) is what a WAR BOT's own building or
+    summon passes (fewarbots phase 3): the base never goes below it.
+    `include_me` = no connection here (the bot driver's tick): this session
+    hears it through the relay like everyone else."""
     dots = base_dots(args, cause) if dots is None else max(0, int(dots))
     if dots <= 0 or area is None:
         return None
+    # OURS (operator 2026-10-23, players decide the war): a death dealt by a
+    # WAR BOT (fepvp marks the victim's session) drains the base only down to
+    # --war-bot-keep-floor, like a bot's own swing at the keep
+    floor = max(0.0, min(1.0, float(floor))) if floor else 0.0
+    if cause == "death" and fw._SESSION.get("war_death_by_bot"):
+        floor = max(floor, bot_floor(args))
     with _LOCK:
         r = _STATE.get(int(area))
         if not r or r["phase"] != WAR:
@@ -1182,7 +1395,8 @@ def base_hit(args, area, side, cause, conn=None, outbound=None, mode=None,
             return None
         dmg = max(1, int(round(int(k[1]) * dots / float(BASE_DOTS))))
         before = int(k[0])
-        k[0] = max(0, before - dmg)
+        low = min(before, int(math.ceil(floor * int(k[1])))) if floor else 0
+        k[0] = max(low, before - dmg)
         new = k[0]
     save(args)
     obj = int(getattr(args, "keep_base", 2900) or 2900) + (0 if side == "def" else 1)
@@ -1192,13 +1406,13 @@ def base_hit(args, area, side, cause, conn=None, outbound=None, mode=None,
                      else "%s destroyed" % fw.BUILDING_TYPES.get(cause, cause),
                      new), flush=True)
     s = fw._SESSION
-    if obj in (s.get("keeps") or {}):
+    if not include_me and obj in (s.get("keeps") or {}):
         fw.building_hp_push(conn, outbound, mode, be, args, obj, new)
         if new <= 0:
             fw.mob_kill_push(conn, outbound, mode, be, args, obj)
             s["keeps"].pop(obj, None)
     fw.ext_post("campaign.keep", {"area": int(area), "obj": obj, "side": side,
-                                  "hp": int(new)})
+                                  "hp": int(new)}, include_me=bool(include_me))
     return new
 
 
@@ -1570,6 +1784,8 @@ def settle(args, area, winner, defender):
                   flush=True)
     out, posts, ranked = [], [], []
     for key, m in sorted(members.items()):
+        if m.get("bot"):
+            continue            # a war bot has no character to reward
         won = m.get("side") == winner
         got = {}
         frac = _member_frac(war, m, end)
@@ -1619,8 +1835,12 @@ def settle(args, area, winner, defender):
                 rings = rings_for(args, before, won, m.get("dmg"))
             else:
                 rings = rw["rings"]
-                credited, lv0, lv1 = apply_war_exp(args, c, rw["exp"])
-                got.update(exp=credited, earned=rw["exp"], level=(lv0, lv1),
+                # a running war_exp event (SE's 2006 Double Up) multiplies the
+                # EXP earned; the one-level-per-war cap below still holds
+                earned = timedevents.scale(args, "war_exp", rw["exp"],
+                                          "war EXP for %s" % key)
+                credited, lv0, lv1 = apply_war_exp(args, c, earned)
+                got.update(exp=credited, earned=earned, level=(lv0, lv1),
                            grades=rw["grades"], frac=frac, destroyed=destroyed)
             c["war_rank"], c["war_streak"] = rank, streak
             c["war_wins" if won else "war_losses"] = \
@@ -1870,6 +2090,10 @@ def pump(ctx):
             _advance(ctx, args, area, now)
     _votes_expire(ctx, args, now)
     _present_here(ctx, args, now)
+    # the player's own +0x94 follows the war: their side at PREP/WAR, 0
+    # again at TRUCE/PEACE. Idempotent; the self record set it at entry.
+    fw.army_sync(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args,
+                 why="(the war in area %s moved on)" % fw._SESSION.get("field"))
     _trace(ctx, args, now)
 
 
@@ -2004,8 +2228,9 @@ def _keeps_only(ctx, args, area, phase):
     `--castle-always off` restores that.
 
     A base that FELL this war stays down until the war is over (its row hp
-    is 0), and the castle is re-served when the field changes hands (its
-    nation byte is the holder's). Adds wait for field_ready; deletes do not."""
+    is 0), and the castle is re-served when the field changes hands (the
+    registry keeps the nation it was served for; the record's +0x94 is the
+    war side, 1 for the castle whoever holds it). Adds wait for field_ready; deletes do not."""
     if getattr(args, "keeps", "off") != "on" or not hasattr(fw, "keep_push"):
         return
     s = fw._SESSION
@@ -2266,8 +2491,12 @@ def _crystals_present(ctx, args, area, phase):
             obj = base + i
             cur, amt = left[i] if i < len(left) else (_crystal_amount(args),) * 2
             # age = finished; a Crystal is canonical group 7, which
-            # 0x050727a2 exempts from the construction effect regardless
-            body = fw.building_record(obj, 7, model, gx, gz, side=0,
+            # 0x050727a2 exempts from the construction effect regardless.
+            # side = NEUTRAL (2): a deposit is nobody's, both armies crouch
+            # at it. It used to be 0, the ATTACKERS' side byte, which made it
+            # an enemy building to every defender's friend/foe check.
+            body = fw.building_record(obj, 7, model, gx, gz,
+                                      side=fw.SIDE_NEUTRAL,
                                       hp=(int(cur), int(amt)),
                                       stamp=fw.building_age(args, 7))
             fw.send(ctx.conn, ctx.outbound, fw.inner_msg(0x1006, body, obj),
@@ -2300,6 +2529,32 @@ def _deplete(args, area, idx, n):
         left = cur[idx][0]
     save(args)
     return left
+
+
+def bot_draw(args, area, idx, n, reserve):
+    """A WAR BOT's draw from deposit `idx` of `area`'s war (fewarbots phase
+    3): up to `n`, never taking the deposit below `reserve` (0..1) of what it
+    started with, so the players always have the rest. Checked and taken
+    under one lock, so a player's draw in between cannot be overdrawn.
+    Returns (taken, left, amount), or None (no war, no such deposit). Credits
+    nobody: there is no member row and no stored character behind a bot."""
+    deplete = getattr(args, "crystal_deplete", "on") == "on"
+    with _LOCK:
+        r = _STATE.get(int(area))
+        if not r or r["phase"] != WAR:
+            return None
+        cur = r.get("crystals") or []
+        if not 0 <= int(idx) < len(cur):
+            return None
+        left, amt = int(cur[idx][0]), int(cur[idx][1])
+        keep = int(math.ceil(max(0.0, min(1.0, float(reserve))) * amt))
+        take = max(0, min(int(n), left - keep))
+        if take and deplete:
+            cur[idx][0] = left - take
+        left = int(cur[idx][0])
+    if take and deplete:
+        save(args)
+    return take, left, amt
 
 
 def on_crystal_relay(ctx, payload):
@@ -2449,6 +2704,11 @@ def on_draw_crystal(ctx, inner):
         return
     key = _me()[0] or "?"
     step = max(1, int(getattr(args, "crystal_draw", 1) or 1))
+    if pop_scales(args, "crystal"):
+        # the client paces the draws itself, so a small side draws MORE per
+        # draw instead of faster: 1/factor, at most 3x
+        f = pop_factor(args, area, _my_side(args, area))
+        step = max(step, int(round(step * min(3.0, 1.0 / f))))
     per_war = int(getattr(args, "crystal_war_max", 20) or 20)
     carry = int(getattr(args, "crystal_carry_max", 50) or 50)
     # THE PACE (2026-10-08): the client's own timer -- 5 s after the crouch,
@@ -2581,15 +2841,19 @@ OBELISK_DRAIN_DOTS = 16
 _SHARE_STRIDE = 4
 
 
-def territory_share(args, area, side):
+def territory_share(args, area, side, skip=None):
     """0.0..1.0 -- the fraction of the field `side`'s OBELISKS cover.
 
     Obelisks only: the base's own radius is ours (territory_of marks it
     CHOSEN) and SE attributes 支配領域 to the obelisk alone. Overlapping
     circles count once, which is what "the breadth of the controlled area"
-    means and is also why this samples a grid instead of summing πr²."""
+    means and is also why this samples a grid instead of summing πr².
+    `skip` = grid cells whose obelisk is left out (the war bots' own, for
+    the part of the drain that stops at the bot keep floor)."""
     r = state_of(area)
     pts = (r.get("obelisks") or {}).get(side) or []
+    if skip:
+        pts = [p for p in pts if (int(p[0]), int(p[1])) not in skip]
     if not pts:
         return 0.0
     rad = int(getattr(args, "obelisk_radius", OBELISK_RADIUS_CELLS) or 0)
@@ -2771,7 +3035,7 @@ def _tower_target(args, area, side, pos, rng):
     no tower could ever find a target. Measuring in XZ is also what "an enemy
     approaches the tower" means: nothing in FE fires at a different altitude.
     """
-    mine = _side_byte(args, area, side)
+    mine = _side_nation(args, area, side)
     best, bestd = None, rng + 1.0
     for ent in fw.ext_sessions():
         ps = ent["session"]
@@ -2833,11 +3097,18 @@ def tower_fire(ctx, args, now):
         # BUILDER. So the hit carries the builder's charid, not 0, and the
         # victim's thread reports back to them exactly as for a hand-thrown
         # swing (fepvp.on_report_relay -> pc_damage).
-        fw.ext_post("pvp.hit", {"from": int(b.get("by") or 0),
-                                "to": int(victim["cid"]),
-                                "dmg": dmg, "skill": int(skill),
-                                "tower": int(obj)},
-                    to=lambda s_, _n, ps=victim["session"]: s_ is ps)
+        hit = {"from": int(b.get("by") or 0), "to": int(victim["cid"]),
+               "dmg": dmg, "skill": int(skill), "tower": int(obj)}
+        if b.get("bot"):
+            # a WAR BOT's tower (fewarbots phase 3): credits nobody, and the
+            # death it deals drains the base only to --war-bot-keep-floor
+            hit.update({"from": 0, "bot": True})
+        fw.ext_post("pvp.hit", hit,
+                    # include_me: the session driving the towers may be the
+                    # victim itself, and ext_post skips the poster by default
+                    # (2026-10-23: that player was never shot)
+                    to=lambda s_, _n, ps=victim["session"]: s_ is ps,
+                    include_me=True)
         print("[fecampaign] area %d: the %s tower %d (type %d) shoots skill %d "
               "at charid %d, %.1f u away (range %.0f) for %d"
               % (area, b.get("side"), obj, b.get("t", -1), skill,
@@ -2884,11 +3155,28 @@ def obelisk_drain(ctx, args, now):
             if dots <= 0:
                 continue
             foe = "def" if side == "atk" else "atk"
+            # WAR BOT OBELISKS (fewarbots phase 3): the part of the drain only
+            # bot obelisks add stops at --war-bot-keep-floor; the players'
+            # own share drains as before
+            mine = bot_obelisks(area, side)
+            bot_dots = 0
+            if mine:
+                bot_dots = dots - int(territory_share(args, area, side,
+                                                      skip=mine) * full)
+                dots -= bot_dots
             print("[fecampaign] area %d: %s holds %.0f%% of the field by "
-                  "obelisk -- %d/%d dots off the %s base (SE warsystem02)"
-                  % (area, side, share * 100, dots, BASE_DOTS, foe), flush=True)
-            base_hit(args, area, foe, "obelisk territory", conn=ctx.conn,
-                     outbound=ctx.outbound, mode=ctx.mode, be=ctx.be, dots=dots)
+                  "obelisk -- %d/%d dots off the %s base (SE warsystem02)%s"
+                  % (area, side, share * 100, dots + bot_dots, BASE_DOTS, foe,
+                     " (%d of them by war bot obelisks, floored)" % bot_dots
+                     if bot_dots else ""), flush=True)
+            if dots > 0:
+                base_hit(args, area, foe, "obelisk territory", conn=ctx.conn,
+                         outbound=ctx.outbound, mode=ctx.mode, be=ctx.be,
+                         dots=dots)
+            if bot_dots > 0:
+                base_hit(args, area, foe, "obelisk territory", conn=ctx.conn,
+                         outbound=ctx.outbound, mode=ctx.mode, be=ctx.be,
+                         dots=bot_dots, floor=bot_floor(args))
 
 
 def _share_refresh(args, area):
@@ -3018,6 +3306,12 @@ def build_check(args, area, btype, grid=None):
     side = _my_side(args, area)
     if side is None:
         return 15, "this character is not a side of the war in area %s" % area
+    return _build_rules(args, area, side, btype, grid, r)
+
+
+def _build_rules(args, area, side, btype, grid, r):
+    """The per-side cap and the territory rule of build_check, for a side
+    already known (a player's own, or a war bot's: bot_build)."""
     cap = parse_caps(getattr(args, "build_caps", "2006")).get(int(btype))
     if cap is not None:
         n = int(((r.get("built") or {}).get(side) or {}).get(str(int(btype)), 0))
@@ -3037,9 +3331,10 @@ def build_check(args, area, btype, grid=None):
     return None, side
 
 
-def build_count(args, area, side, btype, grid=None):
+def build_count(args, area, side, btype, grid=None, credit=True):
     """Record one building of `btype` put up by `side` in `area`'s war (an
-    obelisk's `grid` extends that side's territory)."""
+    obelisk's `grid` extends that side's territory). `credit=False` (a war
+    bot's build) counts it against the side's caps and credits no member."""
     with _LOCK:
         r = _STATE.get(int(area))
         if not r:
@@ -3052,7 +3347,8 @@ def build_count(args, area, side, btype, grid=None):
             r.setdefault("obelisks", {}).setdefault(side, []).append(
                 [int(grid[0]), int(grid[1])])
     save(args)
-    _credit_member(args, area, "built")        # the ranking's Built column
+    if credit:
+        _credit_member(args, area, "built")    # the ranking's Built column
     if obelisk:
         _share_refresh(args, area)             # the gauge's 支配領域 moved
     return n
@@ -3081,9 +3377,10 @@ def build_count(args, area, side, btype, grid=None):
 # _crystals_present already uses, but as a diff so a building somebody ELSE
 # puts up arrives, and one somebody else fells goes away.
 # ---------------------------------------------------------------------------
-def building_add(args, area, side, btype, model, grid, hp, by=None):
+def building_add(args, area, side, btype, model, grid, hp, by=None, bot=False):
     """Register one player-built building in `area`'s war. Returns its object
-    id, or None when there is no war on. `hp` is (current, max)."""
+    id, or None when there is no war on. `hp` is (current, max). `bot` marks
+    a war bot's (fewarbots phase 3; `by` is None then)."""
     if area is None:
         return None
     base = int(getattr(args, "building_base", 3000) or 3000)
@@ -3104,9 +3401,96 @@ def building_add(args, area, side, btype, model, grid, hp, by=None):
             # building is or the client raises it in front of them again.
             # Rows written before 2026-09-12 have no t0 and read as finished.
             "t0": time.time(),
-            "hp": [int(hp[0]), int(hp[1])], "by": by}
+            "hp": [int(hp[0]), int(hp[1])], "by": by, "bot": bool(bot)}
     save(args)
     return obj
+
+
+def bot_obelisks(area, side):
+    """{(gx, gz)} of the obelisks war bots put up for `side` in `area`."""
+    return {(int(b["gx"]), int(b["gz"])) for b in buildings_of(area).values()
+            if b.get("bot") and b.get("side") == side
+            and int(b.get("t", -1)) in OBELISK_TYPES}
+
+
+#: a war bot's building keeps this many grid cells (2.5 u each) from every
+#: other building, keep and giant crystal (CHOSEN: a tower is ~4 cells wide)
+BOT_BUILD_GAP = 6
+
+
+def bot_build(args, area, side, btype, model, cands, hp):
+    """A WAR BOT puts up `btype` for `side` (fewarbots phase 3): the first
+    grid of `cands` that passes the SAME rules a player's 0x2007 is checked
+    against (_build_rules: the side's per-war cap, inside its own territory,
+    outside the enemy's) and stands BOT_BUILD_GAP cells clear of everything
+    else. Registered side-owned with no builder (by=None, bot=True), counted
+    against the side's caps, nobody credited; every session is served it by
+    _buildings_present. Returns (obj, grid) or (None, why)."""
+    r = state_of(area)
+    if r["phase"] not in (PREP, WAR):
+        return None, "no war in area %s" % area
+    taken = [tuple(g) for g in (fw.keep_grids(area) or {}).values()]
+    taken += [(int(b["gx"]), int(b["gz"])) for b in buildings_of(area).values()]
+    n = int(getattr(args, "war_crystals", 0) or 0)
+    if n > 0:
+        taken += [tuple(g) for g in crystal_grids(area, n, args)]
+    why = "no candidate grid"
+    for g in cands:
+        g = (max(2, min(253, int(g[0]))), max(2, min(253, int(g[1]))))
+        if any((g[0] - t[0]) ** 2 + (g[1] - t[1]) ** 2 < BOT_BUILD_GAP ** 2
+               for t in taken):
+            why = "grid (%d,%d) is too close to another building" % g
+            continue
+        code, msg = _build_rules(args, area, side, btype, g, r)
+        if code is not None:
+            why = msg
+            if code == 40:
+                return None, msg               # the side's cap: no grid helps
+            continue
+        obj = building_add(args, area, side, btype, model, g, hp, by=None,
+                           bot=True)
+        if obj is None:
+            return None, "no war row"
+        build_count(args, area, side, btype, grid=g, credit=False)
+        print("[fecampaign] area %s: a war bot of the %s side put up %s %d at "
+              "grid (%d,%d), %d/%d HP (no builder credited)"
+              % (area, side, fw.BUILDING_TYPES.get(int(btype), btype), obj,
+                 g[0], g[1], hp[0], hp[1]), flush=True)
+        return obj, g
+    return None, why
+
+
+def bot_building_hit(args, area, obj, dmg, floor):
+    """A WAR BOT's summon (the Giant) hits a building (fewarbots phase 3):
+    `dmg` off it, credited to nobody. When it falls it leaves the board like
+    any other (an obelisk takes its territory with it) and its side's base
+    pays the dots only down to `floor` (bots alone never take a base below
+    --war-bot-keep-floor). Returns (new hp, row) or None. Runs on the bot
+    driver's tick: everyone, the driver included, hears it by relay."""
+    with _LOCK:
+        r = _STATE.get(int(area)) if area is not None else None
+        if not r or r["phase"] != WAR:
+            return None
+        b = (r.get("buildings") or {}).get(str(int(obj)))
+        if not b or int(b["hp"][1]) <= 0:
+            return None
+        b["hp"][0] = max(0, int(b["hp"][0]) - max(0, int(dmg)))
+        new, row = b["hp"][0], dict(b)
+    save(args)
+    if new <= 0:
+        gone = building_del(args, area, obj)
+        if gone:
+            btype = int(gone.get("t", -1))
+            if btype in OBELISK_TYPES:
+                obelisk_gone(args, area, (gone["gx"], gone["gz"]))
+            if gone.get("side") in ("atk", "def"):
+                base_hit(args, area, gone["side"], btype, floor=floor,
+                         include_me=True)
+            print("[fecampaign] area %s: building %s (%s) felled by a war bot "
+                  "-- nobody credited" % (area, obj,
+                                          fw.BUILDING_TYPES.get(btype, btype)),
+                  flush=True)
+    return new, row
 
 
 def building_age_ms(row):
@@ -3267,9 +3651,18 @@ def _buildings_present(ctx, args, area, phase):
 
 
 def _side_byte(args, area, side):
-    """The NATION a building record carries: SE warsystem02 draws the
-    attackers' buildings red and the defenders' blue, and the record's side
-    field is a nation id (fw.building_record)."""
+    """The WAR SIDE a building record carries at +0x94: 0 for the attackers,
+    1 for the defenders, 2 (neutral) for a building of neither. SE
+    warsystem02 draws the attackers' buildings red and the defenders' blue,
+    and the client compares this byte with the PLAYER's own (the Summ
+    filter, the friend/foe check), never with a nation. The nation is
+    _side_nation's. See world/buildings.py SIDE_ATK."""
+    return fw.war_side_byte(side)
+
+
+def _side_nation(args, area, side):
+    """The NATION fighting as `side` in `area`'s war, or 0: the attacker of
+    the war row, or the field's holder for "def"."""
     if side == "atk":
         return int(state_of(area).get("atk") or 0)
     if side == "def":
@@ -3304,9 +3697,10 @@ def summon_count(area, side, form):
     return int(((r.get("summoned") or {}).get(side) or {}).get(str(int(form)), 0))
 
 
-def summon_add(args, area, side, form):
+def summon_add(args, area, side, form, credit=True):
     """Record one summon (feunit's --summon-war-cap and the Chimera's
-    one-per-bar unlock count these; a new war's row starts at none)."""
+    one-per-bar unlock count these; a new war's row starts at none).
+    `credit=False` = a war bot's summon: counted for the side, no member."""
     with _LOCK:
         r = _STATE.get(int(area))
         if not r:
@@ -3315,7 +3709,8 @@ def summon_add(args, area, side, form):
         b[str(int(form))] = int(b.get(str(int(form)), 0)) + 1
         n = b[str(int(form))]
     save(args)
-    _credit_member(args, area, "summons")      # the ranking's Summ column
+    if credit:
+        _credit_member(args, area, "summons")  # the ranking's Summ column
     return n
 
 
@@ -3486,6 +3881,31 @@ def on_vote_relay(ctx, payload):
     ctx.reply(payload["mid"], payload["body"], why=payload.get("why", ""))
 
 
+#: the banner a player gets when the King's-message gate refuses them: the
+#: client's own refusals ("Can't join attackers", then "Your nation attacks;
+#: can't defend" from its retry) never say why (operator 2026-10-23)
+#: kept under 0x64 bytes: fegm reads the banner as a 0x64-byte object and the
+#: text's own limit there is unread
+KING_GATE_TEXT = ("To fight in wars, first hear the King's message from your "
+                  "capital's Manager.")
+
+
+def _king_banner(ctx, area):
+    """The King's-message refusal, explained once per field visit (the client
+    asks to join twice, attackers then defenders)."""
+    s = fw._SESSION
+    if s.get("king_banner") == area:
+        return
+    s["king_banner"] = area
+    gm = sys.modules.get("fegm")
+    if gm is None or not hasattr(gm, "sysmsg_push"):
+        return
+    try:
+        gm.sysmsg_push(ctx, "War", KING_GATE_TEXT)
+    except Exception as e:                             # noqa: BLE001
+        print("[fecampaign] King's-message banner failed (%r)" % (e,), flush=True)
+
+
 def _keep_err(ctx, code, why, party=0, crystal_short=0):
     ctx.reply(F_READY_ERR, ready_err_body(code, party, crystal_short=crystal_short),
               why="NotifyBuildToReadyKeepError code %d (%s) -- %s"
@@ -3524,6 +3944,14 @@ def on_build_keep(ctx, inner):
         return True
     nation = _nation(args)
     code, why = can_declare(args, area, nation, grid=(gx, gz))
+    if code is None and not king_heard(args):
+        # LIVE 2026-10-23: a builder who had not heard the King's message
+        # declared a war, then was refused at its briefing (join_side) and
+        # sent out of the field -- a war they started and could not join.
+        # Refused here instead, with the reason on screen (the 0xF504 table
+        # has no row for it; 11 "undefined error" is the nearest).
+        code, why = 11, "has not heard the King's message (--king-gate)"
+        _king_banner(ctx, area)
     if code is None and _war_of(key) is not None:
         # 10, the same row as a holder already at war (was 11 "undefined")
         code, why = 10, "already fighting in area %s" % _war_of(key)
@@ -3770,12 +4198,28 @@ def _party_sweep(args):
         print("[fecampaign] party war sweep failed: %r" % (e,), flush=True)
 
 
+def _war_bots(hook, args, area):
+    """fewarbots' war-start / war-end hook, when it is loaded. Never called
+    under _LOCK (it signs up and withdraws through it). A failure is logged
+    and the war goes on."""
+    mod = sys.modules.get("fewarbots")
+    fn = getattr(mod, hook, None)
+    if fn is None:
+        return
+    try:
+        fn(args, area)
+    except Exception as e:                             # noqa: BLE001
+        print("[fecampaign] area %s: war bots %s failed (%r) -- the war goes "
+              "on without them" % (area, hook, e), flush=True)
+
+
 def _advance(ctx, args, area, now):
     r = state_of(area)
     if r["phase"] == PREP:
+        length = war_length_s(args, area)       # reads the state: not under _LOCK
         with _LOCK:
             _STATE[area]["phase"] = WAR
-            _STATE[area]["until"] = now + _ms(args, "war_length_ms", 600000) / 1000.0
+            _STATE[area]["until"] = now + length
             _STATE[area]["war_at"] = now
             _STATE[area]["presence"] = (str(getattr(args, "war_presence", "on")
                                             or "off") == "on")
@@ -3786,6 +4230,7 @@ def _advance(ctx, args, area, now):
                  r["signups"].get("def", 0)), flush=True)
         drive_client(ctx, args, area, WAR, state_of(area)["until"])
         _party_sweep(args)
+        _war_bots("on_war_start", args, area)
     elif r["phase"] == WAR:
         if getattr(args, "war_decide", "signups") == "manual":
             # --war-decide manual promises that nothing resolves the war
@@ -3797,6 +4242,9 @@ def _advance(ctx, args, area, now):
                   "manual -- holding it open until `!campaign win`" % area,
                   flush=True)
             return
+        # the war bots leave BEFORE the decision: --war-decide signups is
+        # the real players' count, and settle() must not meet a bot row
+        _war_bots("on_war_end", args, area)
         winner, old, new = decide(args, area)
         settle(args, area, winner, old)
         with _LOCK:
@@ -3813,6 +4261,7 @@ def _advance(ctx, args, area, now):
         drive_client(ctx, args, area, TRUCE, state_of(area)["until"])
         _outcome_notify(ctx, args, area, winner, old, new)
     elif r["phase"] == TRUCE:
+        _war_bots("on_war_end", args, area)
         with _LOCK:
             _STATE[area]["phase"] = PEACE
             _STATE[area]["until"] = 0.0
@@ -4105,6 +4554,8 @@ def on_decide_country(ctx, inner):
             return True
         side, code = join_side(args, area, army)
         if side is None:
+            if not king_heard(args):
+                _king_banner(ctx, area)
             ctx.reply(0x1021, struct.pack(">I", code),
                       why="MSG_DECIDE_COUNTRY_NG code %d (army=%d)" % (code, army))
             return True
@@ -4123,6 +4574,11 @@ def on_decide_country(ctx, inner):
     ctx.reply(0x1020, b"", why="MSG_DECIDE_COUNTRY_OK (army=%d)%s"
               % (army, "" if got is None else
                  " -- signed up %s, now %s" % (side, got)))
+    # the side byte follows the sign-up at once: Summ on your own base and
+    # the friend/foe check both read the player's +0x94 (fw.army_sync)
+    if got is not None:
+        fw.army_sync(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args,
+                     why="(signed up %s in area %s)" % (side, area))
     return True
 
 
@@ -4347,6 +4803,26 @@ def add_args(ap):
                          "guard against solo conquest for a war loop a small "
                          "population can reach; `!campaign quorum` flips it "
                          "live")
+    ap.add_argument("--pop-scale", choices=("on", "off"), default="off",
+                    help="OURS: scale a small side's war toward SE's values by "
+                         "its players online (see --pop-scale-full/-floor/"
+                         "-values); at --pop-scale-full players and above "
+                         "every value is SE's own")
+    ap.add_argument("--pop-scale-full", type=int, default=20, metavar="N",
+                    help="players on a side at which --pop-scale gives SE's "
+                         "values unchanged (default 20)")
+    ap.add_argument("--pop-scale-floor", type=float, default=0.34, metavar="F",
+                    help="the smallest --pop-scale factor (default 0.34: a "
+                         "Knight never below 14 crystals, a keep 1000 HP)")
+    ap.add_argument("--pop-scale-values", default=",".join(POP_SCALE_VALUES),
+                    metavar="LIST",
+                    help="what --pop-scale scales: summon (crystal prices), "
+                         "hp (keeps at the declare, buildings as built), "
+                         "length (the war, at its start; not in the default), crystal (more per "
+                         "draw and per kill, up to 3x)")
+    ap.add_argument("--pop-scale-extra", default="", metavar="ATK:DEF",
+                    help="players counted on each side that are not there "
+                         "(one N for both), to try a big war's values")
     ap.add_argument("--declare-rejects", type=int, default=3, metavar="N",
                     help="rejections that cancel a keep vote (SE: 3人が却下)")
     ap.add_argument("--war-gauge", choices=("on", "off"), default="on",

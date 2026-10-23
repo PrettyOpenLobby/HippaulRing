@@ -246,6 +246,9 @@ def clock_sync_push(conn, outbound, mode, be, args):
     if base < 0:
         base = 0
     sess._SESSION["clock_synced"] = True
+    # KEY: 2026-10-23: kept so the client's UNBASED clock (ms since connect)
+    # can be recovered from a based sample (fepresence.cast_clock)
+    sess._SESSION["clock_base"] = base
     wire.send(conn, outbound, wire.inner_msg(0x1148, pack_deadline(base)), mode, be,
          args.seq_mode == "echo", args.world_prefix)
     # Move our own estimates with it; the next 0x2023 either confirms the jump
@@ -297,6 +300,7 @@ def clock_connect_push(conn, outbound, mode, be, args):
     base = int(time.time() * 1000) + int(getattr(args, "clock_epoch_ms", 0) or 0)
     sess._SESSION["clock_synced"] = True
     sess._SESSION["clock_connect_sent"] = True
+    sess._SESSION["clock_base"] = base           # fepresence.cast_clock
     wire.send(conn, outbound, wire.inner_msg(0x1148, pack_deadline(base)), mode, be,
          args.seq_mode == "echo", args.world_prefix)
     sess._SESSION["cclock"] = (base, time.monotonic())

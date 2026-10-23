@@ -328,6 +328,10 @@ def on_hit(ctx, inner):
             return False
         victim = pres.peer_session(target)
         if victim is None:
+            bots = sys.modules.get("fewarbots")
+            if bots is not None and bots.is_bot(target):
+                _hit_bot(args, bots, target, skill, "0xA011")
+                return True
             return False                   # a monster, a keep, or nobody
         me = fw._SESSION.get("charid")
         mine, theirs = _my_nation(args), _nation_of_session(victim)
@@ -358,6 +362,43 @@ def on_hit(ctx, inner):
     except Exception as e:                              # noqa: BLE001
         _log("0xA011 handler failed (%r) -- declined, feworld's arm answers" % (e,))
         return False
+
+
+def _hit_bot(args, bots, bid, skill, why):
+    """A player's hit on a WAR BOT (fewarbots): the damage they would deal a
+    peer (_damage with no victim, so no armour), off the bot's HP in memory.
+    The bot's new HP and its fall are drawn by fewarbots' own pump on every
+    screen. Same-side bots take nothing (--pvp-friendly decides). Returns
+    True when the hit landed."""
+    s = fw._SESSION
+    me = s.get("charid")
+    area = s.get("field")
+    hit = bots.near(area, (0.0, 0.0, 0.0), float("inf"), only=bid) \
+        if area is not None else []
+    if not hit:
+        _log("charid %s swung at war bot %d -- not standing in this field"
+             % (me, bid))
+        return False
+    mine = _my_nation(args)
+    camp = sys.modules.get("fecampaign")
+    my_side = None
+    if camp is not None:
+        try:
+            my_side = camp._my_side(args, int(area))
+        except Exception:                               # noqa: BLE001
+            my_side = None
+    _bid, nation, side, _d = hit[0]
+    same = (my_side == side) if my_side else (mine and nation and mine == nation)
+    if same and getattr(args, "pvp_friendly", "off") != "on":
+        _log("charid %s swung at war bot %d -- SAME SIDE, no damage" % (me, bid))
+        return False
+    dmg, dwhy = _damage(args, skill, None)
+    got = bots.hit_bot(args, bid, dmg, area=area, by="charid %s" % me)
+    if got is not None:
+        _log("charid %s HIT war bot %d for %d (skill %s: %s, %s) -- HP %d/%d%s"
+             % (me, bid, dmg, skill, dwhy, why, got["hp"], got["hpmax"],
+                " -- DOWN" if got["dead"] else ""))
+    return got is not None
 
 
 def _peer_pos(ps):
@@ -467,6 +508,14 @@ def on_cast(ctx, inner):
                      "is %.1f u away (reach %.1f) -- HIT for %d (%s), their "
                      "thread applies it" % (me, skill, pos[0], pos[1], pos[2],
                                             cid, d, rng, dmg, dwhy))
+        bots = sys.modules.get("fewarbots")
+        if bots is not None and s.get("room", -1) == -1:
+            # the WAR BOTS standing in reach (fewarbots): the same reach
+            # and damage as a peer, applied to the bot's HP in memory
+            for bid, _nat, _side, d in bots.near(s.get("field"), pos, rng,
+                                                 only=c or None):
+                if _hit_bot(args, bots, bid, skill, "cast, %.1f u" % d):
+                    n += 1
         if not n:
             k = int(s.get("pvp_cast_miss", 0) or 0) + 1
             s["pvp_cast_miss"] = k
@@ -540,6 +589,12 @@ def _kill_crystals(ctx):
     n = int(getattr(args, "pvp_kill_crystals", 3) or 0)
     if n <= 0:
         return None
+    camp = sys.modules.get("fecampaign")
+    if camp is not None and hasattr(camp, "pop_scales") and camp.pop_scales(args, "crystal") \
+            and fw._SESSION.get("field") is not None:
+        area = fw._SESSION.get("field")
+        f = camp.pop_factor(args, area, camp._my_side(args, area))
+        n = max(n, int(round(n * min(3.0, 1.0 / f))))
     have = fw._seeded_value(args, "crystal", getattr(args, "crystal", None))
     if have is None:
         return None
@@ -594,7 +649,12 @@ def on_hit_relay(ctx, payload):
     # landed damage (SE warsystem04 「敵国のプレイヤーに与えたダメージ」)
     dealt = before - hp
     fw.player_hp_push(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args, hp)
-    who = ("the war's tower %d" % payload["tower"]) if payload.get("tower")         else "charid %d" % attacker
+    if payload.get("tower"):
+        who = "the war's tower %d" % payload["tower"]
+    elif payload.get("bot"):
+        who = "war bot %d (%s)" % (attacker, payload.get("name") or "?")
+    else:
+        who = "charid %d" % attacker
     _log("charid %s took %d from %s -- HP %d/%d"
          % (s.get("charid"), dmg, who, hp, hpmax))
     if hp > 0:
@@ -602,7 +662,8 @@ def on_hit_relay(ctx, payload):
             _status.player_hit_taken(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
                                      args, who)
             sk = payload.get("skill")
-            if sk is not None and not payload.get("tower"):
+            if sk is not None and not payload.get("tower") \
+                    and not payload.get("bot"):
                 _status.player_apply(ctx.conn, ctx.outbound, ctx.mode, ctx.be,
                                      args, _status.bad_specs(int(sk)),
                                      src=attacker, skill=int(sk),
@@ -616,8 +677,14 @@ def on_hit_relay(ctx, payload):
     fw.respawn_wait_arm(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
     _log("charid %s was KILLED by %s -- reviving in %.0fs"
          % (s.get("charid"), who, float(getattr(args, "revive_secs", 8) or 8)))
-    # a death is a death: the same penalty a monster kill costs
-    fw.death_penalty(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+    # a death is a death: the same penalty a monster kill costs. A WAR BOT's
+    # kill is marked for the base drain (fecampaign.base_hit): it stops at
+    # --war-bot-keep-floor, so bots alone never empty a base
+    s["war_death_by_bot"] = bool(payload.get("bot"))
+    try:
+        fw.death_penalty(ctx.conn, ctx.outbound, ctx.mode, ctx.be, args)
+    finally:
+        s.pop("war_death_by_bot", None)
     report(hp=hp, hpmax=hpmax, dead=True, dealt=dealt)
 
 

@@ -15,7 +15,9 @@ Steps (each continues on failure; the summary says what was produced):
   4. feoct     capital collision .oct -> fe-capital-ground.json
   5. fetex     minimap textures -> services/fedata/minimaps/*.png
   6. feicons   shop icon positions off the minimaps -> fe-shop-icons.tsv
-  7. femapfit  minimap pixel<->world calibration -> fe-minimap-cal.tsv
+  7. femapfit  minimap pixel<->world calibration -> fe-minimap-cal.tsv (the
+               painted doors; a half they cannot pin is registered on its
+               collision floor, femapreg.py)
   8. mapart    world/continent select art -> services/fedata/mapart/
 
 The armour-defence table (fe-armour-defence.tsv) is built from archived 2006

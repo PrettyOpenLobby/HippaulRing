@@ -31,6 +31,7 @@ import os
 import queue
 import struct
 import sys
+import threading
 import time
 import types
 
@@ -331,6 +332,10 @@ def main():
         check("the castle goes out as TYPE 15 (the gauge's 0x0f row) and the "
               "keep as 16", types_ == [15, 16] and set(alice.session["keeps"]) == {2900, 2901},
               repr(types_))
+        # 2026-10-23: +0x94 (body[15]) is the WAR SIDE, not the nation
+        sides_ = sorted((struct.unpack_from(">H", b, 7)[0], b[15]) for b in adds)
+        check("...the castle as side 1 (defence), the keep as side 0 (attack)",
+              sides_ == [(15, 1), (16, 0)], repr(sides_))
         g = got(11, 0x1176)
         check("the gauge's 支配領域 pair is said at the presentation: (0, 0)",
               g == [struct.pack(">II", 0, 0)], repr(g))
@@ -352,6 +357,10 @@ def main():
         alice.send(fewar.BUILD_REQUEST, build_body(6, 8, far[0] + 4, far[1]))
         check("0x2007 obelisk -> OK and the 0x1006, beside the keep",
               0x1009 in mids(11) and 0x1006 in mids(11), repr(mids(11)))
+        ob = [b for b in got(11, 0x1006) if len(b) > 15 and b[6] == 1]
+        check("...built by an attacker: its +0x94 is side 0, Alice's own, so "
+              "her Summ filter matches it",
+              len(ob) == 1 and ob[0][15] == 0, repr([b[15] for b in ob]))
         share = fecampaign.state_of(17).get("share") or {}
         check("the attackers' 支配領域 is computed on the build, the defenders' 0",
               share.get("atk", 0) > 0 and share.get("def", 0) == 0, repr(share))
@@ -435,6 +444,29 @@ def main():
               (eve.session.__setitem__("player_dead", True),
                fecampaign._tower_target(args, 17, "atk", tpos, 40.0)[0] is None)[1])
         eve.session.pop("player_dead", None)
+        # 2026-10-23: ext_post skips the poster unless include_me, so the
+        # player whose pump DRIVES the towers was never shot
+        fecampaign._TOWER_CLOCK.get(17, {}).clear()
+        fecampaign._TOWER_DRIVER.pop(17, None)
+        eve.session["player_hp"] = 1000
+        eve.stand(tpos[0] + 10.0, tpos[1], tpos[2])
+        # a live session is keyed by its thread's ident, which is what
+        # ext_post compares; the fake key would never be "me"
+        real = threading.get_ident()
+        with feworld._CHAT_ROOM_LOCK:
+            feworld._CHAT_ROOM[real] = feworld._CHAT_ROOM.pop(eve.key)
+        eve.key, fake = real, eve.key
+        try:
+            eve.pump()
+            deliver(players)
+        finally:
+            with feworld._CHAT_ROOM_LOCK:
+                feworld._CHAT_ROOM[fake] = feworld._CHAT_ROOM.pop(real)
+            eve.key = fake
+        check("the tower shoots Eve when EVE's own pump drives the towers",
+              fecampaign._TOWER_DRIVER.get(17, (None,))[0] == 15
+              and eve.session["player_hp"] == 965, repr(eve.session["player_hp"]))
+        fecampaign._TOWER_DRIVER.pop(17, None)
 
         say("the rank gap (--rank-cost diff, --rank-gap)")
         args.rank_gap = 2

@@ -422,7 +422,13 @@ def _tower_checks(fecampaign, args):
               "put a peer out of range", got and got["cid"] == 77 and d < 11,
               repr((got, d)))
         # ...and the peer's nation is on the presence CARD, not a "nation" key
-        mine = fecampaign._side_byte(args, AREA, "atk")
+        mine = fecampaign._side_nation(args, AREA, "atk")
+        # 2026-10-23: the BUILDING's +0x94 is the war side, not the nation;
+        # a tower still tells friend from foe by nation, server side
+        check("a building's side byte is the WAR SIDE: atk 0, def 1, none 2",
+              (fecampaign._side_byte(args, AREA, "atk"),
+               fecampaign._side_byte(args, AREA, "def"),
+               fecampaign._side_byte(args, AREA, None)) == (0, 1, 2))
         feworld.ext_sessions = lambda: [one(78, mine, (tx + 5, 0.0, tz))]
         check("a tower does NOT shoot its own army (nation = pres_card.force)",
               fecampaign._tower_target(args, AREA, "atk", pos, 40.0)[0] is None)

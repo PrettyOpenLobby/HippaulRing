@@ -1452,12 +1452,16 @@ def main():
           feworld.mapcal_proj("map01_00")["anchors"] == 0
           and feworld.mapcal_proj("map04_00")["anchors"] == 0)
     # map02 has only two painted doors, 29 px apart: not enough to fit a
-    # scale, so it takes the offset and SAYS it did not take a scale. That
-    # honesty is the check -- a silent scale there would be a guess.
+    # scale. It used to take the offset and keep the shipped 2.46, which drew
+    # Liberberg's floor shrunk into a corner of the art (2026-10-23); femapfit
+    # now registers such a half on its collision floor instead, and its
+    # anchors SAY so. The scale lands on map00's, the other ~1.7 map.
     p2 = feworld.mapcal_proj("map02_00")
-    check("map02 takes the offset only, and says so",
-          p2["anchors"] == 2 and p2["ax"] == fegamedata.MINIMAP_AX
-          and "too close to fit a scale" in p2["how_x"], p2["how_x"])
+    rows2 = feworld.mapcal_anchors("map02_00")
+    check("map02 is registered on its floor, says so, at map00's scale",
+          rows2 and all("floor registered" in r["note"] for r in rows2)
+          and abs(p2["ax"] - feworld.mapcal_proj("map00_00")["ax"]) < 0.05,
+          "%s / ax=%.4f" % (p2["how_x"], p2["ax"]))
 
     # WARNING: THE ICON POSITIONS ARE PIXELS, AND CALIBRATION MUST NOT MOVE THEM.
     # x/z were DERIVED from px/py through the shipped fit. A panel that

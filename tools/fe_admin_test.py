@@ -73,7 +73,7 @@ def _args(tmp, **kw):
              gm_accounts="", sos="on", gm_slash="verbs",
              force_table=territory.parse_forces("1:Netzawar,2:Cathedira,3:Elsord,"
                                                 "4:Holdein,5:Gebrand"),
-             shop_types="weapon=1,armor=2,item=3,ring=4")
+             shop_types="weapon=1,armor=2,item=3,ring=4", timed_events="off")
     a.update(kw)
     return types.SimpleNamespace(**a)
 
@@ -166,6 +166,66 @@ def tool_port(args, port, ctx, sent, asked):
     check("a nation the server does not have is refused",
           not res.get("ok") and fecampaign.phase_of(17) == fecampaign.PEACE, repr(res))
 
+    print("tool port: the player picker and Give Rings")
+    import felobby
+    from world import character as _ch
+    store = {"member:7": [{"charid": 0x101, "name": "Wren", "ring": 3},
+                          {"charid": 0x102, "name": "Arden"}],
+             "member:8": [{"charid": 0x201, "name": "Lexa"}]}
+    saved = (_ch._ALL_CHARS_FN, felobby.update_roster, felobby._default_store)
+    _ch._ALL_CHARS_FN = lambda: [(a, c["charid"], c["name"]) for a, r in store.items() for c in r]
+    felobby._default_store = lambda: "test-store"
+
+    def _update(path, acct, mutate):
+        roster = store.get(acct)
+        return None if roster is None else mutate(roster)
+    felobby.update_roster = _update
+    try:
+        st, res = _get(port, "/admin/players.json?q=AR&limit=5")
+        check("players.json finds Arden by part of the name, any case",
+              st == 200 and [p["id"] for p in res.get("players", [])] == ["Arden"], repr(res))
+        st, res = _get(port, "/admin/players.json?q=&limit=2")
+        check("...an empty search lists characters, up to the limit",
+              st == 200 and len(res.get("players", [])) == 2, repr(res))
+        st, res = _post(port, "/admin/rings", {"name": "wren", "amount": "40"})
+        check("Give Rings adds to the stored balance (3 -> 43)",
+              st == 200 and res.get("ok") and store["member:7"][0]["ring"] == 43
+              and "43 Rings" in res.get("msg", ""), repr(res))
+        args.ring = 1
+        st, res = _post(port, "/admin/rings", {"name": "Lexa", "amount": "5"})
+        check("...a character with no stored Rings starts from --ring (1 + 5)",
+              st == 200 and store["member:8"][0]["ring"] == 6, repr((res, store["member:8"])))
+        for bad, why in (({"name": "Wren", "amount": "0"}, "zero Rings"),
+                         ({"name": "Wren", "amount": "1000"}, "four digits of Rings"),
+                         ({"name": "Wren", "amount": "-5"}, "a negative amount"),
+                         ({"name": "Nobody", "amount": "5"}, "a name nobody has"),
+                         ({"amount": "5"}, "no name")):
+            st, res = _post(port, "/admin/rings", bad)
+            check("%s is refused and nothing is written" % why,
+                  st == 400 and not res.get("ok") and store["member:7"][0]["ring"] == 43,
+                  repr((st, res)))
+    finally:
+        _ch._ALL_CHARS_FN, felobby.update_roster, felobby._default_store = saved
+        args.ring = None
+
+    print("tool port: summon test mode")
+    import feunit
+    args.declare_accepts, args.summon_cost, args.summon_dragon_death = 4, "2006", 0.25
+    st, res = _post(port, "/admin/testmode", {"on": "maybe"})
+    check("test mode refuses anything but on / off", st == 400 and not res.get("ok"), repr(res))
+    st, res = _post(port, "/admin/testmode", {"on": "on"})
+    check("test mode on: one vote, free summons, a Dragon on every death",
+          st == 200 and res.get("ok") and args.declare_accepts == 1
+          and feunit.summon_cost(args, 3) == (0, 0) and args.summon_dragon_death == 1.0,
+          repr((res, args.declare_accepts, feunit.summon_cost(args, 3))))
+    _post(port, "/admin/testmode", {"on": "on"})
+    st, res = _post(port, "/admin/testmode", {"on": "off"})
+    check("...and off puts the command line's values back, even after a second on",
+          res.get("ok") and (args.declare_accepts, args.summon_cost, args.summon_dragon_death)
+          == (4, "2006", 0.25) and feunit.summon_cost(args, 3)[0] == 40, repr(res))
+    st, res = _post(port, "/admin/testmode", {"on": "off"})
+    check("...off again says it was not on", "not on" in res.get("msg", ""), repr(res))
+
     print("tool port: calendar.json")
     st, res = _get(port, "/calendar.json?from=0&to=86400", token="wrong")
     check("calendar.json without the port's token is refused (403)", st == 403, repr(st))
@@ -174,6 +234,23 @@ def tool_port(args, port, ctx, sent, asked):
         check("calendar.json%s is refused (400)" % q, st == 400 and not res.get("ok"), repr((st, res)))
     st, res = _get(port, "/calendar.json?from=0&to=%d" % (300 * 86400))
     check("all quiet: 200 and no events", st == 200 and res.get("events") == [], repr(res))
+    # SE's timed events (world/timedevents.py, fedata/fe-timed-events.tsv):
+    # October 2006 holds the shop sale's end, the Double Up and the Dragon
+    # feast, at SE's own JST times; the quests are not served, so not shown
+    import calendar as _cal
+    jst = lambda *t: _cal.timegm(t + (0,) * (6 - len(t))) - 9 * 3600   # noqa: E731
+    args.timed_events = "table"
+    try:
+        st, res = _get(port, "/calendar.json?from=%d&to=%d" % (jst(2006, 10, 1), jst(2006, 11, 1)))
+    finally:
+        args.timed_events = "off"
+    got = [(e["id"], e["start"], e["end"]) for e in res.get("events") or []]
+    check("SE's timed events: sale, Double Up, Dragon feast (October 2006)",
+          st == 200 and got == [
+              ("fe-shop-sale-2006", jst(2006, 9, 21, 15, 15), jst(2006, 10, 5, 16)),
+              ("fe-double-up-2006", jst(2006, 10, 5, 16), jst(2006, 10, 19, 14)),
+              ("fe-dragon-feast-2006", jst(2006, 10, 19, 15, 30), jst(2006, 10, 26, 14))],
+          repr(got))
 
 
 def panel(args, port, ctx, sent, asked):
@@ -242,6 +319,39 @@ def panel(args, port, ctx, sent, asked):
         ok, msg = war.run(m, {"area": "17", "nation": "3"}, "Wren")
         check("a second declaration on the same field is refused with the reason",
               not ok and "already" in msg, msg)
+
+        print("panel: Give Rings and the player picker")
+        import felobby
+        from world import character as _ch
+        store = {"member:7": [{"charid": 0x101, "name": "Wren", "ring": 2}]}
+        saved = (_ch._ALL_CHARS_FN, felobby.update_roster, felobby._default_store)
+        _ch._ALL_CHARS_FN = lambda: [(a, c["charid"], c["name"]) for a, r in store.items() for c in r]
+        felobby._default_store = lambda: "test-store"
+        felobby.update_roster = lambda path, acct, mutate: (
+            None if acct not in store else mutate(store[acct]))
+        try:
+            rings = m.action("rings")
+            check("Give Rings asks for a character with the player picker, and an amount",
+                  rings is not None and [(f["id"], f.get("type")) for f in rings.fields]
+                  == [("name", "player"), ("amount", "text")], rings and rings.fields)
+            calls[:] = []
+            found = adminmodules.find_players("fe", "wr", 5)
+            check("the picker finds Wren through the world's admin/players.json",
+                  [p["id"] for p in found] == ["Wren"] and calls == ["admin/players.json"],
+                  repr((found, calls)))
+            calls[:] = []
+            ok, msg = rings.run(m, {"name": "Wren", "amount": "10"}, "Arden")
+            check("Give Rings reaches the world through the proxy: 2 -> 12",
+                  ok and calls == ["admin/rings"] and store["member:7"][0]["ring"] == 12, msg)
+            for bad in ({"name": "", "amount": "5"}, {"name": "Wren", "amount": "1000"},
+                        {"name": "Wren", "amount": "5;x"}):
+                calls[:] = []
+                ok, msg = rings.run(m, bad, "Arden")
+                check("panel refuses %r with no request made" % (bad,),
+                      not ok and msg and not calls and store["member:7"][0]["ring"] == 12,
+                      repr((ok, msg, calls)))
+        finally:
+            _ch._ALL_CHARS_FN, felobby.update_roster, felobby._default_store = saved
 
         print("panel: Calendar")
         calendar(args, port, m, calls)

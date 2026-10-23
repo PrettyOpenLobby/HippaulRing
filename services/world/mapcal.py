@@ -149,11 +149,35 @@ def _fit_axis(pairs, a_def, c_def):
 
 def mapcal_proj(stem):
     """The effective pixel<->world mapping for one map stem."""
+    return proj_from_rows(mapcal_anchors(stem), stem)
+
+
+#: Two axes whose scales were each refused for a short span, but which AGREE
+#: to within this fraction, are believed together (see proj_from_rows).
+MAPCAL_AXES_AGREE = 0.05
+
+
+def _raw_scale(pairs):
+    """The least-squares scale of one axis whatever its span, or None."""
+    if len(pairs) < 2:
+        return None
+    n = len(pairs)
+    mw = sum(w for w, _ in pairs) / n
+    mp = sum(p for _, p in pairs) / n
+    var = sum((w - mw) ** 2 for w, _ in pairs)
+    cov = sum((w - mw) * (p - mp) for w, p in pairs)
+    if var <= 0 or cov == 0:
+        return None
+    return var / cov
+
+
+def proj_from_rows(rows, stem=""):
+    """The pixel<->world mapping these anchor rows solve to (mapcal_proj's
+    solver, for any list of {"x", "z", "px", "py"} rows)."""
     proj = {"ax": fegamedata.MINIMAP_AX, "cx": fegamedata.MINIMAP_CX,
             "az": fegamedata.MINIMAP_AZ, "cz": fegamedata.MINIMAP_CZ,
             "size": fegamedata.MINIMAP_SIZE, "stem": stem or "",
             "anchors": 0, "how_x": "shipped", "how_z": "shipped"}
-    rows = mapcal_anchors(stem)
     if not rows:
         return proj
     ax, cx, hx = _fit_axis([(r["x"], r["px"]) for r in rows],
@@ -181,6 +205,30 @@ def mapcal_proj(stem):
         ax = abs(az)
         cx = sum(r["px"] - r["x"] / ax for r in rows) / len(rows)
         hx = "offset, scale borrowed from z (%s)" % hx
+    elif not fit_x and not fit_z and len(rows) >= 2:
+        # KEY: TWO SHORT AXES THAT AGREE (2026-10-23, Liberberg). Each axis
+        # alone is too short to trust its scale -- map02's two painted doors
+        # are 29 px apart in x and 20 px in z -- so both used to keep the
+        # shipped 2.46, and Liberberg's floor and NPCs drew shrunk into a
+        # corner of art drawn at ~1.7. But a mis-matched pair of doors gives
+        # two UNRELATED ratios; two independent axes landing on the same
+        # scale is the evidence one short axis lacks. So when they agree
+        # within MAPCAL_AXES_AGREE (and sit in the scale band), take their
+        # mean on both axes. The generator now registers such halves on
+        # their collision floor (tools/fedatagen/femapreg.py), which wins
+        # outright; this keeps an older fe-minimap-cal.tsv close.
+        sx = _raw_scale([(r["x"], r["px"]) for r in rows])
+        sz = _raw_scale([(r["z"], r["py"]) for r in rows])
+        lo, hi = MAPCAL_SCALE_BAND
+        if sx and sz and sx > 0 and sz < 0:
+            a = (abs(sx) + abs(sz)) / 2.0
+            if (abs(abs(sx) - abs(sz)) <= MAPCAL_AXES_AGREE * a
+                    and lo <= a / abs(fegamedata.MINIMAP_AX) <= hi):
+                ax, az = a, -a
+                cx = sum(r["px"] - r["x"] / ax for r in rows) / len(rows)
+                cz = sum(r["py"] - r["z"] / az for r in rows) / len(rows)
+                hx = hz = ("scale from both axes, which agree (%.3f and %.3f), "
+                           "+ offset from %d anchors" % (abs(sx), abs(sz), len(rows)))
     proj.update({"ax": ax, "cx": cx, "az": az, "cz": cz,
                  "anchors": len(rows), "how_x": hx, "how_z": hz})
     return proj

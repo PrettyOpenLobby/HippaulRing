@@ -359,8 +359,10 @@ def skill_list_body(skill_ids, value=1, class_rows=()):
     return body, rows, dropped
 
 
-def skill_list_push(conn, outbound, mode, be, args):
-    """Push 0x1075 so the skills the store already holds come back."""
+def skill_list_push(conn, outbound, mode, be, args, extra=()):
+    """Push 0x1075 so the skills the store already holds come back. `extra` =
+    ids served as owned on top, never stored (a summon's own skills while the
+    player is transformed, feunit FORM_SKILLS)."""
     ids = acquired_skills(args)
     grant = getattr(args, "skill_grant", progression.DEFAULT_SKILL_GRANT)
     if grant == "class":
@@ -425,7 +427,9 @@ def skill_list_push(conn, outbound, mode, be, args):
     own = [r for r in class_rows if self_class is not None and r[0] == self_class]
     class_rows = (progression.exp_class_rows(args)
                   + [r for r in class_rows if r not in own] + own)
-    body, rows, dropped = skill_list_body(ids, args.skill_list_value, class_rows)
+    if extra:
+        ids = sorted(set(ids) | {int(x) for x in extra})
+    body, rows, dropped = skill_list_body(ids, getattr(args, "skill_list_value", 1), class_rows)
     mid, name, arm = SKILL_LIST
     wire.send(conn, outbound, wire.inner_msg(mid, body, wire.unit_id_of(args)),
          mode, be, args.seq_mode == "echo", args.world_prefix)
@@ -433,7 +437,7 @@ def skill_list_push(conn, outbound, mode, be, args):
     print("[feworld] -> 0x30 inner 0x%04X %s  mask=0x%X %d skill(s) value=%d "
           "(%d body bytes, arm %08x) -- writes [unit+0x%X + id*2] on unit %d; "
           "the Status/skill window reads that array directly (0x050D3A06)"
-          % (mid, name, mask, len(rows), args.skill_list_value,
+          % (mid, name, mask, len(rows), getattr(args, "skill_list_value", 1),
              len(body), arm, 0xA14, wire.unit_id_of(args)), flush=True)
     if rows:
         print("[feworld]    ids: %s" % ", ".join(str(x) for x in rows),

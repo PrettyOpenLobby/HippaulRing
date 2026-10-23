@@ -33,6 +33,7 @@
     unitstate.py       The unit state word [unit+0x2b4] and the 0x2024 stat pushes.
     events.py          The event VM: NPC talk, windows, quests, event scripts and steps, goto and room exits.
     shops.py           Shops: stock, pages, sell values.
+    timedevents.py     SE's timed events on a schedule: drop and EXP multipliers, the Dragon feast, the shop sale.
     itemrecords.py     Item rows: the bag and equip records and their fields.
     equipment.py       Equip and unequip mid-session, the worn-slot map, self redress.
     inventory.py       The bag: size, sort, stack, capacity, new item uids.

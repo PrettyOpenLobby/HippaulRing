@@ -377,6 +377,12 @@ def crouch_watch(s, now=None):
     last = s.get("crouch_tick_seen")
     if t is None or t == last:
         return False
+    if s.get("morph"):
+        # a summon cannot crouch, and its regen cadence is not the human's:
+        # a flying Dragon read as CROUCHED (live 10-23) and took --crouch-damage
+        s["crouch_tick_seen"] = t
+        s.pop("crouch_at", None)
+        return False
     s["crouch_tick_seen"] = t
     if last is not None and 0.2 < t - last < CROUCH_REGEN_GAP:
         crouch_note(s, "0x2028 regen ask after %.2fs, the 1349 ms crouch "

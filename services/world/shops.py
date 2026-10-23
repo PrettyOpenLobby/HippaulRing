@@ -1,7 +1,7 @@
 """Shops: stock, pages, sell values."""
 import struct
 import fegamedata  # noqa: E402  -- dat.pak's spawn/NPC/item tables
-from . import character, itemrecords, wire
+from . import character, itemrecords, timedevents, wire
 
 def shop_type_for(args, name):
     """Which op-8 window type a shopkeeper opens, from --shop-types."""
@@ -141,6 +141,53 @@ def shop_stock(args, kind, cls=None):
                 out.append((no, 0, rings))
         elif gold > 0 and rings == 0:
             out.append((no, gold, 0))
+    if kind == "ring":
+        # a running Dragon feast sells its own item for Rings (SE's capital NPC,
+        # which is not built), whatever the item's slot type
+        have = {r[0] for r in out}
+        try:
+            held = {r[1] for r in itemrecords.item_rows(args)}
+        except Exception:                              # noqa: BLE001 -- no bag: list it
+            held = set()
+        for no in feast_items(args):
+            # one to a player holding none: a holder is not offered another
+            # (the client's only refusal text is "System error / Bad item ID")
+            if no not in have and no not in held:
+                out.append((no, 0, FEAST_RING_PRICE))
+    return shop_sale(args, out)
+
+
+#: Rings a feast item costs (OURS, the operator's call 2026-10-23): ONE, what every
+#: character starts with, since Rings otherwise come only from wars and a quiet
+#: server has none to spend -- the Ruby's own table price is 5
+FEAST_RING_PRICE = 1
+
+
+def feast_items(args, now=None):
+    """The items a running Dragon feast names (timedevents), sorted; [] when
+    none is running or it names none. SE's NPC gave one only to a player
+    holding none, so a purchase of one is held to that (readloop's 0x204B)."""
+    feast = timedevents.dragon_feast(args, now)
+    return sorted(feast["items"]) if feast is not None and feast["items"] else []
+
+
+def shop_sale(args, stock, now=None):
+    """`stock` at a running shop_sale event's prices (timedevents: SE's 2006
+    sale in every shop, the Ring Shop included). The list (0x107B) and the
+    charge (0x204B) both read the stock, so the price shown is the price
+    paid; a price never drops below 1. Sell-back (item_sell_value) stays on
+    the item table's price."""
+    out, n = [], 0
+    for no, gold, rings in stock:
+        f, on = timedevents.multiplier(args, "shop_sale", now, item=no)
+        if on and f != 1.0:
+            gold = max(1, int(gold * f + 1e-9)) if gold > 0 else 0
+            rings = max(1, int(rings * f + 1e-9)) if rings > 0 else 0
+            n += 1
+            tag, applied = timedevents.tags(on), f
+        out.append((no, gold, rings))
+    if n:
+        print("[feworld]    %s: %d shop price(s) x%g" % (tag, n, applied), flush=True)
     return out
 
 

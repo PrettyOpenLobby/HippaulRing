@@ -1,0 +1,41 @@
+# fe-timed-events.tsv -- SE's 2006 TIMED EVENTS, served on a schedule (world/timedevents.py).
+# SE ran each of these ONCE, in 2006, as a patch-day switch with an end time (polnews,
+# the archived www.playonline.com/fe pages). Repeating them EVERY YEAR on the same dates
+# is OURS. The times are the ones SE's notices give, JST: an event began when that day's
+# version-up finished and ended at the time the notice names.
+#
+# One row per (event, effect); the rows of one event share its `event` id and show on
+# the admin Calendar as one entry. Columns are read by name, any order:
+# event    the event's id (lower case, no spaces)
+# name     its English name (OURS where SE gave none); name_jp = SE's own, kept as data
+# tag      the word the server log prints when the effect applies (blank = the name)
+# start, end  'MM-DD HH:MM' JST, every year; an end before the start wraps over New Year
+# effect   drop_rate   monster drop rates x value (fe-drops.tsv rows; items = only those)
+#          kill_exp    monster kill EXP x value
+#          war_exp     war result EXP x value (the one-level-per-war cap still holds)
+#          dragon_feast  the Dragon summon for BOTH armies from the war's start, no
+#                      losing-side rule, value = per-army cap; items = the item it needs
+#                      (blank = feunit's --summon-items DRAGON=)
+#          shop_sale   every shop's buy prices x value (gold and Rings; items = only those)
+#          quest       a limited-time quest: NOT SERVED (it needs the event VM's quest
+#                      conversation, which is not built). Recorded so the history is here.
+# value    the multiplier, or the cap for dragon_feast
+# items    optional comma list of item numbers (see effect)
+# served   1 = the server applies it, 0 = recorded only (not on the Calendar either)
+# source   SE's notice; note = free text
+# news     what players read in the news and on Discord (the event's first row
+#          that has one); blank = the Calendar's own description
+# announce 0 = served but kept out of the news (an event not yet seen working on
+#          a console); blank or 1 = announced
+#
+# A row with a bad time, an unknown effect or a bad number is refused and logged.
+# --timed-events off turns the whole table off; a path names another file.
+event	name	name_jp	tag	start	end	effect	value	items	served	source	note	news	announce
+drop-boost	Item Drop Boost	期間限定 特定アイテムの出現率上昇	DROP BOOST	06-15 15:45	06-22 14:00	drop_rate	2		1	polnews 7785 / 7791 (2006-06-15)	SE raised the drop rate of 'certain items' and named neither the items nor the factor. OURS: every drop row, x2	Monsters drop items twice as often.
+shop-sale	Shop Sale	期間限定 ショップ値下げ	SHOP SALE	09-21 15:15	10-05 16:00	shop_sale	0.8		1	polnews 8578 (2006-09-21) / 8680 (2006-10-05)	SE lowered prices in every shop, the Ring Shop and the Official Shop included, and gave no figure. OURS: 20% off. Sell-back values stay on the item table's price	Everything in the shops is 20% off, gold and Ring prices alike.
+alchemy-quest	More Alchemy Experiments	もっと錬金術の実験		09-21 15:15	10-05 16:00	quest	0		0	polnews 8578 / 8680	NOT SERVED: a limited-time quest needs the event VM's quest conversation
+double-up	Fantasy Earth Double Up Campaign	ファンタジーアース・ダブルアップキャンペーン	DOUBLE UP	10-05 16:00	10-19 14:00	kill_exp	2		1	polnews 8680 (2006-10-05)	2x EXP for monster kills	Double experience from monsters and from wars, and monsters drop items twice as often.
+double-up	Fantasy Earth Double Up Campaign	ファンタジーアース・ダブルアップキャンペーン	DOUBLE UP	10-05 16:00	10-19 14:00	war_exp	2		1	polnews 8680 (2006-10-05)	2x EXP at the end of a war
+double-up	Fantasy Earth Double Up Campaign	ファンタジーアース・ダブルアップキャンペーン	DOUBLE UP	10-05 16:00	10-19 14:00	drop_rate	2		1	polnews 8680 (2006-10-05)	2x item drop rate from monster kills
+alchemy-quest-2	Yet More Alchemy Experiments	またまた錬金術の実験		10-05 16:00	10-19 15:30	quest	0		0	polnews 8680 / 8816	NOT SERVED: a limited-time quest needs the event VM's quest conversation
+dragon-feast	Alchemy Success!? The War Dragons' Feast	錬金成功！？戦竜の饗宴	DRAGON FEAST	10-19 15:30	10-26 14:00	dragon_feast	5	45	1	polnews 8785 / 8816 / 8887 (2006-10-19)	The Dragon for both armies from the war's start whatever the war situation, an item needed, 5 per army. SE's item came from an NPC in each capital for Rings, only to a player holding none; that NPC is not built and SE's item does not ship in this client. OURS: item 45, the unused Ruby gem, sold in the Ring Shop while the feast runs, one to a player holding none	Either army can summon the Dragon from the start of any war, whoever is winning, with up to five on the field at once. Buy a Ruby at your Ring Shop for one Ring and carry it into a war: if you fall, you may rise as the Dragon.	1

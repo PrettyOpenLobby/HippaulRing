@@ -87,9 +87,14 @@ def main():
             os.remove(p)
     args = _args(campaign_file=cf, territory_file=tf)
     sent = []
+    bodies = []                                # (msg id, unit, payload)
     saved = (feworld.send, feworld.nation_of)
-    feworld.send = (lambda conn, outbound, body, mode, be, echo=True, prefix=4:
-                    sent.append(struct.unpack_from(">IH", body, 0)[1]))
+
+    def _capture(conn, outbound, body, mode, be, echo=True, prefix=4):
+        unit, mid = struct.unpack_from(">IH", body, 0)
+        sent.append(mid)
+        bodies.append((mid, unit, body[6:]))
+    feworld.send = _capture
     feworld.nation_of = lambda a: 3            # the player fights for nation 3
     ctx = feworld.Ctx(None, None, "ecb", False, args)
 
@@ -99,6 +104,22 @@ def main():
 
     def ids():
         return list(sent)
+
+    def building_sides():
+        """obj -> the +0x94 byte of every type-1 0x1006 captured (the record's
+        read order: [u16 n][u32 obj][u8 kind][u16 type][u16 model][u32]
+        [u8 side])."""
+        out = {}
+        for mid, _u, p in bodies:
+            if mid == 0x1006 and len(p) > 15 and p[6] == 1:
+                out[struct.unpack_from(">I", p, 2)[0]] = p[15]
+        return out
+
+    def army_pushes():
+        """the [u32 mask=2][u8 side] 0x2004s captured, as side bytes"""
+        return [p[4] for mid, _u, p in bodies
+                if mid == 0x2004 and len(p) == 5
+                and struct.unpack_from(">I", p, 0)[0] == 2]
 
     try:
         feworld.territory_load(args)
@@ -270,10 +291,32 @@ def main():
               sent.count(0x1006) == 0 and not S.get("keeps"),
               "%r %r" % (ids(), S.get("keeps")))
         S["field_ready"] = True                   # first clock sample landed
+        del bodies[:]
         fecampaign.pump(ctx)
         check("...then both go out as type-1 buildings once the field is ready",
               sent.count(0x1006) == 2 and set(S.get("keeps", {})) == {2900, 2901},
               "%r %r" % (ids(), S.get("keeps")))
+        # 2026-10-23: +0x94 is the WAR SIDE the client compares with the
+        # player's own byte (Summ filter 0x05153652, friend/foe 0x050e0396);
+        # it carried the NATION (keep 1, castle 3 live on 10-23)
+        check("the castle carries side 1 (defence) and the keep side 0 "
+              "(attack), not their nations",
+              building_sides() == {2900: 1, 2901: 0}, repr(building_sides()))
+        check("...while the registry still knows each base's nation",
+              S["keeps"][2900]["nation"] == 3
+              and S["keeps"][2901]["nation"] == row["atk"], repr(S["keeps"]))
+        check("this defender's own war side is 1 (nation 3 holds 17)",
+              feworld.player_war_side(args) == 1)
+        S["war_army"] = 0                         # what the self record left
+        del bodies[:]
+        fecampaign.on_decide_country(ctx, struct.pack(">HI", 0x2018, 0))
+        check("...and the sign-up (0x1020) carries it to the unit at once: "
+              "0x2004 [mask 2][side 1]",
+              0x1020 in sent and army_pushes() == [1] and S["war_army"] == 1,
+              "%r %r" % (ids(), army_pushes()))
+        del bodies[:]
+        fecampaign.pump(ctx)
+        check("...not again while it holds", army_pushes() == [], repr(army_pushes()))
         check("the castle stands on SE's own grid for the map",
               feworld.keep_grids(17)["def"] == tuple(fegamedata.castle(fegamedata.areas()[17]["hmap"])))
         del sent[:]
@@ -398,6 +441,9 @@ def main():
               0x1004 not in sent and 0x1006 not in sent
               and set(S.get("keeps") or {}) == {2900},
               "%r %r" % (ids(), S.get("keeps")))
+        check("...and back at peace the player's side byte returns to 0",
+              army_pushes()[-1:] == [0] and S["war_army"] == 0,
+              repr(army_pushes()))
         real_owner = feworld.territory_owner
         feworld.territory_owner = (lambda a, ar=None:
                                    1 if int(a) == 17 else real_owner(a, ar))
@@ -427,12 +473,15 @@ def main():
         withheld = not S.get("keeps")
         S["field_ready"] = True
         del sent[:]
+        del bodies[:]
         fecampaign.pump(ctx)
         check("a fresh session entering a PEACE field is served the castle "
               "(only), once the field is ready",
               withheld and sent.count(0x1006) == 1
               and set(S.get("keeps") or {}) == {2900},
               "%r %r %r" % (withheld, ids(), S.get("keeps")))
+        check("...as side 1 (defence) at peace too: the castle is the holder's",
+              building_sides() == {2900: 1}, repr(building_sides()))
         with fecampaign._LOCK:
             fecampaign._STATE[17] = {"phase": fecampaign.WAR, "until": 0, "atk": 1,
                                      "signups": {}, "keeps": {"def": [2000, 3000], "atk": [3000, 3000]}}

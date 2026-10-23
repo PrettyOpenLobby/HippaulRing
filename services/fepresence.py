@@ -166,7 +166,10 @@ TELEPORT_UNITS = 30.0
 #: bits of the identity sub-record this module knows how to pack (feworld's
 #: _AVATAR_SUB). A submask bit outside it would promise a field that is never
 #: written and desynchronise the record, so it is masked off.
-_DEFAULT_SUBMASK = 0x2FF
+#: 0x100 (+0x94, the WAR SIDE) since 2026-10-23: every client compares a
+#: peer's byte with its own to tell friend from foe (0x050e0396), so peers
+#: must carry the same value their owner's own unit holds (build_card).
+_DEFAULT_SUBMASK = 0x3FF
 
 _ONCE = set()
 _ONCE_LOCK = threading.Lock()
@@ -229,8 +232,9 @@ def add_args(ap):
     ap.add_argument("--presence-submask", type=lambda v: int(v, 0),
                     default=_DEFAULT_SUBMASK,
                     help="identity sub-record mask for a peer's 0x1006. "
-                         "Default 0x2FF = name, sex, looks, form, nation "
-                         "(Bob's live 0xFF + 0x200). 0x8000 (profile comment "
+                         "Default 0x3FF = name, sex, looks, form, war side "
+                         "(+0x94, 0 attack / 1 defence), nation "
+                         "(Bob's live 0xFF + 0x100 + 0x200). 0x8000 (profile comment "
                          "into +0x3D8) is left out on purpose -- unread on the "
                          "avatar class.")
     ap.add_argument("--presence-speed", default="auto", choices=("auto", "client"),
@@ -515,6 +519,8 @@ def on_telemetry(ctx, inner):
             s["pres_mv_a"] = struct.unpack_from(">I", f, fw._MV_A)[0]
             s["pres_mv_b"] = _clock(f)
             s["pres_mv_arr"] = now
+        elif act in CAST_CLOCK_ACTIONS and len(f) >= 8:
+            note_cast_clock(s, struct.unpack_from(">I", f, 4)[0], now)
         if _relay_mode(ctx.args) != "raw":
             return False
         key = _key(s)
@@ -543,6 +549,9 @@ def relay_inner(ctx, inner):
     """Any inner message from THIS session, forwarded verbatim to the peers in
     its field under its charid (--presence-relay raw). Used for the cast
     record (0x1031/0x1032, via feprog.on_cast); 0x2023 has its own shadow."""
+    if inner and len(inner) >= 6 and struct.unpack_from(">H", inner, 0)[0] in (
+            0x1031, 0x1032):
+        note_cast_clock(fw._SESSION, struct.unpack_from(">I", inner, 2)[0])
     if not _active(ctx.args) or _relay_mode(ctx.args) != "raw":
         return 0
     if getattr(ctx.args, "presence_relay_casts", "on") != "on":
@@ -603,6 +612,53 @@ def rebase_clock(body, arr, s, mode="arrival", now=None):
     out = bytearray(body)
     struct.pack_into(">II", out, fw._MV_A, n >> 32, n & 0xFFFFFFFF)
     return bytes(out)
+
+
+#: KEY: MEASURED 2026-10-23 (prod log, 2026-09-29): the short 0x2023 forms
+#: action 14 (13 B) and 15 (14 B) lead with a u32 in the SAME clock as the
+#: client's own 0x1031/0x1032 `a` (479690 / 482412 ms, then a cast at 483596
+#: one second later), which is NOT the 28-byte record's A:B: that one carries
+#: the 0x1148 base, and even with the base taken off it runs ~30 s behind
+#: the cast clock (base landed 10:14:15, cast clock origin ~10:13:43)
+CAST_CLOCK_ACTIONS = (14, 15)
+
+
+def note_cast_clock(s, ms, now=None):
+    """Remember a sample of this client's CAST clock (the `a` of its own
+    0x1031/0x1032, or a short 0x2023's leading time) and when it arrived."""
+    s["pres_cc"] = (int(ms) & 0xFFFFFFFF,
+                    time.monotonic() if now is None else float(now))
+
+
+def cast_clock(s, now=None):
+    """(ms, source) -- this client's cast clock right now, best estimate.
+    'cast': from its own last sample (cast or short 0x2023), exact up to
+    network delay. 'connect': no sample yet, so its 28-byte clock with the
+    0x1148 base taken off (ms since its world connect), measured ~30 s short
+    of the cast clock. 'none': neither is known, 0 is returned."""
+    now = time.monotonic() if now is None else float(now)
+    cc = s.get("pres_cc")
+    if cc:
+        return (cc[0] + int(round((now - cc[1]) * 1000.0))) & 0xFFFFFFFF, "cast"
+    my_b, my_arr = s.get("pres_mv_b"), s.get("pres_mv_arr")
+    if my_b is not None and my_arr is not None:
+        mine = (int(s.get("pres_mv_a", 0) or 0) << 32) | int(my_b)
+        base = int(s.get("clock_base", 0) or 0) if mine >= (1 << 40) else 0
+        if mine < (1 << 40) or base:
+            n = mine - base + int(round((now - float(my_arr)) * 1000.0))
+            return max(0, n) & 0xFFFFFFFF, "connect"
+    return 0, "none"
+
+
+def condition_body(args, dead):
+    """The 0x2024 CONDITION record (maskA 0x100000) a client is sent about a
+    unit that died (bit 0x800000 set) or stood up (clear), on the
+    --unit-state base. One builder for a peer (push_peer_dead) and a war bot
+    (fewarbots)."""
+    base = getattr(args, "unit_state", None)
+    v = (base if base is not None else 0) & 0xFFFFFFFF
+    v = (v | 0x800000) if dead else (v & ~0x800000)
+    return struct.pack(">III", 0x100000, 0, v), v
 
 
 def on_move_relay(ctx, payload):
@@ -725,6 +781,11 @@ def build_card(args, key):
     ch = fw._self_char(args)
     if not ch:
         return None
+    # the WAR SIDE this player's own unit holds (+0x94, bit 0x100): built on
+    # the owner's thread, so the session read is theirs. pump re-builds the
+    # card when it moves, and the peers re-state them (see "army")
+    army = int(fw.player_war_side(args))
+    ch = dict(ch, army=army)
     want = int(getattr(args, "presence_submask", _DEFAULT_SUBMASK)) & 0xFFFFFFFF
     sub = want & _known_bits()
     if sub != want:
@@ -743,7 +804,7 @@ def build_card(args, key):
         cls = 0
     return {"key": key, "sub": sub, "ident": identity_bytes(ch, sub),
             "m3": m3, "worn": worn, "hp": hp, "cls": cls,
-            "name": str(ch.get("name", "") or ""),
+            "name": str(ch.get("name", "") or ""), "army": army,
             # the NATION, published for whoever needs to tell friend from
             # enemy without reaching into another thread's store (fepvp)
             "force": fw.nation_of(args)}
@@ -1037,6 +1098,11 @@ def on_distribution(ctx, inner):
                   "minimap: serving class code %s; only 1,4,5,6,7,8,9 reach an "
                   "arm at 0x050110cc, so anything else may not draw"
                   % card.get("cls", 0))
+        # the WAR BOTS of this field (fewarbots), the same row shape
+        import sys
+        bots = sys.modules.get("fewarbots")
+        if bots is not None:
+            rows += bots.map_dots(s, mine)
         if getattr(args, "presence_map_self", "off") == "on" and s.get("pres_mv"):
             rows.append(_dot(s.get("charid") or 0, _pos(s["pres_mv"]),
                              (s.get("pres_card") or {}).get("cls", 0), False))
@@ -1091,11 +1157,9 @@ def push_peer_dead(ctx, args, seen):
         if state.get(cid) == dead:
             continue
         state[cid] = dead
-        base = getattr(args, "unit_state", None)
-        v = (base if base is not None else 0) & 0xFFFFFFFF
-        v = (v | 0x800000) if dead else (v & ~0x800000)
+        body, v = condition_body(args, dead)
         fw.send(ctx.conn, ctx.outbound,
-                fw.inner_msg(0x2024, struct.pack(">III", 0x100000, 0, v), cid),
+                fw.inner_msg(0x2024, body, cid),
                 ctx.mode, ctx.be, args.seq_mode == "echo",
                 getattr(args, "world_prefix", 4))
         _log("-> 0x2024 CONDITION 0x%08X on peer %d (%s) -- UNPROVEN on a "
@@ -1191,6 +1255,13 @@ def pump(ctx, now=None):
         if s.get("pres_card") is None:
             _log("charid %s: no stored character -- the others will not see "
                  "this player" % (s.get("charid"),))
+    elif (s.get("pres_card") is not None
+          and s["pres_card"].get("army") != fw.player_war_side(args)):
+        # this player's war side moved (sign-up, the war's end): a new card,
+        # which the peers drawing them re-state below
+        s["pres_card"] = build_card(args, key)
+        _log("charid %s: war side is now %s -- card rebuilt"
+             % (s.get("charid"), (s.get("pres_card") or {}).get("army")))
     mine = s.get("pres_mv")
     if mine is None:
         return
@@ -1218,6 +1289,18 @@ def pump(ctx, now=None):
         # ticks BETWEEN them. This early-out (right for the raw relay, which
         # has nothing to say until a report lands) silently disabled pacing
         # altogether the first time it shipped.
+        if st is not None and st.get("army") != card.get("army"):
+            # the peer's WAR SIDE moved: 0x2004 [u32 mask=2][u8 side] at
+            # their avatar. Bit 1 (0x0503c740) stores the byte at +0x94 for
+            # object kinds 1, 2 (a served peer) and 0x7d0, and touches
+            # nothing else -- no form, no position, unlike a re-sent 0x1006
+            # (which would put a summoned peer back in HUM). So this
+            # client's friend/foe check reads their new side.
+            _send(ctx, 0x2004, struct.pack(">IB", 0x2,
+                                           int(card.get("army") or 0) & 0xFF), cid)
+            st["army"] = card.get("army")
+            _log("-> 0x2004 ARMY on peer %d: war side %s"
+                 % (cid, card.get("army")))
         if st is not None and n == st["n"] and not paced:
             continue
         if st is not None and _dist(pos, st["pos"]) > TELEPORT_UNITS:
@@ -1238,7 +1321,7 @@ def pump(ctx, now=None):
             # first real report becomes both ends of the segment, which
             # collapses it and jumps straight to the new position.
             seen[cid] = {"n": n, "pos": pos, "sent": None, "sent_pos": pos,
-                         "sent_t": now, "held": 0,
+                         "sent_t": now, "held": 0, "army": card.get("army"),
                          "p0": pos, "p1": pos, "t0": now, "t1": now}
             _log("-> 0x1006 MSG_ADD peer %d %r at (%.1f, %.1f, %.1f) to charid "
                  "%s in %s" % (cid, card["name"], pos[0], pos[1], pos[2],

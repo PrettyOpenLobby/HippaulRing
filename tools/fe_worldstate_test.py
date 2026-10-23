@@ -329,6 +329,75 @@ def run(db, fedb, festate, feworld, fecampaign, feforce, femap, feident, mods):
     ttl = kv.ttl(femap.BOARD_KEY)
     check("...under fe:map:board, expiring", femap.BOARD_KEY == "fe:map:board"
           and 0 < ttl <= femap.BOARD_TTL, repr(ttl))
+    check("...and beside it, the timed events for the news (fe:events), in a world "
+          "with no table none", kv.get_json(femap.EVENTS_KEY) is not None
+          and kv.get_json(femap.EVENTS_KEY)["events"] == [])
+    import calendar as _c
+    oct10 = _c.timegm((2026, 10, 10, 0, 0, 0))
+    femap.publish_events(types.SimpleNamespace(timed_events="table", summon_items=""), now=oct10)
+    evs = kv.get_json(femap.EVENTS_KEY)
+    titles = [e["title"] for e in evs["events"]]
+    feast_t = "Alchemy Success!? The War Dragons' Feast"
+    check("...with the shipped table, the Double Up and the Dragon feast (its Ruby named), "
+          "expiring",
+          evs["at"] == oct10 and "Fantasy Earth Double Up Campaign" in titles
+          and feast_t in titles
+          and 0 < kv.ttl(femap.EVENTS_KEY) <= femap.EVENTS_TTL, titles)
+    du = [e for e in evs["events"] if e["title"] == "Fantasy Earth Double Up Campaign"]
+    check("...each told in the table's own words for players, not the Calendar's",
+          du and du[0]["about"] == "Double experience from monsters and from wars, and "
+                                   "monsters drop items twice as often.", du)
+    from world import timedevents as _td
+    cal = _td.calendar(types.SimpleNamespace(timed_events="table", summon_items=""),
+                       oct10, oct10 + 30 * 86400)
+    feast = [e for e in cal if e["title"] == feast_t]
+    check("...and the admin Calendar shows it running, with no hold note",
+          feast and not feast[0]["about"].startswith(("Running, not announced", "Not running")),
+          feast)
+    # the same table with the feast announced and its item blanked: out of the news
+    # while no Dragon item is named anywhere, in it once one is
+    import tempfile
+    lines = []
+    for ln in open(_td.EVENTS_TSV, encoding="utf-8"):
+        if ln.startswith("dragon-feast\t"):
+            f = ln.rstrip("\n").split("\t")
+            f[8], f[13] = "", "1"
+            ln = "\t".join(f) + "\n"
+        lines.append(ln)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False, encoding="utf-8")
+    tmp.write("".join(lines))
+    tmp.close()
+    try:
+        femap.publish_events(types.SimpleNamespace(timed_events=tmp.name, summon_items=""),
+                             now=oct10)
+        check("...announced but with no Dragon item named, still out of the news",
+              feast_t not in [e["title"] for e in kv.get_json(femap.EVENTS_KEY)["events"]])
+        femap.publish_events(types.SimpleNamespace(timed_events=tmp.name,
+                                                   summon_items="DRAGON=123"), now=oct10)
+        check("...and in it once one is",
+              feast_t in [e["title"] for e in kv.get_json(femap.EVENTS_KEY)["events"]])
+    finally:
+        os.unlink(tmp.name)
+    # and with announce 0 it runs but stays out of the news, the Calendar saying so
+    lines = []
+    for ln in open(_td.EVENTS_TSV, encoding="utf-8"):
+        if ln.startswith("dragon-feast\t"):
+            f = ln.rstrip("\n").split("\t")
+            f[13] = "0"
+            ln = "\t".join(f) + "\n"
+        lines.append(ln)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False, encoding="utf-8")
+    tmp.write("".join(lines))
+    tmp.close()
+    try:
+        held = types.SimpleNamespace(timed_events=tmp.name, summon_items="")
+        femap.publish_events(held, now=oct10)
+        cal = [e for e in _td.calendar(held, oct10, oct10 + 30 * 86400) if e["title"] == feast_t]
+        check("...announce 0 keeps a running event out of the news, the Calendar saying why",
+              feast_t not in [e["title"] for e in kv.get_json(femap.EVENTS_KEY)["events"]]
+              and cal and cal[0]["about"].startswith("Running, not announced"), cal)
+    finally:
+        os.unlink(tmp.name)
     kv.reset()
 
 

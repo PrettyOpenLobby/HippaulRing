@@ -2078,7 +2078,13 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 # item_rows, not a bare unpack: a stacked row is FOUR long
                 # (see the Stack button) and `for u, _, _ in items` raised on it.
                 short = wallet.wallet_short(args, cost_g, cost_r)
-                if len(items) + count > inventory.bag_capacity(args):
+                if item in shops.feast_items(args) and (
+                        count != 1 or any(r[1] == item for r in items)):
+                    # SE's Dragon feast NPC: one, and only to a player holding none
+                    ok, code, why = (False, shops.BUY_NG_DEFAULT,
+                                     "the Dragon feast's item: one at a time, to a "
+                                     "player holding none")
+                elif len(items) + count > inventory.bag_capacity(args):
                     # the character's own grid (uPossessItemNum), <= 96 deep
                     ok, code, why = False, shops.BUY_NG_BAG_FULL, "bag full"
                 elif short:
@@ -2253,8 +2259,13 @@ def _serve_loop(conn, args, session, outbound, mode, be):
                 # Only for the HELD weapon (worn 0/1): the motion set depends on
                 # nothing else, and a 0x2098 into a pocket (worn 11/12) must
                 # not be followed by any 0x2004 (fe_ui_test part14, live 09-06).
+                # 2026-10-23: never while TRANSFORMED: 0x2004's motion pick
+                # (0x0506aa30) chooses a HUMAN weapon set by weapon type and
+                # never reads the form at [+0x3b4], so it would hang a human
+                # set on a summon's skeleton (the Dragon, first live 10-23)
                 if (wear and real_id == 0x2021
                         and getattr(args, "equip_reflect", "request") != "off"
+                        and not sess._SESSION.get("morph")
                         and equipment.worn_layout(equip, items).get(uid) in (0, 1)):
                     monsters.motion_refresh_push(conn, outbound, mode, be, args,
                                         equipment.stored_equip_rows(args),

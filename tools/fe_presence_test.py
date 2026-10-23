@@ -1065,6 +1065,66 @@ def hide():
         feworld.ext_sessions = real
 
 
+def war_side():
+    """+0x94 IS THE WAR SIDE (2026-10-23): a peer's card carries the side its
+    owner's unit holds (bit 0x100 of the identity sub-record), and when the
+    owner's side moves every client drawing them gets 0x2004 [u32 mask=2]
+    [u8 side] at their avatar, so both friend/foe checks agree."""
+    print("\nwar side: a peer carries +0x94 and follows its owner",
+          file=REPORT)
+    _stub_store()
+    sides = {}                                  # charid -> war side byte
+    real = feworld.__dict__.get("player_war_side")
+    feworld.player_war_side = lambda a: sides.get(
+        feworld._SESSION.get("charid"), 0)
+    a = _args(presence_submask=0x3FF)
+    b = _args(presence_submask=0x3FF)
+    out = _out()
+    feworld._SESSION["pres_seen"] = {}
+    feworld._SESSION["pres_at"] = None
+    w = _Worker()
+    w.start()
+    try:
+        enter(7, 23)
+        w.do(_stub_store)
+        w.do(lambda: enter(8, 23))
+        w.do(lambda: send_hb(b, hb(10, 11, (1000, 0), (5.0, 0.0, 5.0))))
+        w.do(lambda: pump(b))
+        out[:] = []
+        send_hb(a, hb(10, 11, (1000, 0), (0.0, 0.0, 0.0)))
+        pump(a)
+        adds = [decode_add(p) for m, u, p in out if m == 0x1006 and u == 8]
+        d = adds[0] if adds else {}
+        check("the default submask is 0x3FF: name, looks, form, WAR SIDE, nation",
+              fepresence._DEFAULT_SUBMASK == 0x3FF)
+        check("a peer's record carries +0x94 = its owner's war side (0 at peace)"
+              " and is consumed to the end",
+              d.get("sub") == 0x3FF and d.get("ident", {}).get("army") == 0
+              and d.get("done"), d)
+        sides[8] = 1                            # Bob signs up to defend
+        w.do(lambda: pump(b))
+        check("...Bob's own card follows his side", w.do(
+            lambda: feworld._SESSION["pres_card"]["army"]) == 1)
+        out[:] = []
+        pump(a)
+        arm = [(u, p) for m, u, p in out if m == 0x2004]
+        check("Lex is told with 0x2004 [mask 2][side 1] at Bob's avatar, no "
+              "re-add", arm == [(8, struct.pack(">IB", 2, 1))]
+              and not [m for m, _u, _p in out if m == 0x1006], out)
+        out[:] = []
+        pump(a)
+        check("...once", not [m for m, _u, _p in out if m == 0x2004], out)
+    finally:
+        if real is None:
+            feworld.__dict__.pop("player_war_side", None)
+        else:
+            feworld.player_war_side = real
+        w.do(feworld._chat_room_leave)
+        w.tasks.put(None)
+        feworld._chat_room_leave()
+        out[:] = []
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -1095,6 +1155,7 @@ if __name__ == "__main__":
         raw_relay(a)
         serve_loop(a)
         hide()
+        war_side()
     finally:
         if quiet:
             sys.stdout = _saved_out

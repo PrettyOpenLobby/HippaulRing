@@ -342,6 +342,17 @@ def add_entities(conn, outbound, mode, be, args):
         return
 
     sub = args.add_submask & 0xFFFFFFFF
+    # KEY: +0x94 IS THE PLAYER'S WAR SIDE (bit 0x100, 2026-10-23). The Summ
+    # filter keeps a building only when its +0x94 equals this one, and the
+    # friend/foe check compares the two, so the field must be served: 0 for
+    # the attackers, 1 for the defenders, 0 outside a war (the constructor's
+    # own value). buildings.player_war_side has the rule; army_sync keeps it
+    # current with 0x2004 and needs to know what the unit holds now.
+    from . import buildings
+    ch = dict(ch)
+    ch["army"] = buildings.player_war_side(args)
+    sess._SESSION["war_army"] = (int(ch["army"])
+                                 if args.add_mask1 & 0x1 and sub & 0x100 else 0)
     # WARNING: mask1 BIT 1 IS DERIVED FROM THE VALUES, NEVER SET BY HAND. The mask
     # promises how many i16 follow it, so a bit with no value behind it is not a
     # wrong number on screen -- it is a desynchronised record and every field

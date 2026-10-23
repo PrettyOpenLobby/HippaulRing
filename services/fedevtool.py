@@ -307,31 +307,93 @@ def start(port, bind, token, state_fn, edit_fn=None, page=None, name="fe-devtool
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>feworld panel</title>
+<title>World builder</title>
 <style>
+/* The admin panel's colours (openlobby admin_web): dark unless the system or
+   the panel's own theme switch asks for light. The page sits in the panel's
+   frame and copies that switch onto its own root (syncTheme below). */
 :root{
-  --bg:#0f1317;--panel:#161c23;--sunk:#0b0f13;--ink:#e5eaf1;--ink2:#98a4b4;
-  --ink3:#66727f;--rule:#232d38;--accent:#74a8ea;--warn:#d59450;--good:#59ab80;
-  --m:ui-monospace,"IBM Plex Mono",Consolas,monospace;
+  --bg:#0f1216;--panel:#161a20;--sunk:#1d222a;--ink:#e6e9ef;--ink2:#9aa3b2;
+  --ink3:#7d8696;--rule:#2a303b;--accent:#6ea6ff;--on-accent:#04121f;
+  --warn:#e5a63e;--good:#43c08f;--bad:#f2736b;--scheme:dark;
+  --m:ui-monospace,Consolas,monospace;
 }
 @media (prefers-color-scheme:light){
-  :root{--bg:#edeff3;--panel:#fafbfd;--sunk:#e3e7ee;--ink:#171b21;--ink2:#4b5563;
-        --ink3:#7b8798;--rule:#d5dae3;--accent:#2b5ea6;--warn:#96551a;--good:#256b4c;}
+  :root:not([data-theme="dark"]){--bg:#f4f5f8;--panel:#fff;--sunk:#eef0f4;--ink:#161a21;
+    --ink2:#566070;--ink3:#6b7483;--rule:#dde1e8;--accent:#1f5fd6;--on-accent:#fff;
+    --warn:#935800;--good:#0f7a54;--bad:#c13a32;--scheme:light}
 }
+:root[data-theme="light"]{--bg:#f4f5f8;--panel:#fff;--sunk:#eef0f4;--ink:#161a21;
+  --ink2:#566070;--ink3:#6b7483;--rule:#dde1e8;--accent:#1f5fd6;--on-accent:#fff;
+  --warn:#935800;--good:#0f7a54;--bad:#c13a32;--scheme:light}
+:root{color-scheme:var(--scheme)}
 *{box-sizing:border-box}
+/* a nation badge: the nation's own colour (the client's palette) on a shield */
+.nat{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:500;
+  color:var(--ink);border:1px solid var(--rule);border-radius:999px;padding:1px 9px 1px 6px;
+  background:var(--sunk);white-space:nowrap;vertical-align:middle;line-height:1.5}
+.nat svg{width:11px;height:13px;flex:none}
+h1 .nat{font-size:12.5px;margin-left:8px}
+.capbtns{display:flex;flex-wrap:wrap;gap:6px}
+.capbtns button{display:inline-flex;align-items:center;gap:7px;padding:5px 11px 5px 9px;
+  border-radius:8px;font-size:13px;text-align:left}
+.capbtns button svg{width:13px;height:15px;flex:none}
+.capbtns button small{display:block;font-size:11px;color:var(--ink2);line-height:1.2}
+.capbtns button span{line-height:1.2}
+.capbtns button.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,var(--panel))}
+.capbtns .you{font-size:10.5px;color:var(--good);font-weight:600;margin-left:2px}
+/* function colours: one swatch per kind of NPC, the same as on the map */
+.fdot{display:inline-block;width:10px;height:10px;flex:none;border:1.5px solid #000a;
+  transform:rotate(45deg);border-radius:2px;background:var(--c)}
+.fdot.ring{transform:none;border-radius:50%;background:none;border:2px solid var(--c);box-shadow:0 0 0 1px #0007,inset 0 0 0 1px #0007}
+.fnkey{display:flex;flex-wrap:wrap;gap:5px}
+.fnkey button{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;font-size:12px;
+  border-radius:999px}
+.fnkey button b{font-weight:600;color:var(--ink2);font-variant-numeric:tabular-nums}
+.fnkey button.off{opacity:.45;text-decoration:line-through}
+.people{display:grid;gap:6px}
+.people input{min-width:0;width:100%;font:inherit;font-size:13px;background:var(--sunk);
+  color:var(--ink);border:1px solid var(--rule);border-radius:6px;padding:5px 9px}
+.plist{display:grid;gap:2px}
+.pscroll{display:grid;gap:2px;max-height:470px;overflow:auto;padding-right:2px;align-content:start}
+.pscroll .grp{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);
+  margin:6px 0 1px;display:flex;justify-content:space-between}
+.keys{margin:0;font-size:12px;color:var(--ink3);line-height:1.9}
+.key i.ghostkey{border-radius:2px;transform:rotate(45deg);background:none;
+  border:1.5px dashed var(--ink2);width:9px;height:9px}
+.blk{border-top:1px solid var(--rule);padding-top:12px;margin-top:12px}
+.blk .hd h3{font-size:.92rem;margin:0;font-weight:600}
+.plist .nl{color:var(--ink3);font-style:italic}
+.plist button{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:8px;
+  align-items:center;text-align:left;padding:4px 8px;font-size:12.5px;border-radius:6px}
+.plist button .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plist button .fl{font-size:11.5px;color:var(--ink2);white-space:nowrap}
+.plist button.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--sunk))}
+.plist button.miss{border-style:dashed;background:none}
+.plist button.miss .fl{color:var(--warn)}
+.plist button.armed{border-color:var(--good);border-style:solid;
+  background:color-mix(in srgb,var(--good) 14%,var(--sunk))}
+.plist .grp{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);
+  margin:6px 0 1px;display:flex;justify-content:space-between}
+.armbar{font-size:12.5px;border:1px solid var(--good);border-radius:6px;padding:6px 9px;
+  display:flex;gap:8px;align-items:center;justify-content:space-between}
+.armbar button{padding:2px 9px;font-size:12px}
+kbd{font-family:var(--m);font-size:11px;border:1px solid var(--rule);border-bottom-width:2px;
+  border-radius:4px;padding:0 4px;background:var(--sunk)}
 /* A class that sets display beats the hidden ATTRIBUTE in a plain page -- the
    placer sat on screen permanently because .placer{display:grid} won. */
 [hidden]{display:none!important}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
-.wrap{max-width:1320px;margin:0 auto;padding:18px 14px 60px;display:grid;gap:14px}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 'Segoe UI',system-ui,sans-serif}
+.wrap{max-width:1320px;margin:0 auto;padding:18px 14px 60px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 /* text cards stay at a readable width; the map card is allowed to be wide */
 .wrap>*{width:100%;max-width:900px;justify-self:center}
 .wrap>#mapcard{max-width:none}
 h1{font-size:1.15rem;margin:0;font-weight:600;letter-spacing:-.01em}
 h1 small{color:var(--ink3);font-weight:400;font-family:var(--m);font-size:11px;
          letter-spacing:.12em;text-transform:uppercase;display:block;margin-bottom:4px}
-.card{background:var(--panel);border:1px solid var(--rule);border-radius:5px;padding:13px 15px}
-.hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:9px}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:12px;padding:14px 16px}
+.hd{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:4px 10px;margin-bottom:9px}
 .hd h2{font-size:.95rem;margin:0;font-weight:600}
 .hd .sub{font-family:var(--m);font-size:11.5px;color:var(--ink3)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;
@@ -341,20 +403,21 @@ h1 small{color:var(--ink3);font-weight:400;font-family:var(--m);font-size:11px;
 .grid dd{margin:1px 0 0;font-family:var(--m);font-size:13px}
 .row{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 button{font:inherit;font-size:13.5px;cursor:pointer;color:var(--ink);
-       background:var(--sunk);border:1px solid var(--rule);border-radius:4px;
+       background:var(--sunk);border:1px solid var(--rule);border-radius:6px;
        padding:6px 12px}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
 button:disabled{opacity:.4;cursor:not-allowed}
 button.go{border-color:var(--good);color:var(--good)}
 button.warn{border-color:var(--warn);color:var(--warn)}
 ul.miss{list-style:none;margin:9px 0 0;padding:0;display:grid;gap:5px;
         max-height:290px;overflow:auto}
-ul.miss li{display:flex;align-items:center;gap:9px;font-family:var(--m);font-size:12.5px}
+ul.miss li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;font-family:var(--m);font-size:12.5px}
 ul.miss li span{color:var(--ink2)}
 ul.miss button{padding:3px 10px;font-size:12px}
 .bar{height:5px;background:var(--sunk);border-radius:3px;overflow:hidden;margin-top:7px}
 .bar i{display:block;height:100%;background:var(--good)}
-.maprow{display:grid;grid-template-columns:1fr;gap:14px}
+.maprow{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 /* the map column is only as wide as the (height-capped) map, so the door
    list sits against it instead of across a dead gap */
 @media(min-width:1000px){.maprow{grid-template-columns:minmax(0,max(320px,calc(100vh - 150px))) 360px;justify-content:start}}
@@ -368,13 +431,14 @@ ul.miss button{padding:3px 10px;font-size:12px}
 .editmsg.ok{border-color:var(--good);color:var(--good)}
 .editmsg.bad{border-color:var(--warn);color:var(--warn)}
 .livebar{font-size:12px;color:var(--ink3);border-left:3px solid var(--rule);padding:2px 0 2px 9px}
-.tfbar{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink3)}
+.tfbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:12px;color:var(--ink3)}
 .tfbar:empty{display:none}
 .tfbar button{padding:3px 9px;font-size:12px}
 .npcdetail .says{font-size:12.5px;color:var(--ink2);border-left:3px solid var(--rule);
   padding:2px 0 2px 9px;font-style:italic}
 .livebar.live{border-left-color:var(--good);color:var(--ink2)}
-.npcdetail{border-color:#e6e6e6}
+.npcdetail{border-color:var(--accent)}
+.npcdetail .t{display:flex;align-items:center;gap:7px}
 .exitwrap{position:relative;border:1px solid var(--rule);border-radius:4px;overflow:hidden;
   background:var(--sunk);aspect-ratio:1/1;width:100%}
 .exitwrap canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;
@@ -383,7 +447,7 @@ ul.miss button{padding:3px 10px;font-size:12px}
 .npcdetail select{flex:1;min-width:0;font:inherit;font-size:12.5px;background:var(--sunk);
   color:var(--ink);border:1px solid var(--rule);border-radius:4px;padding:4px 6px}
 .halftabs button{padding:4px 11px;font-size:13px}
-.halftabs button.on{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.halftabs button.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .chips{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12.5px;color:var(--ink2)}
 .chips label{display:inline-flex;gap:5px;align-items:center;cursor:pointer;white-space:nowrap}
 /* as big as the column allows, but never taller than the screen: on a
@@ -406,7 +470,7 @@ ul.miss button{padding:3px 10px;font-size:12px}
 .side{display:grid;gap:10px;align-content:start;min-width:0}
 .side h3{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);
          margin:0;font-weight:600;display:flex;justify-content:space-between}
-.doorlist{display:grid;gap:3px;max-height:330px;overflow:auto;padding-right:2px}
+.doorlist{display:grid;gap:3px}
 .doorlist button{display:grid;grid-template-columns:38px 44px minmax(0,1fr) auto;
   gap:8px;align-items:center;text-align:left;padding:5px 8px;font-size:12.5px}
 .doorlist button.on{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,var(--sunk))}
@@ -448,21 +512,16 @@ input:not([type]),input[type=text]{font:inherit;font-family:var(--m);font-size:1
       background:var(--sunk);color:var(--ink);border:1px solid var(--rule);
       border-radius:4px;padding:6px 9px;flex:1;min-width:180px}
 input[type=checkbox]{margin:0;accent-color:var(--accent)}
+select{font:inherit;font-size:13px;background:var(--sunk);color:var(--ink);
+  border:1px solid var(--rule);border-radius:6px;padding:5px 7px;max-width:100%}
 /* not in world: fade the cards that need a live session -- NOT the map
    editor, which works with nobody logged in */
-.dead .wrap>.card:not(#mapcard){opacity:.45}
+.dead #ingame .blk{opacity:.45}
 </style></head><body><div class="wrap">
-<h1><small>feworld · world building</small><span id="title">connecting…</span></h1>
-
-<div class="card" id="where">
-  <div class="hd"><h2>Where you are</h2><span class="sub" id="conn"> - </span></div>
-  <div class="grid" id="pos"></div>
-  <div class="warnbox" id="nopos" hidden>No position since you changed area - take one step in game and this fills in. Placing at a stale position puts
-  things where you used to be.</div>
-</div>
+<h1><small>Fantasy Earth · world builder</small><span id="maptitle">connecting…</span><span id="mapnat"></span></h1>
 
 <div class="card" id="mapcard" hidden>
-  <div class="hd"><h2>The minimap</h2><span class="sub" id="mapsub"> - </span></div>
+  <div class="hd"><h2>Capital map</h2><span class="sub" id="mapsub"> - </span></div>
   <div class="warnbox" id="mapnone" hidden>The map is drawn for the area a
   client is standing in, and nothing is connected. Log in and walk into a
   capital and it appears here. The same goes for every button on this page:
@@ -471,20 +530,22 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
   <div class="maprow" id="maprow">
     <div class="mapcol">
       <div class="toolbar">
-        <label class="capsel">capital
-          <select id="capsel" aria-label="which capital to edit"></select></label>
+        <div class="capbtns" id="capbtns" role="group" aria-label="Capital"></div>
+        <select id="capsel" aria-label="Capital" hidden></select>
         <div class="halftabs" id="halftabs"></div>
         <div class="chips">
-          <label><input type="checkbox" id="shIcons" checked> shops</label>
+          <label><input type="checkbox" id="shIcons" checked> Shop icons</label>
           <label><input type="checkbox" id="shNpcs" checked> NPCs</label>
-          <label><input type="checkbox" id="shGates" checked> doors</label>
-          <label><input type="checkbox" id="shArr"> landings into this half</label>
-          <label><input type="checkbox" id="shFloor" checked> floor</label>
-          <label><input type="checkbox" id="shYou" checked> you</label>
-          <label><input type="checkbox" id="shBoth"> other half's shops</label>
-          <label><input type="checkbox" id="calMode"> align this map</label>
+          <label><input type="checkbox" id="shGhost" checked> Missing shop spots</label>
+          <label><input type="checkbox" id="shGates" checked> Doors</label>
+          <label><input type="checkbox" id="shArr"> Landings into this half</label>
+          <label><input type="checkbox" id="shFloor" checked> Floor</label>
+          <label><input type="checkbox" id="shYou" checked> You</label>
+          <label><input type="checkbox" id="shBoth"> Other half's shop icons</label>
+          <label><input type="checkbox" id="calMode"> Align this map</label>
         </div>
       </div>
+      <div class="fnkey" id="fnkey" aria-label="NPC kinds: click one to hide or show it"></div>
       <div class="mapwrap">
         <img id="mapimg" alt="capital minimap">
         <canvas id="mapcv" width="1024" height="1024"></canvas>
@@ -496,23 +557,28 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
           <button id="zout" aria-label="zoom out">&minus;</button>
           <button id="zfit">Fit</button><span class="lvl" id="zlvl">1&times;</span>
         </span>
+        <button id="undobtn" disabled title="Nothing to undo">Undo</button>
         <div class="readout" id="mapread" style="flex:1;min-width:220px"> - </div>
+        <span class="key">Shop icons by class:</span>
         <span class="key"><i style="background:#e8563a"></i>Warrior</span>
         <span class="key"><i style="background:#4ed446"></i>Scout</span>
         <span class="key"><i style="background:#76ccfc"></i>Sorcerer</span>
-        <span class="key"><i style="background:#fde604"></i>door</span>
-        <span class="key"><i style="background:#ff9500"></i>selected</span>
-        <span class="key"><i style="background:#ffffff"></i>placed NPC</span>
+        <span class="key"><i style="background:#fde604"></i>Door</span>
+        <span class="key"><i style="background:none;border:2px solid #ff3b30"></i>You</span>
+        <span class="key"><i class="ghostkey"></i>Missing shop spot</span>
       </div>
+      <p class="keys" id="keys">Keys: <kbd>1</kbd>-<kbd>5</kbd> capital ·
+      <kbd>H</kbd> other half · <kbd>/</kbd> find · <kbd>Esc</kbd> clear ·
+      <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · arrows move the selected NPC
+      (<kbd>Shift</kbd> further) · <kbd>Q</kbd> / <kbd>E</kbd> turn it ·
+      wheel zooms</p>
     </div>
     <div class="side">
+      <div class="armbar" id="armbar" hidden></div>
       <div class="calbox" id="calbox" hidden></div>
-      <div id="doorsbox">
-        <h3><span>Doors in this half</span><span id="doorcount"></span></h3>
-        <div class="doorlist" id="doorlist"></div>
-      </div>
       <div class="livebar" id="livebar"></div>
       <div class="tfbar" id="tfbar"></div>
+      <div class="tfbar" id="shopbar"></div>
       <div class="doordetail" id="doordetail" hidden></div>
       <div class="doordetail npcdetail" id="npcdetail" hidden></div>
       <div class="placer" id="placer" hidden>
@@ -528,22 +594,45 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
         <button id="spawnhere">set spawn here</button>
         <button id="placecancel" class="warn">cancel</button>
       </div>
-      <p class="why" style="margin:0;font-size:12px;color:var(--ink3)">No need to
-      be in game: pick a capital, then click a door or an NPC to select it, or
-      empty floor to place a shop there. Shape is what a shop sells (sword,
-      shield, ring); colour is the class.</p>
+      <div class="people" id="peoplebox">
+        <h3><span>In this half</span><span id="pcount"></span></h3>
+        <input type="search" id="psearch" placeholder="Find a name, kind or door ( / )"
+               aria-label="Find an NPC by name or kind, or a door" autocomplete="off">
+        <div class="pscroll" id="pscroll">
+          <div class="plist" id="plist"></div>
+          <div class="grp" id="doorsbox"><span>Doors</span><span id="doorcount"></span></div>
+          <div class="doorlist" id="doorlist"></div>
+        </div>
+      </div>
+      <p class="why" style="margin:0;font-size:12px;color:var(--ink3)">You do not
+      need to be in game. Click an NPC or a door to select it, or empty floor to
+      place someone there. A faint diamond is a missing shopkeeper's painted
+      spot: click it to place them there.</p>
     </div>
   </div>
 </div>
 
-<div class="card" id="checklist">
-  <div class="hd"><h2>What this area is missing</h2><span class="sub" id="progress"> - </span></div>
+<section class="card" id="ingame">
+  <div class="hd"><h2>In game</h2><span class="sub">these act where your character stands</span></div>
+  <p class="why" style="margin:0 0 4px;font-size:12.5px;color:var(--ink3)">Everything
+  here runs through your own connection: log in and walk into the area first.
+  Edits show after you re-enter the area; the client reads them on entry only.</p>
+
+<div class="blk" id="where">
+  <div class="hd"><h3>Where you are: <span id="title">connecting…</span><span id="wherenat"></span></h3><span class="sub" id="conn"> - </span></div>
+  <div class="grid" id="pos"></div>
+  <div class="warnbox" id="nopos" hidden>No position since you changed area - take one step in game and this fills in. Placing at a stale position puts
+  things where you used to be.</div>
+</div>
+
+<div class="blk" id="checklist">
+  <div class="hd"><h3>What this area is missing</h3><span class="sub" id="progress"> - </span></div>
   <div class="bar"><i id="barfill" style="width:0%"></i></div>
   <ul class="miss" id="miss"></ul>
 </div>
 
-<div class="card">
-  <div class="hd"><h2>Spawn points</h2><span class="sub" id="spawnsub"> - </span></div>
+<div class="blk">
+  <div class="hd"><h3>Spawn points</h3><span class="sub" id="spawnsub"> - </span></div>
   <div class="row">
     <button data-cmd="!spawn" class="go">Set plain spawn here</button>
     <button data-cmd="!spawn atk" class="go">Set attacker spawn</button>
@@ -552,8 +641,8 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
   </div>
 </div>
 
-<div class="card">
-  <div class="hd"><h2>Doors</h2><span class="sub" id="doorsub"> - </span></div>
+<div class="blk">
+  <div class="hd"><h3>Link a door</h3><span class="sub" id="doorsub"> - </span></div>
   <div class="row">
     <select id="linkdest"><option value="">where should it go?</option></select>
     <button id="linkgo">Link this door → there</button>
@@ -562,8 +651,8 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
   </div>
 </div>
 
-<div class="card">
-  <div class="hd"><h2>The nearest NPC</h2><span class="sub" id="npcsub">walk up to one</span></div>
+<div class="blk">
+  <div class="hd"><h3>The nearest NPC</h3><span class="sub" id="npcsub">walk up to one</span></div>
   <div class="row">
     <button data-cmd="!face 0">face N</button>
     <button data-cmd="!face 90">face E</button>
@@ -580,26 +669,83 @@ input[type=checkbox]{margin:0;accent-color:var(--accent)}
     <button data-cmd="!nudge 1:0">nudge +X</button>
     <button data-cmd="!nudge -1:0">nudge −X</button>
   </div>
-  <p style="margin:8px 0 0;font-size:13px;color:var(--ink3)">Edits show after you
-  re-enter the area - the client reads these on entry only.</p>
 </div>
 
-<div class="card">
-  <div class="hd"><h2>Anything else</h2><span class="sub">runs exactly as if typed</span></div>
+<div class="blk">
+  <div class="hd"><h3>Any command</h3><span class="sub">runs exactly as if typed</span></div>
   <div class="row">
     <input id="raw" placeholder="!expect  ·  !town list  ·  !goto 92  ·  @hello">
     <button id="rawgo">Run</button>
   </div>
 </div>
 
-<div class="card">
-  <div class="hd"><h2>Server log</h2><span class="sub" id="pending"></span></div>
+<div class="blk">
+  <div class="hd"><h3>Server log</h3><span class="sub" id="pending"></span></div>
   <pre id="log">…</pre>
 </div>
+</section>
 </div>
 <script>
 const T = new URLSearchParams(location.search).get('t') || '';
 const q = s => document.querySelector(s);
+// THE PANEL'S THEME SWITCH. Inside the admin panel this page is a same-origin
+// frame, and the panel's light / dark / system choice is a data-theme on ITS
+// root, which a media query here cannot see. Copy it, and follow changes.
+// ?theme=light|dark does the same for a page opened on its own.
+function syncTheme(){
+  let t = new URLSearchParams(location.search).get('theme') || '';
+  try{ if(window.parent !== window) t = parent.document.documentElement.dataset.theme || ''; }catch(e){}
+  if(t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+syncTheme();
+try{ if(window.parent !== window) new MutationObserver(syncTheme).observe(
+  parent.document.documentElement, {attributes: true, attributeFilter: ['data-theme']}); }catch(e){}
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// A nation, as the game colours it: the server sends the client's own
+// palette colour and the name it serves the client (world/devtool.py
+// capital_nation). Drawn as a shield, like a capital on the war map.
+function shield(col){
+  return `<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M1 1h10v7.2L6 13 1 8.2z" fill="${esc(col || '#888')}" stroke="rgba(0,0,0,.55)" stroke-width="1.2"/></svg>`;
+}
+function natBadge(n){
+  return n ? `<span class="nat" title="Capital of ${esc(n.name)}">${shield(n.color)}${esc(n.name)}</span>` : '';
+}
+// What an NPC is FOR (world/devtool.py npc_function), as a colour. Function
+// NPCs are drawn as filled diamonds; townsfolk and unknown rows as rings, so
+// the people who DO something stand out from the crowd at a glance.
+const FNCOL = {shop:'#ff5fa2', bank:'#b388ff', inn:'#ff9f43', warp:'#00e5c0',
+               manager:'#4d8dff', trainer:'#2fd47a', prize:'#ffd84d', quest:'#ff4d4d',
+               weapon:'#d2a86e', guide:'#f2f2f2', guard:'#8fa0b8', townsfolk:'#ffffff',
+               unknown:'#ff3df2'};
+const RINGFN = new Set(['townsfolk', 'unknown']);
+let FNS = [];          // [{key, label}] from the server, in legend order
+function fnLabel(k){ const f = FNS.find(o => o.key === k); return f ? f.label : (k || 'Unknown'); }
+function fnDot(k){
+  return `<i class="fdot${RINGFN.has(k) ? ' ring' : ''}" style="--c:${FNCOL[k] || '#999'}" aria-hidden="true"></i>`;
+}
+const pretty = n => String(n || '').replace(/_/g, ' ');
+// Remembered per browser: which layers are on, which NPC kinds are hidden,
+// the half last shown per capital. Storage can be unavailable; the page
+// works without it.
+let PREFS = {};
+try{ PREFS = JSON.parse(localStorage.getItem('fe-wb') || '{}') || {}; }catch(e){ PREFS = {}; }
+PREFS.layers = PREFS.layers || {}; PREFS.halfOf = PREFS.halfOf || {};
+let HIDEFN = new Set(PREFS.hide || []);
+function savePrefs(){
+  PREFS.hide = [...HIDEFN];
+  try{ localStorage.setItem('fe-wb', JSON.stringify(PREFS)); }catch(e){}
+}
+let ARMED = null;      // a missing role waiting for a click on the map
+let PICKNAME = null;   // the role a ghost click opened the placer for
+let PENDSEL = null;    // a name just placed: select it when it appears
+let PFILTER = '';      // the people search
+let UNDO = [];         // the server's undo list, newest first
+function undo(){
+  if(!UNDO.length) return;
+  ARMED = null; PICK = null; PICKNAME = null; q('#placer').hidden = true;
+  edit({op: 'undo'});
+}
 // Relative, so the page works both at / and behind the admin panel's
 // /games/<title>/ proxy (which adds the token itself).
 const qs = p => { p = p.replace(/^\//, ''); return T ? p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(T) : p; };
@@ -628,6 +774,7 @@ function facts(o){
 
 function render(s){
   q('#title').textContent = s.area ? `${s.area_name} · area ${s.area}` : 'not in a field';
+  setHTML(q('#wherenat'), s.nation ? natBadge(s.nation) : '');
   q('#conn').textContent = s.in_field ? 'in world' : 'not in world';
   document.body.classList.toggle('dead', !s.in_field);
   area = s.area;
@@ -645,9 +792,9 @@ function render(s){
     : (s.monsters ? `${s.monsters} monster points ship here` : 'nothing shipped for this area');
   q('#barfill').style.width = tot ? (100*have/tot).toFixed(0)+'%' : '0%';
   setHTML(q('#miss'), (s.missing||[]).map(m =>
-    `<li><button data-npc="${m.name}">place</button>
-       <span>${m.name}</span>
-       <span style="color:var(--ink3)">model ${m.model} · script ${m.script}</span></li>`).join('')
+    `<li><button data-npc="${esc(m.name)}" title="Places it where your character is standing">Place where I stand</button>
+       ${fnDot(m.fn)}<span>${esc(m.name)}</span>
+       <span style="color:var(--ink3)">${esc(fnLabel(m.fn))} · model ${m.model} · script ${m.script}</span></li>`).join('')
     || (tot ? '<li><span style="color:var(--good)">every role is placed</span></li>' : ''));
 
   q('#spawnsub').textContent = (s.spawns && s.spawns.length)
@@ -656,7 +803,7 @@ function render(s){
   const sel = q('#linkdest'); const keep = sel.value;
   setHTML(sel, '<option value="">where should it go?</option>' +
     (s.destinations||[]).map(d =>
-      `<option value="${d.area}">${d.name} · ${d.area}${d.capital?' (capital)':''} - ${d.why}</option>`).join(''));
+      `<option value="${d.area}">${esc(d.name)} · ${d.area}${d.capital ? ' (capital' + (d.nation ? ' of ' + esc(d.nation.name) : '') + ')' : ''} - ${esc(d.why)}</option>`).join(''));
   if(keep && [...sel.options].some(o=>o.value===keep)) sel.value = keep;
   q('#npcsub').textContent = s.roster_placed
     ? s.roster_placed + ' placed in this area' : 'none placed here yet';
@@ -665,6 +812,11 @@ function render(s){
     + (s.nearest_door != null ? ` · nearest is ${s.nearest_door.toFixed(0)}u away` : '')
     : 'no shipped doors in this area';
   q('#pending').textContent = s.pending ? s.pending + ' queued' : '';
+  UNDO = s.undo || [];
+  const ub = q('#undobtn');
+  ub.disabled = !UNDO.length;
+  ub.textContent = UNDO.length ? `Undo (${UNDO.length})` : 'Undo';
+  ub.title = UNDO.length ? `Undo: ${UNDO[0].label} (Ctrl+Z)` : 'Nothing to undo';
   const l = q('#log');
   const stuck = l.scrollTop + l.clientHeight >= l.scrollHeight - 20;
   l.textContent = (s.log||[]).join('\n');
@@ -739,6 +891,7 @@ function art(stem){
 // unavailable (private windows, blocked site data) -- the page works without.
 let FOCUS = null;
 try{ FOCUS = localStorage.getItem('fe-focus') || null; }catch(e){ FOCUS = null; }
+let WANTAREA = FOCUS && PREFS.halfOf[FOCUS] != null ? +PREFS.halfOf[FOCUS] : null;
 
 async function edit(op){
   // Applied on the server at once -- no game session, no queue. The reply is
@@ -811,13 +964,30 @@ function halfName(h){
 }
 function drawTownsfolk(h){
   const tf = h.townsfolk || [], left = tf.filter(t => !t.placed).length;
+  const silent = tf.filter(t => t.silent).length;
   setHTML(q('#tfbar'), !tf.length ? '' :
-    `<span>Townsfolk: ${tf.length - left} of ${tf.length} here</span>`
+    `<span>Townsfolk: ${tf.length - left} of ${tf.length} here`
+    + (silent ? `, ${silent} with no recorded lines (they only say "Good day.")` : '') + `</span>`
     + (left ? `<button data-edit='${JSON.stringify({op:"townsfolk", area: h.area})}'`
-             + ` data-confirm="Place ${left} townsfolk on their suggested spots in ${h.district || h.area}?">`
+             + ` data-confirm="Place ${left} townsfolk on their suggested spots in ${esc(h.district || h.area)}?">`
              + `Place the other ${left}</button>` : ''));
+  // the missing shopkeepers whose painted icon is in this half: one button
+  // puts them all on their icons (the same spots the faint diamonds show)
+  const gh = h.ghosts || [], can = gh.filter(g => g.y != null), no = gh.filter(g => g.y == null);
+  const where = esc(h.district || h.area);
+  setHTML(q('#shopbar'), !gh.length ? '' :
+    `<span>Shop icons: ${gh.length} shopkeeper${gh.length > 1 ? 's' : ''} not placed</span>`
+    + (can.length ? `<button id="shopsgo" data-edit='${JSON.stringify({op:"shops", area: h.area})}'`
+       + ` data-confirm="Place ${can.length} on their painted icons in ${where}?\n\n`
+       + can.map(g => esc(pretty(g.name))).join('\n')
+       + (no.length ? `\n\nSkipped, no floor near the icon: ${no.map(g => esc(pretty(g.name))).join(', ')}` : '')
+       + `\n\nRoles already placed are left alone. Undo takes them all back.">`
+       + `Place ${can.length} on their icons</button>` : ''));
 }
 function w2p(h, x, z){ const p = h.proj; return [x / p.ax + p.cx, z / p.az + p.cz]; }
+// a ghost's place on the art: its floor spot, or the icon itself when the
+// icon has no floor near it
+function ghostPix(h, gh){ return gh.y != null ? w2p(h, gh.x, gh.z) : [gh.px, gh.py]; }
 function p2w(h, px, py){ const p = h.proj; return [(px - p.cx) * p.ax, (py - p.cz) * p.az]; }
 function evPix(e){
   const r = q('#mapcv').getBoundingClientRect();
@@ -859,13 +1029,68 @@ function tag(g, text, X, Y, col){
 function drawPicker(s){
   const caps = s.capitals || [];
   setHTML(q('#capsel'), caps.map(c =>
-    `<option value="${c.area}">${c.name} · ${c.area}/${c.inner}${c.here ? ' · you are here' : ''}</option>`).join(''));
+    `<option value="${c.area}">${esc(c.name)}${c.nation ? ' (' + esc(c.nation.name) + ')' : ''}</option>`).join(''));
+  let on = null;
   if(s.focus != null){
     const hs = halves(s), want = String(hs.length ? hs[0].area : s.focus);
     // show the OUTER half's option for either half of a capital
-    const opt = caps.find(c => c.area === +want || c.inner === +want);
-    if(opt) q('#capsel').value = String(opt.area);
+    on = caps.find(c => c.area === +want || c.inner === +want) || null;
+    if(on) q('#capsel').value = String(on.area);
   }
+  // one button per capital, each wearing its nation: nobody has to remember
+  // which capital is whose
+  setHTML(q('#capbtns'), caps.map(c =>
+    `<button data-cap="${c.area}" class="${on && on.area === c.area ? 'on' : ''}"`
+    + ` aria-pressed="${on && on.area === c.area}" title="${esc(c.name)}, capital of ${esc(c.nation ? c.nation.name : '?')}">`
+    + `${shield(c.nation && c.nation.color)}<span>${esc(c.name)}${c.here ? '<span class="you"> · you</span>' : ''}`
+    + `<small>${esc(c.nation ? c.nation.name : '')}</small></span></button>`).join(''));
+  const h = cur();
+  q('#maptitle').textContent = h ? h.name : 'World builder';
+  setHTML(q('#mapnat'), h && h.nation ? natBadge(h.nation) : '');
+}
+function drawFnKey(h){
+  // the legend IS the filter: one chip per kind present in this half, with
+  // how many are placed; a click hides or shows that kind on the map
+  const n = {}, m = {};
+  for(const p of (h.npcs || [])) n[p.fn] = (n[p.fn] || 0) + 1;
+  for(const r of (h.missing || [])) m[r.fn] = (m[r.fn] || 0) + 1;
+  setHTML(q('#fnkey'), FNS.filter(f => n[f.key] || m[f.key]).map(f =>
+    `<button data-fn="${f.key}" class="${HIDEFN.has(f.key) ? 'off' : ''}" aria-pressed="${!HIDEFN.has(f.key)}"`
+    + ` title="${HIDEFN.has(f.key) ? 'Show' : 'Hide'} ${esc(f.label)} on the map${m[f.key] ? ' (' + m[f.key] + ' missing)' : ''}">`
+    + `${fnDot(f.key)}${esc(f.label)} <b>${n[f.key] || 0}${m[f.key] ? '/' + ((n[f.key] || 0) + m[f.key]) : ''}</b></button>`).join(''));
+}
+function drawPeople(h){
+  const f = PFILTER.trim().toLowerCase();
+  const match = (name, fn) => !f || pretty(name).toLowerCase().includes(f)
+    || String(name).toLowerCase().includes(f) || fnLabel(fn).toLowerCase().includes(f);
+  const miss = (h.missing || []).filter(r => match(r.name, r.fn));
+  const order = k => { const i = FNS.findIndex(o => o.key === k); return i < 0 ? 99 : i; };
+  const placed = (h.npcs || []).filter(p => match(p.name, p.fn)).slice()
+    .sort((a, b) => order(a.fn) - order(b.fn) || pretty(a.name).localeCompare(pretty(b.name)));
+  const all = h.npcs || [];
+  q('#pcount').textContent = `${all.length} placed` + ((h.missing || []).length ? ` · ${h.missing.length} roles missing` : '');
+  let html = '';
+  if(miss.length){
+    html += `<div class="grp"><span>Missing roles</span><span>pick one, then the map</span></div>`;
+    html += miss.map(r => `<button class="miss${ARMED === r.name ? ' armed' : ''}" data-arm="${esc(r.name)}"`
+      + ` title="Place ${esc(pretty(r.name))}: click here, then click the floor on the map">`
+      + `${fnDot(r.fn)}<span class="nm">${esc(pretty(r.name))}</span><span class="fl">${esc(fnLabel(r.fn))} · missing</span></button>`).join('');
+  }
+  if(placed.length){
+    html += `<div class="grp"><span>Placed</span><span></span></div>`;
+    html += placed.map(p => {
+      const [px, py] = w2p(h, p.x, p.z);
+      return `<button data-sel="${p.idx}" class="${p.idx === SELN ? 'on' : ''}">`
+        + `${fnDot(p.fn)}<span class="nm">${esc(pretty(p.name))}</span>`
+        + `<span class="fl">${p.home && !p.says ? '<span class="nl">no line</span> · ' : ''}`
+        + `${esc(fnLabel(p.fn))} · ${gridOf(px, py)}</span></button>`;
+    }).join('');
+  }
+  if(!html) html = `<p class="why" style="margin:0">${f ? 'Nobody here matches that.' : 'Nobody is placed in this half yet. Click empty floor on the map to place someone.'}</p>`;
+  setHTML(q('#plist'), html);
+  const ab = q('#armbar');
+  ab.hidden = !ARMED;
+  setHTML(ab, ARMED ? `<span>Click the floor on the map to place <b>${esc(pretty(ARMED))}</b>.</span><button data-disarm="1">Cancel</button>` : '');
 }
 function drawLive(h){
   const b = q('#livebar');
@@ -885,8 +1110,11 @@ function sortedGates(h){
     (a.grid || '').localeCompare(b.grid || '') || a.portal - b.portal);
 }
 function drawDoorList(s, h){
-  const gs = sortedGates(h);
+  const f = PFILTER.trim().toLowerCase().replace(/^#/, '');
+  const gs = sortedGates(h).filter(g => !f || 'door'.includes(f) || String(g.portal).includes(f)
+    || (g.dest_name || '').toLowerCase().includes(f) || (g.grid || '').toLowerCase() === f);
   q('#doorcount').textContent = gs.length ? gs.length : '';
+  q('#doorsbox').hidden = f && !gs.length;
   setHTML(q('#doorlist'), gs.length ? gs.map(g => {
     const came = h.live && s.arrived_via === g.portal;
     const went = !h.live && s.arrived_via != null && g.dest === s.arrived_via;
@@ -897,7 +1125,7 @@ function drawDoorList(s, h){
          : went ? '<span class="pill here">you came through</span>'
               : g.out_moved ? '<span class="pill moved">exit moved</span>' : '<span></span>')
       + `</button>`;
-  }).join('') : '<p class="why" style="margin:0">No shipped doors in this half.</p>');
+  }).join('') : (f ? '' : '<p class="why" style="margin:0">No shipped doors in this half.</p>'));
 }
 function drawDetail(s, h){
   // A door is an ENTRANCE here and an EXIT on the other half. The exit is
@@ -980,17 +1208,18 @@ function drawNpcDetail(s, h){
   const turn = (d) => `<button ${ed({op:'turn', yaw: ((n.yaw + d) % 360 + 360) % 360})}>${d > 0 ? '⟳' : '⟲'} ${Math.abs(d)}°</button>`;
   const face = (y, l) => `<button ${ed({op:'turn', yaw: y})}>${l}</button>`;
   setHTML(box,
-    `<div class="t">${n.name} · ${gridOf(px, py)}</div>`
-    + (n.says ? `<div class="says">“${n.says.replace(/</g, '&lt;')}”</div>` : '')
-    + `<dl>${n.home && n.home !== h.district ? `<dt>lives in</dt><dd>${n.home}</dd>` : ''}<dt>model</dt><dd>${n.model ?? '?'}${n.script ? ' · script ' + n.script : ''} · row ${n.idx}</dd>`
+    `<div class="t">${fnDot(n.fn)}<span>${esc(pretty(n.name))} · ${gridOf(px, py)}</span></div>`
+    + (n.says ? `<div class="says">“${esc(n.says)}”</div>` : '')
+    + `<dl><dt>kind</dt><dd>${esc(fnLabel(n.fn))}${n.fn_detail ? ' · ' + esc(n.fn_detail) : ''}</dd>`
+    + `${n.home && n.home !== h.district ? `<dt>lives in</dt><dd>${esc(n.home)}</dd>` : ''}<dt>model</dt><dd>${n.model ?? '?'}${n.script ? ' · script ' + n.script : ''} · row ${n.idx}</dd>`
     + `<dt>at</dt><dd>${n.x.toFixed(1)}, ${n.z.toFixed(1)} · floor ${n.y.toFixed(1)}</dd>`
     + `<dt>facing</dt><dd>${yaw.toFixed(0)}° · ${compass(yaw)}</dd></dl>`
     + `<div class="acts"><select id="npcrole" aria-label="change this NPC's type">`
-    + (h.roles || []).map(r => `<option value="${r}"${r === n.name ? ' selected' : ''}>${r}</option>`).join('')
+    + (h.roles || []).map(r => `<option value="${esc(r)}"${r === n.name ? ' selected' : ''}>${esc(pretty(r))}</option>`).join('')
     + `</select><button id="npcretype">Change type</button></div>`
     + `<div class="acts">${turn(-45)}${turn(-15)}${turn(15)}${turn(45)}</div>`
     + `<div class="acts">${face(0,'N')}${face(90,'E')}${face(180,'S')}${face(270,'W')}`
-    + `<button class="warn" ${ed({op:'remove'})} data-confirm="Remove ${n.name}? It goes back on the missing list.">Remove</button></div>`
+    + `<button class="warn" ${ed({op:'remove'})} data-confirm="Remove ${esc(pretty(n.name))}? It goes back on the missing list.">Remove</button></div>`
     + `<div class="why">Drag the NPC to move it; drag the orange handle to turn it. `
     + `Arrow keys nudge it (Shift = further), Q / E turn it. The mouse wheel zooms the map.</div>`);
 }
@@ -1026,6 +1255,11 @@ function drawMap(s){
   }
   q('#mapnone').hidden = true; q('#maprow').hidden = false; card.hidden = false;
   MAPST = s;
+  if(WANTAREA != null){
+    const wi = hs.findIndex(o => o.area === WANTAREA);
+    if(wi >= 0) HALF = wi;
+    WANTAREA = null;
+  }
   if(HALF >= hs.length) HALF = 0;
   // KEY: THE DOOR YOU JUST CAME OUT OF, selected for you -- once per arrival, so
   // it never fights a choice you made since.
@@ -1040,10 +1274,18 @@ function drawMap(s){
     if(ti >= 0){ HALF = ti; SELP = through; SELN = null; }
   }
   const h = hs[HALF];
+  if(s.functions) FNS = s.functions;
+  if(PENDSEL){
+    // the role just placed from the list: select the newest row with its name
+    const mine = (h.npcs || []).filter(n => n.name === PENDSEL);
+    if(mine.length){ SELN = mine[mine.length - 1].idx; SELP = null; PENDSEL = null; }
+  }
+  if(ARMED && !(h.missing || []).some(r => r.name === ARMED)
+     && !(h.roles || []).includes(ARMED)) ARMED = null;
   if(SELP !== null && !(h.gates || []).some(g => g.portal === SELP)) SELP = null;
   if(SELN !== null && !(h.npcs || []).some(n => n.idx === SELN)) SELN = null;
   drawPicker(s); drawTabs(s); drawLive(h); drawTownsfolk(h); drawDoorList(s, h); drawDetail(s, h);
-  drawNpcDetail(s, h); drawCalBox(h);
+  drawNpcDetail(s, h); drawCalBox(h); drawFnKey(h); drawPeople(h);
 
   const img = q('#mapimg');
   if(img.dataset.name !== h.minimap){ img.dataset.name = h.minimap; img.src = qs('/map/' + h.minimap + '.png'); }
@@ -1077,6 +1319,24 @@ function drawMap(s){
     drawShape(g, i.kind, ...T(i.px, i.py), CLASSCOL[i.colour] || '#bbb');
   }
   g.globalAlpha = 1;
+  // MISSING shopkeepers, faint, at their painted spot: a click places one
+  if(q('#shGhost').checked && !CAL) for(const gh of (h.ghosts || [])){
+    if(HIDEFN.has(gh.fn) || gh.name === PICKNAME) continue;
+    const [X, Y] = T(...ghostPix(h, gh)), r = 12;
+    g.beginPath(); g.moveTo(X, Y - r); g.lineTo(X + r, Y); g.lineTo(X, Y + r); g.lineTo(X - r, Y); g.closePath();
+    g.globalAlpha = 0.4; g.fillStyle = FNCOL[gh.fn] || '#bbb'; g.fill();
+    g.globalAlpha = 0.8; g.lineWidth = 5; g.strokeStyle = 'rgba(0,0,0,.8)'; g.stroke();
+    g.globalAlpha = 1; g.setLineDash([4, 3]); g.lineWidth = 2.5;
+    g.strokeStyle = gh.y == null ? '#ff3b30' : (FNCOL[gh.fn] || '#fff'); g.stroke(); g.setLineDash([]);
+    // a "+" in the middle: this one is not there yet
+    g.beginPath(); g.moveTo(X - 4, Y); g.lineTo(X + 4, Y); g.moveTo(X, Y - 4); g.lineTo(X, Y + 4);
+    g.lineWidth = 2; g.strokeStyle = '#fff'; g.stroke();
+  }
+  if(PICK && PICKNAME){
+    // the spot a ghost click chose, waiting for "place"
+    const [X, Y] = T(...w2p(h, PICK[0], PICK[1]));
+    g.beginPath(); g.arc(X, Y, 13, 0, 6.2832); g.lineWidth = 3; g.strokeStyle = SELCOL; g.stroke();
+  }
   // placed NPCs, thin, under the doors
   if(q('#shNpcs').checked) (h.npcs || []).forEach((n, k) => {
     const dragging = PRESS && PRESS.moved && PRESS.kind === 'npc' && PRESS.i === k;
@@ -1085,17 +1345,33 @@ function drawMap(s){
     const yaw = isSel && PRESS && PRESS.kind === 'rot' ? PRESS.yaw : n.yaw;
     // WARNING: 0 = +Z = NORTH = UP on this map. The line used to go DOWN for north
     // (Y + cos), so every NPC's facing was drawn mirrored north-to-south.
+    if(HIDEFN.has(n.fn) && !isSel) return;
     const [X, Y] = T(px, py), a = yaw * Math.PI / 180;
-    const col = isSel ? SELCOL : '#fff';
-    g.beginPath(); g.arc(X, Y, isSel ? 11 : 8, 0, 6.2832);
-    g.lineWidth = isSel ? 3.5 : 2; g.strokeStyle = col; g.stroke();
-    const L = isSel ? ROT_R * S : 14;
+    const fc = FNCOL[n.fn] || '#bbb', ring = RINGFN.has(n.fn);
+    // facing line first, so the marker sits on top of it
+    const L = isSel ? ROT_R * S : (ring ? 13 : 16);
     g.beginPath(); g.moveTo(X, Y); g.lineTo(X + Math.sin(a) * L, Y - Math.cos(a) * L);
-    g.lineWidth = isSel ? 3 : 2; g.stroke();
+    g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = isSel ? 6 : 4; g.stroke();
+    g.strokeStyle = isSel ? SELCOL : fc; g.lineWidth = isSel ? 3 : 2; g.stroke();
+    if(ring){
+      // townsfolk (ambient) and unknown rows: a ring, as they always were
+      g.beginPath(); g.arc(X, Y, 7, 0, 6.2832);
+      g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,.6)'; g.stroke();
+      g.setLineDash(n.fn === 'unknown' ? [4, 3] : []);
+      g.lineWidth = 2; g.strokeStyle = fc; g.stroke(); g.setLineDash([]);
+    } else {
+      // a function NPC: a filled diamond in its function's colour
+      const r = 10;
+      g.beginPath(); g.moveTo(X, Y - r); g.lineTo(X + r, Y); g.lineTo(X, Y + r); g.lineTo(X - r, Y); g.closePath();
+      g.fillStyle = fc; g.fill(); g.lineWidth = 2.5; g.strokeStyle = 'rgba(0,0,0,.85)'; g.stroke();
+    }
     if(isSel){
+      g.beginPath(); g.arc(X, Y, 15, 0, 6.2832);
+      g.lineWidth = 6; g.strokeStyle = 'rgba(0,0,0,.75)'; g.stroke();
+      g.lineWidth = 3; g.strokeStyle = SELCOL; g.stroke();
       g.beginPath(); g.arc(X + Math.sin(a) * L, Y - Math.cos(a) * L, 7, 0, 6.2832);
       g.fillStyle = SELCOL; g.fill(); g.lineWidth = 2; g.strokeStyle = '#000'; g.stroke();
-      tag(g, n.name, X + 16, Y + 18, SELCOL);
+      tag(g, pretty(n.name), X + 20, Y + 20, SELCOL);
     }
   });
   // every arrival, only if asked for -- normally just the selected door's
@@ -1159,6 +1435,7 @@ function hit(px, py){
     // often the wrong person
     let i = -1, bd = ZR(3);
     (h.npcs || []).forEach((n, k) => {
+      if(HIDEFN.has(n.fn) && n.idx !== SELN) return;
       const [a, b] = w2p(h, n.x, n.z), d = Math.hypot(a - px, b - py);
       if(d <= bd){ bd = d; i = k; }
     });
@@ -1169,6 +1446,15 @@ function hit(px, py){
     for(const d of (h.gates || [])){
       const [a, b] = w2p(h, d.x, d.z); const dd = Math.hypot(a - px, b - py);
       if(dd < bd){ bd = dd; best = {kind: 'door', portal: d.portal}; }
+    }
+    if(best) return best;
+  }
+  if(q('#shGhost').checked){
+    let best = null, bd = ZR(3);
+    for(const gh of (h.ghosts || [])){
+      if(HIDEFN.has(gh.fn)) continue;
+      const [a, b] = ghostPix(h, gh), dd = Math.hypot(a - px, b - py);
+      if(dd <= bd){ bd = dd; best = {kind: 'ghost', name: gh.name}; }
     }
     if(best) return best;
   }
@@ -1261,13 +1547,29 @@ window.addEventListener('mouseup', e => {
     send(`!mapcal here ${p.px.toFixed(1)}:${p.py.toFixed(1)}`);
     return;
   }
+  if(p.kind === 'ghost'){
+    // a missing shopkeeper's painted spot: the placer opens there, with
+    // that role chosen -- or, with no floor near the icon, the role is armed
+    // for a click on the floor
+    const gh = (h.ghosts || []).find(o => o.name === p.name);
+    SELN = null; SELP = null;
+    if(!gh) return;
+    if(gh.y == null){
+      ARMED = gh.name; PICK = null; PICKNAME = null; q('#placer').hidden = true;
+      const m = q('#editmsg'); m.hidden = false; m.className = 'editmsg bad';
+      m.textContent = `${pretty(gh.name)}'s icon has no floor near it. Click the floor where they should stand.`;
+      drawMap(MAPST); return;
+    }
+    openPlacer(h, gh.x, gh.z, ...w2p(h, gh.x, gh.z), gh.name);
+    return;
+  }
   if(p.kind === 'door' || p.kind === 'arr'){
-    SELP = p.portal; SELN = null; q('#placer').hidden = true; PICK = null;
+    SELP = p.portal; SELN = null; q('#placer').hidden = true; PICK = null; PICKNAME = null;
     drawMap(MAPST); return;
   }
   if(p.kind === 'npc' || p.kind === 'rot'){
     SELN = h.npcs[p.i] ? h.npcs[p.i].idx : p.idx; SELP = null;
-    q('#placer').hidden = true; PICK = null; drawMap(MAPST); return;
+    q('#placer').hidden = true; PICK = null; PICKNAME = null; drawMap(MAPST); return;
   }
   // empty map: offer to place something here -- any half, no session needed;
   // the server takes the height from the floor and refuses a spot with none
@@ -1280,12 +1582,28 @@ window.addEventListener('mouseup', e => {
     const m = q('#editmsg'); m.hidden = false; m.className = 'editmsg bad';
     m.textContent = `No floor at ${wx0.toFixed(1)}, ${wz0.toFixed(1)} - nothing to stand on `
       + 'there in the game. The blue tint shows where there is.';
-    q('#placer').hidden = true; PICK = null; drawMap(MAPST); return;
+    q('#placer').hidden = true; PICK = null; PICKNAME = null; drawMap(MAPST); return;
   }
   const [x, z] = p2w(h, p.px, p.py);
-  PICK = [x, z]; SELP = null;
-  q('#placeat').textContent = `place at ${x.toFixed(0)}, ${z.toFixed(0)} (${gridOf(p.px, p.py)})`;
-  const miss = (h.missing || MAPST.missing || []).map(m => m.name);
+  if(ARMED){
+    // a missing role picked from the list: one click puts it here
+    const role = ARMED; ARMED = null; PENDSEL = role;
+    edit({op:'place', area: h.area, x: +x.toFixed(1), z: +z.toFixed(1), role,
+          yaw: +q('#placeyaw').value});
+    q('#placer').hidden = true; PICK = null; PICKNAME = null; drawMap(MAPST); return;
+  }
+  openPlacer(h, x, z, p.px, p.py, null);
+});
+function openPlacer(h, x, z, ppx, ppy, want){
+  const p = {px: ppx, py: ppy};
+  PICK = [x, z]; PICKNAME = want; SELP = null; SELN = null;
+  q('#placeat').textContent = (want ? `place ${pretty(want)} on its icon at ` : 'place at ')
+    + `${x.toFixed(0)}, ${z.toFixed(0)} (${gridOf(p.px, p.py)})`;
+  const missr = h.missing || MAPST.missing || [];
+  const miss = missr.map(m => m.name);
+  const fnOf = n => { const r = missr.find(m => m.name === n) || (h.npcs || []).find(m => m.name === n)
+                      || (h.townsfolk || []).find(m => m.name === n);
+                      return r && r.fn ? ' · ' + fnLabel(r.fn) : ''; };
   const done = (h.npcs || []).map(n => n.name).filter(n => !miss.includes(n));
   let best = '', bd = 7;
   for(const i of (h.icons || [])) if(i.role){
@@ -1295,15 +1613,16 @@ window.addEventListener('mouseup', e => {
   const tfl = (h.townsfolk || []).filter(t => !t.placed).map(t => t.name);
   q('#placerole').innerHTML =
     `<optgroup label="Shops and staff">`
-    + miss.map(n => `<option value="${n}">${n}</option>`).join('')
-    + done.map(n => `<option value="${n}">${n} (already placed)</option>`).join('')
+    + miss.map(n => `<option value="${esc(n)}">${esc(pretty(n))}${fnOf(n)}</option>`).join('')
+    + done.map(n => `<option value="${esc(n)}">${esc(pretty(n))}${fnOf(n)} (already placed)</option>`).join('')
     + `</optgroup>`
     + (tfl.length ? `<optgroup label="Townsfolk of ${h.district || 'this half'}">`
-       + tfl.map(n => `<option value="${n}">${n}</option>`).join('') + `</optgroup>` : '');
+       + tfl.map(n => `<option value="${esc(n)}">${esc(pretty(n))}${fnOf(n)}</option>`).join('') + `</optgroup>` : '');
   if(best) q('#placerole').value = best;
+  if(want) q('#placerole').value = want;
   q('#placer').hidden = false;
   drawMap(MAPST);
-});
+}
 q('#mapcv').addEventListener('wheel', e => {
   if(!MAPST) return;
   e.preventDefault();
@@ -1326,7 +1645,36 @@ q('#zfit').addEventListener('click', () => { VZ = 1; VX0 = VY0 = 0; clampView();
 // ARROWS nudge the selected NPC half a world unit (Shift: 2), Q / E turn it 15
 // degrees -- for the last bit of precision a mouse cannot give
 window.addEventListener('keydown', e => {
+  if(e.key === 'Escape'){
+    // Esc: leave the search box, then drop arming, the placer and the selection
+    if(e.target.closest('input,select,textarea')){ e.target.blur(); return; }
+    if(ARMED || PICK || SELN !== null || SELP !== null){
+      ARMED = null; PICK = null; SELN = null; SELP = null; q('#placer').hidden = true;
+      if(MAPST) drawMap(MAPST);
+    }
+    return;
+  }
   if(!MAPST || e.target.closest('input,select,textarea')) return;
+  if(e.key === '/'){ e.preventDefault(); q('#psearch').focus(); return; }
+  if((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')){
+    e.preventDefault(); undo(); return;
+  }
+  if(e.ctrlKey || e.metaKey || e.altKey) return;
+  // 1-5: the capitals, in the picker's order; H: the other half
+  if(/^[1-5]$/.test(e.key)){
+    const b = document.querySelectorAll('#capbtns button[data-cap]')[+e.key - 1];
+    if(b){ e.preventDefault(); b.click(); }
+    return;
+  }
+  if(e.key === 'h' || e.key === 'H'){
+    const hs = halves(MAPST);
+    if(hs.length > 1){
+      e.preventDefault();
+      const b = q(`#halftabs button[data-half="${(HALF + 1) % hs.length}"]`);
+      if(b) b.click();
+    }
+    return;
+  }
   const n = selNpc(), h = cur();
   if(!n || !h) return;
   const step = e.shiftKey ? 2 : 0.5;
@@ -1360,10 +1708,15 @@ q('#mapcv').addEventListener('mousemove', e => {
   if(here.length === 1) what = `  door #${here[0].portal} → ${here[0].dest_name} #${here[0].dest}`;
   else if(here.length > 1) what = `  doors ${here.map(d => '#' + d.portal).join(' ')} - pick one from the list`;
   else {
-    const nn = (h.npcs || []).find(n => { const [a, b] = w2p(h, n.x, n.z);
-                                          return Math.hypot(a - px, b - py) <= 3; });
-    if(nn) what = `  ${nn.name} · facing ${compass(nn.yaw)}`;
-    else for(const i of (h.icons || [])) if(i.role && Math.hypot(i.px - px, i.py - py) < 6){ what = '  ' + i.role; break; }
+    const nn = (h.npcs || []).find(n => { if(HIDEFN.has(n.fn)) return false;
+                                          const [a, b] = w2p(h, n.x, n.z);
+                                          return Math.hypot(a - px, b - py) <= ZR(3); });
+    if(nn) what = `  ${pretty(nn.name)} (${fnLabel(nn.fn)}) · facing ${compass(nn.yaw)}`;
+    else {
+      const t0 = hit(px, py);
+      if(t0 && t0.kind === 'ghost') what = `  ${pretty(t0.name)} is missing: click to place on its icon`;
+      else for(const i of (h.icons || [])) if(i.role && Math.hypot(i.px - px, i.py - py) < 6){ what = '  ' + i.role; break; }
+    }
   }
   const t = hit(px, py);
   q('#mapcv').style.cursor = t ? (t.kind === 'door' ? 'pointer' : 'grab') : (CAL ? 'crosshair' : 'cell');
@@ -1371,10 +1724,61 @@ q('#mapcv').addEventListener('mousemove', e => {
 });
 q('#mapcv').addEventListener('mouseleave', () => { if(!PRESS) q('#mapread').textContent = ' - '; });
 
-for(const id of ['shIcons','shNpcs','shGates','shArr','shYou','shBoth','shFloor'])
-  q('#' + id).addEventListener('change', () => MAPST && drawMap(MAPST));
+for(const id of ['shIcons','shNpcs','shGhost','shGates','shArr','shYou','shBoth','shFloor']){
+  if(typeof PREFS.layers[id] === 'boolean') q('#' + id).checked = PREFS.layers[id];
+  q('#' + id).addEventListener('change', e => {
+    PREFS.layers[id] = e.target.checked; savePrefs();
+    if(MAPST) drawMap(MAPST);
+  });
+}
+// the capital buttons drive the (hidden) select, so there is one code path
+q('#undobtn').addEventListener('click', undo);
+q('#capbtns').addEventListener('click', e => {
+  const b = e.target.closest('button[data-cap]'); if(!b) return;
+  const sel = q('#capsel');
+  if(sel.value === b.dataset.cap && FOCUS === b.dataset.cap) return;
+  sel.value = b.dataset.cap; sel.dispatchEvent(new Event('change'));
+});
+q('#fnkey').addEventListener('click', e => {
+  const b = e.target.closest('button[data-fn]'); if(!b) return;
+  const k = b.dataset.fn;
+  if(HIDEFN.has(k)) HIDEFN.delete(k); else HIDEFN.add(k);
+  savePrefs();
+  if(MAPST) drawMap(MAPST);
+});
+q('#psearch').addEventListener('input', e => { PFILTER = e.target.value; if(MAPST) drawMap(MAPST); });
+q('#psearch').addEventListener('keydown', e => {
+  // Enter picks the first match: a placed NPC is selected, a missing role armed
+  if(e.key !== 'Enter') return;
+  const b = q('#pscroll button'); if(b){ e.preventDefault(); b.click(); }
+});
+function centreOn(h, o){
+  // zoomed in: bring the chosen NPC into view; at 1x everything already is
+  if(VZ <= 1 || !h || !o) return;
+  const [px, py] = w2p(h, o.x, o.z), span = ART / VZ;
+  if(px < VX0 || px > VX0 + span || py < VY0 || py > VY0 + span){
+    VX0 = px - span / 2; VY0 = py - span / 2; clampView();
+  }
+}
+q('#mapcard').addEventListener('click', e => {
+  const t = e.target.closest('[data-sel],[data-arm],[data-disarm]');
+  if(!t) return;
+  const h = cur();
+  if(t.dataset.sel !== undefined){
+    SELN = +t.dataset.sel; SELP = null; ARMED = null;
+    centreOn(h, selNpc());
+  } else if(t.dataset.arm !== undefined){
+    ARMED = (ARMED === t.dataset.arm) ? null : t.dataset.arm;
+    SELN = null; SELP = null;
+  } else {
+    ARMED = null;
+  }
+  q('#placer').hidden = true; PICK = null; PICKNAME = null;
+  if(MAPST) drawMap(MAPST);
+});
 q('#capsel').addEventListener('change', e => {
-  FOCUS = e.target.value; HALF = 0; SELP = null; SELN = null;
+  FOCUS = e.target.value; HALF = 0; SELP = null; SELN = null; ARMED = null;
+  WANTAREA = PREFS.halfOf[FOCUS] != null ? +PREFS.halfOf[FOCUS] : null;
   try{ localStorage.setItem('fe-focus', FOCUS); }catch(err){}
   q('#mapimg').dataset.name = '';
   tick();
@@ -1428,7 +1832,7 @@ document.addEventListener('click', e => {
   edit(JSON.parse(b.dataset.edit));
 });
 q('#calMode').addEventListener('change', e => {
-  CAL = e.target.checked; q('#placer').hidden = true; PICK = null;
+  CAL = e.target.checked; q('#placer').hidden = true; PICK = null; PICKNAME = null;
   if(MAPST) drawMap(MAPST);
 });
 q('#mapcard').addEventListener('click', e => {
@@ -1437,11 +1841,14 @@ q('#mapcard').addEventListener('click', e => {
   if(t.dataset.gotoHalf !== undefined){
     HALF = +t.dataset.gotoHalf; SELP = +t.dataset.gotoPortal;
   } else if(t.dataset.half !== undefined){
-    HALF = +t.dataset.half; SELP = null;
+    HALF = +t.dataset.half; SELP = null; SELN = null; ARMED = null;
+    const hh = cur();
+    if(hh){ PREFS.halfOf[q('#capsel').value] = hh.area; savePrefs(); }
   } else {
-    const p = +t.dataset.portal; SELP = (SELP === p ? null : p);
+    const p = +t.dataset.portal; SELP = (SELP === p ? null : p); SELN = null;
+    if(SELP !== null) centreOn(cur(), selGate());
   }
-  q('#placer').hidden = true; PICK = null;
+  q('#placer').hidden = true; PICK = null; PICKNAME = null;
   if(MAPST) drawMap(MAPST);
 });
 q('#placego').addEventListener('click', () => {
@@ -1449,15 +1856,16 @@ q('#placego').addEventListener('click', () => {
   const role = q('#placerole').value, yaw = +q('#placeyaw').value;
   edit({op:'place', area: cur().area, x: +PICK[0].toFixed(1), z: +PICK[1].toFixed(1),
         role, yaw});
-  q('#placer').hidden = true; PICK = null;
+  PENDSEL = role;        // select it once the server has it
+  q('#placer').hidden = true; PICK = null; PICKNAME = null;
 });
 q('#spawnhere').addEventListener('click', () => {
   if(!PICK) return;
   edit({op:'spawn', area: cur().area, x: +PICK[0].toFixed(1), z: +PICK[1].toFixed(1)});
-  q('#placer').hidden = true; PICK = null;
+  q('#placer').hidden = true; PICK = null; PICKNAME = null;
 });
 q('#placecancel').addEventListener('click', () => {
-  q('#placer').hidden = true; PICK = null;
+  q('#placer').hidden = true; PICK = null; PICKNAME = null;
 });
 
 async function tick(){
